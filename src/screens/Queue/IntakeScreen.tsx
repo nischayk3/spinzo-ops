@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { View, Text, FlatList, SafeAreaView, ActivityIndicator } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Clock } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { filterIntakeOrders, FeedOrder } from '../../utils/orderFeed';
@@ -20,7 +21,7 @@ const slotLabel = (o: FeedOrder): string => {
   const p = o.pickupDetails;
   if (!p) return '—';
   if (p.isInstant) return 'Instant pickup';
-  return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || 'Scheduled';
+  return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || '—';
 };
 
 const serviceSummary = (o: FeedOrder): string =>
