@@ -95,6 +95,23 @@ describe('timeAgo', () => {
   it('formats recent minutes', () => {
     expect(timeAgo(new Date(Date.now() - 30 * 1000))).toBe('Just now');
   });
+
+  it('formats minutes ago', () => {
+    expect(timeAgo(new Date(Date.now() - 5 * 60000))).toBe('5m ago');
+  });
+
+  it('formats hours ago', () => {
+    expect(timeAgo(new Date(Date.now() - 2 * 3600 * 1000))).toBe('2h ago');
+  });
+
+  it('uses toDate() for Timestamp-like objects', () => {
+    const ts = {
+      seconds: Math.floor(Date.now() / 1000 - 120),
+      nanoseconds: 0,
+      toDate: () => new Date(Date.now() - 120000),
+    };
+    expect(timeAgo(ts)).toBe('2m ago');
+  });
 });
 
 describe('serviceSummary', () => {
