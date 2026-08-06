@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuthStore } from '../store/authStore';
@@ -69,16 +69,13 @@ const AppTabs = () => {
 };
 
 export function RootNavigator() {
-  const { isLoggedIn, activeRole, initializeAuth } = useAuthStore();
-  const [isReady, setIsReady] = useState(false);
+  const { isLoggedIn, activeRole, authInitialized, initializeAuth } = useAuthStore();
 
   useEffect(() => {
     initializeAuth();
-    const timer = setTimeout(() => setIsReady(true), 500);
-    return () => clearTimeout(timer);
   }, [initializeAuth]);
 
-  if (!isReady) {
+  if (!authInitialized) {
     return (
       <View style={{ flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center' }}>
         <ActivityIndicator size="large" color="#3B82F6" />

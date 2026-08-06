@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { ShiftRole, UserProfile } from '../types';
+import { OpsStaffRoster, resolveRoleFromRoster } from '../utils/opsRole';
 import { Platform } from 'react-native';
 import { auth, db } from '../config/firebase';
 import { 
@@ -45,7 +46,8 @@ interface AuthState {
   currentStoreId: string | null;
   isLoading: boolean;
   error: string | null;
-  
+  authInitialized: boolean;
+
   confirmationResult: ConfirmationResult | null;
 
   initializeAuth: () => void;
@@ -56,6 +58,17 @@ interface AuthState {
   logout: () => Promise<void>;
 }
 
+const fetchRosterRole = async (phone: string): Promise<ShiftRole | null> => {
+  try {
+    const snap = await getDoc(doc(db, 'config', 'opsStaff'));
+    if (!snap.exists()) return null;
+    return resolveRoleFromRoster(phone, snap.data() as OpsStaffRoster);
+  } catch (err) {
+    console.error('[auth] roster lookup failed:', err);
+    return null;
+  }
+};
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   isLoggedIn: false,
@@ -63,28 +76,31 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   currentStoreId: null,
   isLoading: false,
   error: null,
+  authInitialized: false,
   confirmationResult: null,
 
   initializeAuth: () => {
     onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        // Hydrate user profile from Firestore if needed
-        // For now, we will trust the auth user and set logged in
+        const phone = firebaseUser.phoneNumber || '';
+        const role = await fetchRosterRole(phone);
         set({
           user: {
             id: firebaseUser.uid,
-            phone: firebaseUser.phoneNumber || '',
+            phone,
             name: 'Admin User',
-            role: 'helper-a',
+            role: role || 'helper',
             isActive: true,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           },
           isLoggedIn: true,
-          error: null
+          activeRole: role,
+          authInitialized: true,
+          error: null,
         });
       } else {
-        set({ user: null, isLoggedIn: false });
+        set({ user: null, isLoggedIn: false, activeRole: null, authInitialized: true });
       }
     });
   },
@@ -121,18 +137,20 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const result = await confirmationResult.confirm(otp);
       const user = result.user;
-      
+      const role = await fetchRosterRole(user.phoneNumber || '');
+
       set({
         user: {
           id: user.uid,
           phone: user.phoneNumber || '',
           name: 'Admin User', // Placeholder
-          role: 'helper-a',
+          role: role || 'helper',
           isActive: true,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         },
         isLoggedIn: true,
+        activeRole: role,
         isLoading: false,
         confirmationResult: null, // clear
       });
