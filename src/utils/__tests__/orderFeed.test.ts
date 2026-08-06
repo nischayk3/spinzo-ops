@@ -6,6 +6,9 @@ import {
   filterIntakeOrders,
   filterActiveOrders,
   sortNewestFirst,
+  timeAgo,
+  serviceSummary,
+  slotLabel,
   FeedOrder,
 } from '../orderFeed';
 
@@ -80,5 +83,35 @@ describe('orderFeed', () => {
       makeOrder({ id: 'missing', createdAt: undefined }),
     ];
     expect(sortNewestFirst(orders).map(o => o.id)).toEqual(['new', 'old', 'missing']);
+  });
+});
+
+describe('timeAgo', () => {
+  it('returns "" for missing or unparseable timestamps', () => {
+    expect(timeAgo(undefined)).toBe('');
+    expect(timeAgo('not-a-date')).toBe('');
+  });
+
+  it('formats recent minutes', () => {
+    expect(timeAgo(new Date(Date.now() - 30 * 1000))).toBe('Just now');
+  });
+});
+
+describe('serviceSummary', () => {
+  it('joins service names or types, falling back to Unknown', () => {
+    const o: FeedOrder = { id: '1', userId: 'u1', status: 'placed', items: [
+      { serviceName: 'Wash & Fold' },
+      { serviceType: 'ironing' },
+    ] };
+    expect(serviceSummary(o)).toBe('Wash & Fold, ironing');
+    expect(serviceSummary({ id: '2', userId: 'u2', status: 'placed', items: [] })).toBe('Unknown');
+  });
+});
+
+describe('slotLabel', () => {
+  it('labels instant, scheduled, and missing pickup', () => {
+    expect(slotLabel({ id: '1', userId: 'u1', status: 'placed', pickupDetails: { isInstant: true } })).toBe('Instant pickup');
+    expect(slotLabel({ id: '2', userId: 'u2', status: 'placed', pickupDetails: { scheduledDate: '2026-08-07', scheduledTime: '10:00 - 11:00' } })).toBe('2026-08-07 10:00 - 11:00');
+    expect(slotLabel({ id: '3', userId: 'u3', status: 'placed' })).toBe('—');
   });
 });

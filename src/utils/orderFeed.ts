@@ -57,3 +57,26 @@ export function sortNewestFirst(orders: FeedOrder[]): FeedOrder[] {
   };
   return [...orders].sort((a, b) => getMs(b.createdAt) - getMs(a.createdAt));
 }
+
+export const timeAgo = (v: any): string => {
+  if (!v) return '';
+  let ms: number;
+  if (typeof v.toDate === 'function') ms = v.toDate().getTime();
+  else if (typeof v.seconds === 'number') ms = v.seconds * 1000;
+  else ms = new Date(v).getTime();
+  if (Number.isNaN(ms)) return '';
+  const mins = Math.floor((Date.now() - ms) / 60000);
+  if (mins < 1) return 'Just now';
+  if (mins < 60) return `${mins}m ago`;
+  return `${Math.floor(mins / 60)}h ago`;
+};
+
+export const serviceSummary = (o: FeedOrder): string =>
+  (o.items || []).map(i => i.serviceName || i.serviceType).filter(Boolean).join(', ') || 'Unknown';
+
+export const slotLabel = (o: FeedOrder): string => {
+  const p = o.pickupDetails;
+  if (!p) return '—';
+  if (p.isInstant) return 'Instant pickup';
+  return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || '—';
+};

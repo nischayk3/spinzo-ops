@@ -3,29 +3,12 @@ import { View, Text, FlatList, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Clock } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { filterIntakeOrders, FeedOrder } from '../../utils/orderFeed';
-
-const timeAgo = (v: any): string => {
-  if (!v) return '';
-  let ms: number;
-  if (typeof v.toDate === 'function') ms = v.toDate().getTime();
-  else if (typeof v.seconds === 'number') ms = v.seconds * 1000;
-  else ms = new Date(v).getTime();
-  const mins = Math.floor((Date.now() - ms) / 60000);
-  if (mins < 1) return 'Just now';
-  if (mins < 60) return `${mins}m ago`;
-  return `${Math.floor(mins / 60)}h ago`;
-};
-
-const slotLabel = (o: FeedOrder): string => {
-  const p = o.pickupDetails;
-  if (!p) return '—';
-  if (p.isInstant) return 'Instant pickup';
-  return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || '—';
-};
-
-const serviceSummary = (o: FeedOrder): string =>
-  (o.items || []).map(i => i.serviceName || i.serviceType).filter(Boolean).join(', ') || 'Unknown';
+import {
+  filterIntakeOrders,
+  timeAgo,
+  serviceSummary,
+  slotLabel,
+} from '../../utils/orderFeed';
 
 export function IntakeScreen() {
   const { orders, isLoading, initialize } = useOrderFeedStore();
