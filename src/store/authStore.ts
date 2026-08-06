@@ -58,6 +58,11 @@ interface AuthState {
   logout: () => Promise<void>;
 }
 
+// activeRole is the authoritative role; user.role only satisfies the non-nullable UserProfile field.
+const FALLBACK_ROLE: ShiftRole = 'helper';
+
+// A transient read failure returns null, indistinguishable from "not in the roster";
+// the caller routes null to the NotInRoster gate. Acceptable for Phase 1 (read-only).
 const fetchRosterRole = async (phone: string): Promise<ShiftRole | null> => {
   try {
     const snap = await getDoc(doc(db, 'config', 'opsStaff'));
@@ -68,6 +73,19 @@ const fetchRosterRole = async (phone: string): Promise<ShiftRole | null> => {
     return null;
   }
 };
+
+const buildUserProfile = (uid: string, phone: string, role: ShiftRole | null): UserProfile => ({
+  id: uid,
+  phone,
+  name: 'Admin User',
+  role: role || FALLBACK_ROLE,
+  isActive: true,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+});
+
+// Holds the onAuthStateChanged unsubscribe so a remount doesn't accumulate listeners.
+let unsubAuth: (() => void) | null = null;
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
@@ -80,23 +98,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   confirmationResult: null,
 
   initializeAuth: () => {
-    onAuthStateChanged(auth, async (firebaseUser) => {
+    unsubAuth?.();
+    unsubAuth = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         const phone = firebaseUser.phoneNumber || '';
+        set({ authInitialized: true });
         const role = await fetchRosterRole(phone);
         set({
-          user: {
-            id: firebaseUser.uid,
-            phone,
-            name: 'Admin User',
-            role: role || 'helper',
-            isActive: true,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          },
+          user: buildUserProfile(firebaseUser.uid, phone, role),
           isLoggedIn: true,
           activeRole: role,
-          authInitialized: true,
           error: null,
         });
       } else {
@@ -140,15 +151,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const role = await fetchRosterRole(user.phoneNumber || '');
 
       set({
-        user: {
-          id: user.uid,
-          phone: user.phoneNumber || '',
-          name: 'Admin User', // Placeholder
-          role: role || 'helper',
-          isActive: true,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
+        user: buildUserProfile(user.uid, user.phoneNumber || '', role),
         isLoggedIn: true,
         activeRole: role,
         isLoading: false,
