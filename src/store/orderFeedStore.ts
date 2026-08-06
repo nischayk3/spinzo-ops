@@ -1,0 +1,72 @@
+import { create } from 'zustand';
+import {
+  collectionGroup,
+  onSnapshot,
+  query,
+  QueryDocumentSnapshot,
+} from 'firebase/firestore';
+import { db } from '../config/firebase';
+import { FeedOrder, sortNewestFirst } from '../utils/orderFeed';
+
+interface OrderFeedState {
+  orders: FeedOrder[];
+  isLoading: boolean;
+  error: string | null;
+  initialize: () => void;
+  reset: () => void;
+}
+
+const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
+  const data = d.data() as any;
+  const userId = data.userId || (d.ref.parent?.parent as any)?.id || '';
+  return {
+    id: d.id,
+    userId,
+    vendorId: data.vendorId,
+    status: data.status,
+    customerName: data.customerName || data.userName,
+    customerPhone: data.customerPhone || data.userPhone,
+    pickupDetails: data.pickupDetails || data.pickup,
+    items: data.items || [],
+    tokenNumber: data.tokenNumber,
+    pickupOTP: data.pickupOTP,
+    address: data.address,
+    createdAt: data.createdAt,
+  };
+};
+
+let unsubscribe: (() => void) | null = null;
+
+export const useOrderFeedStore = create<OrderFeedState>((set, get) => ({
+  orders: [],
+  isLoading: false,
+  error: null,
+
+  initialize: () => {
+    if (unsubscribe) unsubscribe();
+
+    set({ isLoading: true, error: null });
+    const q = query(collectionGroup(db, 'orders'));
+
+    unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const map = new Map<string, FeedOrder>();
+        snapshot.forEach((d) => map.set(d.id, orderFromDoc(d)));
+        set({ orders: sortNewestFirst(Array.from(map.values())), isLoading: false });
+      },
+      (err) => {
+        console.error('[orderFeed] snapshot error:', err);
+        set({ isLoading: false, error: String(err) });
+      },
+    );
+  },
+
+  reset: () => {
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+    set({ orders: [], isLoading: false, error: null });
+  },
+}));
