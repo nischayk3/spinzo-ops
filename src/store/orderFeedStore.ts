@@ -18,6 +18,7 @@ interface OrderFeedState {
 
 const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
   const data = d.data() as any;
+  // For vendor-mirror docs the path parent is the vendor id, so this fallback is best-effort.
   const userId = data.userId || (d.ref.parent?.parent as any)?.id || '';
   return {
     id: d.id,
@@ -37,7 +38,7 @@ const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
 
 let unsubscribe: (() => void) | null = null;
 
-export const useOrderFeedStore = create<OrderFeedState>((set, get) => ({
+export const useOrderFeedStore = create<OrderFeedState>((set) => ({
   orders: [],
   isLoading: false,
   error: null,
@@ -48,18 +49,21 @@ export const useOrderFeedStore = create<OrderFeedState>((set, get) => ({
     set({ isLoading: true, error: null });
     const q = query(collectionGroup(db, 'orders'));
 
-    unsubscribe = onSnapshot(
+    const unsub = onSnapshot(
       q,
       (snapshot) => {
+        if (unsubscribe !== unsub) return;
         const map = new Map<string, FeedOrder>();
         snapshot.forEach((d) => map.set(d.id, orderFromDoc(d)));
         set({ orders: sortNewestFirst(Array.from(map.values())), isLoading: false });
       },
       (err) => {
+        if (unsubscribe !== unsub) return;
         console.error('[orderFeed] snapshot error:', err);
         set({ isLoading: false, error: String(err) });
       },
     );
+    unsubscribe = unsub;
   },
 
   reset: () => {
