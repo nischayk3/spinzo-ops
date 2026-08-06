@@ -63,4 +63,22 @@ describe('orderFeed', () => {
     ];
     expect(sortNewestFirst(orders).map(o => o.id)).toEqual(['new', 'mid', 'old']);
   });
+
+  it('sortNewestFirst handles .seconds-only timestamps (no toDate)', () => {
+    const orders = [
+      makeOrder({ id: 'old', createdAt: { seconds: 1000 } }),
+      makeOrder({ id: 'new', createdAt: { seconds: 3000 } }),
+      makeOrder({ id: 'mid', createdAt: { seconds: 2000 } }),
+    ];
+    expect(sortNewestFirst(orders).map(o => o.id)).toEqual(['new', 'mid', 'old']);
+  });
+
+  it('sortNewestFirst sorts Date/string timestamps and defers missing createdAt', () => {
+    const orders = [
+      makeOrder({ id: 'old', createdAt: new Date('2026-01-01T00:00:00Z') }),
+      makeOrder({ id: 'new', createdAt: '2026-02-01T00:00:00Z' }),
+      makeOrder({ id: 'missing', createdAt: undefined }),
+    ];
+    expect(sortNewestFirst(orders).map(o => o.id)).toEqual(['new', 'old', 'missing']);
+  });
 });
