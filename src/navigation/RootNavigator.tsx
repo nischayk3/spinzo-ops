@@ -3,22 +3,26 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuthStore } from '../store/authStore';
 import { LoginScreen } from '../screens/Auth/LoginScreen';
-import { SelectRoleScreen } from '../screens/Auth/SelectRoleScreen';
-import { AttendanceScreen } from '../screens/Attendance/AttendanceScreen';
-import { QueueScreen } from '../screens/Queue/QueueScreen';
-import { Home, ClipboardList, Wallet, Settings } from 'lucide-react-native';
+import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
+import { IntakeScreen } from '../screens/Queue/IntakeScreen';
+import { FloorBoardScreen } from '../screens/Queue/FloorBoardScreen';
+import { Home, ClipboardList, Settings } from 'lucide-react-native';
 import { View, Text, ActivityIndicator } from 'react-native';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
-// Placeholder for screens we haven't built yet
 const Placeholder = ({ name }: { name: string }) => (
   <View className="flex-1 items-center justify-center bg-bgDark">
     <Text className="text-xl font-bold text-textPrimary">{name}</Text>
-    <Text className="text-textSecondary mt-2">Coming soon...</Text>
+    <Text className="text-textSecondary mt-2">Coming soon…</Text>
   </View>
 );
+
+export type RootStackParamList = {
+  Auth: undefined;
+  Main: undefined;
+};
 
 const AppTabs = () => {
   const activeRole = useAuthStore(state => state.activeRole);
@@ -38,38 +42,30 @@ const AppTabs = () => {
         tabBarInactiveTintColor: '#64748B',
       }}
     >
-      <Tab.Screen 
-        name="Home" 
+      <Tab.Screen
+        name="Intake"
         options={{ tabBarIcon: ({ color }) => <Home color={color} size={24} /> }}
       >
-        {() => <AttendanceScreen />}
+        {() => <IntakeScreen />}
       </Tab.Screen>
-      <Tab.Screen 
-        name="Queue" 
-        options={{ tabBarIcon: ({ color }) => <ClipboardList color={color} size={24} /> }}
-      >
-        {() => <QueueScreen />}
-      </Tab.Screen>
-      <Tab.Screen 
-        name="Payout" 
-        options={{ tabBarIcon: ({ color }) => <Wallet color={color} size={24} /> }}
-      >
-        {() => <Placeholder name={`${activeRole} Payout`} />}
-      </Tab.Screen>
-      <Tab.Screen 
-        name="Settings" 
+
+      {activeRole === 'supervisor' && (
+        <Tab.Screen
+          name="FloorBoard"
+          options={{ tabBarIcon: ({ color }) => <ClipboardList color={color} size={24} /> }}
+        >
+          {() => <FloorBoardScreen />}
+        </Tab.Screen>
+      )}
+
+      <Tab.Screen
+        name="Settings"
         options={{ tabBarIcon: ({ color }) => <Settings color={color} size={24} /> }}
       >
-        {() => <Placeholder name={`${activeRole} Settings`} />}
+        {() => <Placeholder name="Settings" />}
       </Tab.Screen>
     </Tab.Navigator>
   );
-};
-
-export type RootStackParamList = {
-  Auth: undefined;
-  Main: undefined;
-  OrderDetail: { orderId: string };
 };
 
 export function RootNavigator() {
@@ -78,7 +74,6 @@ export function RootNavigator() {
 
   useEffect(() => {
     initializeAuth();
-    // Give auth a moment to initialize
     const timer = setTimeout(() => setIsReady(true), 500);
     return () => clearTimeout(timer);
   }, [initializeAuth]);
@@ -96,16 +91,9 @@ export function RootNavigator() {
       {!isLoggedIn ? (
         <Stack.Screen name="Login" component={LoginScreen} />
       ) : !activeRole ? (
-        <Stack.Screen name="SelectRole" component={SelectRoleScreen} />
+        <Stack.Screen name="NotInRoster" component={NotInRosterScreen} />
       ) : (
-        <>
-          <Stack.Screen name="Main" component={AppTabs} />
-          <Stack.Screen 
-            name="OrderDetail" 
-            component={require('../screens/Queue/OrderDetailScreen').OrderDetailScreen} 
-            options={{ presentation: 'modal' }}
-          />
-        </>
+        <Stack.Screen name="Main" component={AppTabs} />
       )}
     </Stack.Navigator>
   );
