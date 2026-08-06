@@ -3,6 +3,7 @@
 **Date:** 2026-08-06
 **Status:** Design approved (foundation + phase plan). Building incrementally, one phase at a time.
 **Companion codebases:**
+
 - Production customer/admin app: `/Users/nischaykumar/Desktop/Developer/Livfresh.nosync` (Firebase project `spin-it-a135a`)
 - Ops app (boilerplate): `/Users/nischaykumar/Desktop/Developer/spinzo-ops.nosync`
 
@@ -27,12 +28,6 @@ We are building the store-operations system ("SpinZo Ops") on top of the existin
   - `deliveryOTP` is **not** copied; kept ops-side only.
 - Everything else (per-step timestamps/durations, assignments, garment counts, tags, proof media) lives **ops-side** under `ops/` and never touches production.
 
-### A1b. Staff authentication
-
-- Staff sign in with **Firebase phone OTP** into the ops app (same pattern as the production admin login, which works on web and native).
-- The ops app uses its **own auth instance / Firebase app** for ops staff — separate from the customer app and the admin app's `'Admin'` instance. This keeps sessions isolated and lets the roster (`ops/staff`) key off the verified phone number.
-- The roster (`ops/staff/{staffId}`) is created/updated by an ops function when a verified phone number matches a staff entry; the staff member's role (`rider/helper/iron/supervisor`) is read from that roster.
-
 ### A2. Dedicated ops backend
 
 - New cloud functions in the **same Firebase project** (`spin-it-a135a`) — required so they can write `users/.../orders` / `vendors/.../orders` with the Admin SDK and read `config/adminPhones`.
@@ -41,11 +36,11 @@ We are building the store-operations system ("SpinZo Ops") on top of the existin
 
 ### A3. New ops collections (all under `ops/`)
 
-| Collection | Purpose | Written by |
-|---|---|---|
-| `ops/staff/{staffId}` | Roster: uid, role (`rider/helper/iron/supervisor`), name, phone, **on-shift state + current load** | Ops cloud functions |
+| Collection             | Purpose                                                                                                                     | Written by          |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `ops/staff/{staffId}`  | Roster: uid, role (`rider/helper/iron/supervisor`), name, phone, **on-shift state + current load**                          | Ops cloud functions |
 | `ops/orders/{orderId}` | Per-order tracking: steps + per-step timestamps/durations, **assignments**, garment count, tags, proof media, `deliveryOTP` | Ops cloud functions |
-| `ops/tasks/{taskId}` | Dispatch tasks (pickup/delivery), linked to order + staff | Ops cloud functions |
+| `ops/tasks/{taskId}`   | Dispatch tasks (pickup/delivery), linked to order + staff                                                                   | Ops cloud functions |
 
 ### A4. Delivery OTP — the security fix
 
@@ -74,6 +69,7 @@ We are building the store-operations system ("SpinZo Ops") on top of the existin
 ### A8. Delivery OTP vs production `deliveryOTP`
 
 The production order already has a `deliveryOTP` field (used by the current admin panel). To avoid ambiguity:
+
 - The ops system treats the production `deliveryOTP` field as **not authoritative** for ops flows.
 - The ops function stores its own authoritative `deliveryOTP` under `ops/orders/{orderId}`.
 - If the admin panel ever reads production `deliveryOTP`, it may see a stale value — acceptable, and we can migrate later.
@@ -85,6 +81,7 @@ The production order already has a `deliveryOTP` field (used by the current admi
 Each phase is independently testable by placing a **real order** in the production customer app against the real Firebase backend.
 
 ### Phase 1 — Intake + realtime visibility
+
 - **Goal:** A real order placed in production appears live in the ops app and supervisor panel.
 - **Scope:**
   - Ops backend deployed with the `isOpsStaff` read-only rule and `config/opsStaff` seeded with staff uids.
@@ -95,6 +92,7 @@ Each phase is independently testable by placing a **real order** in the producti
 - **Test:** Place a real order in the customer app → it appears in the ops app + supervisor panel within seconds.
 
 ### Phase 2 — Dispatch + loud/voice alerts
+
 - **Goal:** When an order is placed, an on-shift rider is auto-assigned (least-busy) and alerted loudly; staff hear "new order" voice/sound.
 - **Scope:**
   - `ops/staff` on-shift state (rider taps "Go on shift" / "Go off shift").
@@ -105,6 +103,7 @@ Each phase is independently testable by placing a **real order** in the producti
 - **Test:** Two riders on shift → place an order → exactly one rider is assigned and both get loud/voice alert (assigned one gets the pickup detail).
 
 ### Phase 3 — Pickup + OTP verification
+
 - **Goal:** Rider reaches customer, verifies pickup OTP, order moves to `pickup_completed`.
 - **Scope:**
   - Rider "Arrived at pickup" + "Verify pickup OTP" flow (reads customer-shared OTP).
@@ -114,6 +113,7 @@ Each phase is independently testable by placing a **real order** in the producti
 - **Test:** Place order, share OTP to rider, verify → order shows `pickup_completed` in ops + production.
 
 ### Phase 4 — Helper pipeline: tagging → washing → drying
+
 - **Goal:** A helper walks the order through intake/tagging, washing, drying, each step tracked.
 - **Scope:**
   - Helper "Start intake" → counts garments → prints tags (see printing, Phase 7) → "Tagging done".
@@ -124,15 +124,18 @@ Each phase is independently testable by placing a **real order** in the producti
 - **Test:** Place order → helper claims → counts garments → moves through tagging/washing/drying → each step recorded.
 
 ### Phase 5 — Ironing dispatch + ironing-only flow
+
 - **Goal:** Orders needing ironing are assigned to an iron man; ironing-only orders flow straight through.
 - **Scope:**
   - Auto-assign an iron man when an order reaches the ironing step (least-busy on-shift iron man).
   - Ironing-only orders (`ironing` service type): intake/tagging → assigned directly to an iron man (no wash/dry).
   - Iron man "Start ironing" / "End ironing"; per-step tracking.
 - **Deliverables:** iron-man assignment; ironing-only pipeline; ironing step tracking.
-- **Test:** A wash-and-iron order reaches the ironing step → an iron man is assigned; an ironing-only order skips wash/dry and goes straight to ironing.
+- **Test:** A w
+  ash/dry and goes straight to ironing.
 
 ### Phase 6 — Packaging → proof → ready → delivery OTP
+
 - **Goal:** Packaging, photo/video proof, mark ready, delivery with OTP.
 - **Scope:**
   - Packaging step (start/complete).
@@ -143,6 +146,7 @@ Each phase is independently testable by placing a **real order** in the producti
 - **Test:** Complete packaging → capture proof → mark ready → assign delivery rider → verify delivery OTP → `delivered`.
 
 ### Phase 7 — Supervisor web panel + label printing
+
 - **Goal:** Supervisor monitor + garment tag printing.
 - **Scope:**
   - Full live floor board: all orders, all staff, per-step live status, alerts.
@@ -156,11 +160,13 @@ Each phase is independently testable by placing a **real order** in the producti
 ## Part C — How we build, test, and iterate
 
 ### Build/test loop
+
 - Build one phase at a time, in order (each phase is independently testable).
 - Test by placing a **real order** in the production customer app against the real backend.
 - The ops app is a **custom dev build** (custom sounds + native modules), so development uses `expo-dev-client`; Expo Go is not supported for the full experience.
 
 ### Principles
+
 - Never write a production collection from the ops client.
 - Only the ops function writes production status.
 - Ops data lives under `ops/` and is fully separate.
@@ -175,4 +181,3 @@ Each phase is independently testable by placing a **real order** in the producti
 - Which staff uids to seed into `config/opsStaff` (roster).
 - Confirm the `ironing` service type covers both "only iron" and "steam iron" (production uses `ironing`).
 - Whether the ops app and supervisor panel are two separate Expo projects (recommended) or one project with a web target.
-- How the ops app and supervisor panel each authenticate (resolved: both use Firebase phone OTP into the ops app's own auth instance, with role from `ops/staff`).
