@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "source": "ops/functions",
+    "codebase": "ops",
+    "ignore": ["node_modules", ".git"]
+  }
+}
