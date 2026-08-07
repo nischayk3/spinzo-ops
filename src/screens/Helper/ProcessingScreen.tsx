@@ -1,127 +1,158 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import {
-  WashingMachine,
-  Tag,
-  CheckCircle2,
-  Play,
-  ArrowRight,
-  Inbox,
-} from 'lucide-react-native';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { Inbox, Clock } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
-import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
+import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, timeAgo } from '../../utils/orderFeed';
-import { stepLabel, OpsProcess } from '../../utils/opsProcess';
+import { serviceSummary, FeedOrder } from '../../utils/orderFeed';
+import { currentStep, isDone, stage, stepLabel, stepQueue, OpsProcess } from '../../utils/opsProcess';
+import { slaRemainingMinutes, slaTone, STAGE_SLA_MINUTES, SlaTone } from '../../utils/sla';
+import type { RootStackParamList } from '../../navigation/RootNavigator';
 
-interface ActionButton {
+// Order in which stage tabs appear. Mirrors the ops pipeline (prestain is skipped
+// for ironing-only orders, but the tab row always shows the full pipeline).
+const STAGE_ORDER = [
+  'tagging',
+  'prestain',
+  'getting_washed',
+  'getting_dried',
+  'getting_folded',
+  'getting_ironed',
+];
+
+// Mirrors the server's stageRoleGate: helpers take everything except ironing;
+// only iron-role staff (and supervisors) take ironing. The UI uses this to keep
+// a stage from showing as claimable when the caller can't start it.
+const canStartStage = (role: string | null | undefined, step: string): boolean => {
+  if (role === 'supervisor') return true;
+  if (role === 'iron') return step === 'getting_ironed';
+  return step !== 'getting_ironed';
+};
+
+const TONE_CLASS: Record<SlaTone, string> = {
+  muted: 'text-textMuted',
+  ok: 'text-primary',
+  warning: 'text-warning',
+  error: 'text-error',
+};
+
+interface QueueItem {
   key: string;
-  label: string;
-  onPress: () => void;
-  variant: 'primary' | 'info';
+  orderId: string;
+  process?: OpsProcess;
 }
 
 export function ProcessingScreen() {
-  const user = useAuthStore(state => state.user);
-  const activeRole = useAuthStore(state => state.activeRole);
-  const { myProcesses, isLoading, error, initialize, claim, startStep, completeStep, advanceStep } =
-    useOpsProcessStore();
+  const user = useAuthStore(s => s.user);
+  const activeRole = useAuthStore(s => s.activeRole);
+  const { processes, isLoading, error, initialize } = useOpsProcessStore();
   const { orders, initialize: initializeFeed } = useOrderFeedStore();
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 
-  // Tracks which orders have had their production step advanced, so the stepper
-  // can move from "Advance to <Next>" to "Start <Next>" without a doc write.
-  const [advanced, setAdvanced] = useState<Record<string, boolean>>({});
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [selected, setSelected] = useState('tagging');
 
   useEffect(() => {
     initializeFeed();
     if (user?.id) initialize(user.id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialize, initializeFeed, user?.id]);
 
-  const myProcessIds = useMemo(() => new Set(myProcesses.map(p => p.orderId)), [myProcesses]);
+  const orderById = useMemo(() => {
+    const m = new Map<string, FeedOrder>();
+    for (const o of orders) m.set(o.id, o);
+    return m;
+  }, [orders]);
 
-  // pickup_completed orders not already claimed by this helper.
-  const claimable = useMemo(
-    () => orders.filter(o => o.status === 'pickup_completed' && !myProcessIds.has(o.id)),
-    [orders, myProcessIds],
-  );
-
-  const hasWork = myProcesses.length > 0 || claimable.length > 0;
-
-  const runAction = async (fn: () => Promise<OpsProcessingResult>) => {
-    setActionError(null);
-    const res = await fn();
-    if (!res.ok) setActionError(res.error || 'request_failed');
+  // A process is this helper's work while any stage is assigned to them and not
+  // completed — captures claimed-but-paused orders that myInProgress would drop.
+  const hasUnfinishedAssignment = (p: OpsProcess): boolean => {
+    if (!user?.id) return false;
+    return Object.values(p.stages).some(s => s.assignee === user.id && !s.completedAt);
   };
 
-  const handleAdvance = (p: OpsProcess) => {
-    setAdvanced(a => ({ ...a, [p.orderId]: true }));
-    runAction(() => advanceStep(p.orderId));
-  };
+  // pickup_completed orders with no ops_process yet — the helper's entry point
+  // to claim new work (claiming starts the tagging stage in OrderDetail).
+  const claimableOrders = useMemo(() => {
+    if (!canStartStage(activeRole, 'tagging')) return [];
+    const claimed = new Set(processes.map(p => p.orderId));
+    return orders.filter(o => o.status === 'pickup_completed' && !claimed.has(o.id));
+  }, [orders, processes, activeRole]);
 
-  const processActions = (p: OpsProcess): ActionButton[] => {
-    const actions: ActionButton[] = [];
-    if (p.status === 'done') return actions;
+  const counts = useMemo(() => {
+    const c: Record<string, { pending: number; mine: number }> = {};
+    for (const step of STAGE_ORDER) c[step] = { pending: 0, mine: 0 };
+    for (const p of processes) {
+      const cur = currentStep(p);
+      if (!cur || !c[cur]) continue;
+      if (hasUnfinishedAssignment(p)) c[cur].mine += 1;
+      if (stepQueue(p, cur) && canStartStage(activeRole, cur)) c[cur].pending += 1;
+    }
+    c.tagging.pending += claimableOrders.length;
+    return c;
+  }, [processes, claimableOrders, activeRole, user?.id]);
 
-    const current = p.steps[p.currentIndex];
-    const curTime = current ? p.stepTimes[current] || {} : {};
-    const started = !!curTime.startedAt;
-    const completed = !!curTime.completedAt;
-    const prevComplete =
-      p.currentIndex > 0 && !!p.stepTimes[p.steps[p.currentIndex - 1]]?.completedAt;
-    // Only offer "Advance to <Next>" when the callable can compute a next step,
-    // so the last step never hits a no_next_step error.
-    const hasNext = p.currentIndex < p.steps.length - 1;
-    const label = current ? stepLabel(current) : '';
-
-    if (p.status === 'tagging') {
-      if (!started) {
-        actions.push({
-          key: 'start-tagging',
-          label: 'Start Tagging',
-          onPress: () => runAction(() => startStep(p.orderId)),
-          variant: 'primary',
-        });
-      } else if (!completed) {
-        actions.push({
-          key: 'complete-tagging',
-          label: 'Complete Tagging',
-          onPress: () => runAction(() => completeStep(p.orderId)),
-          variant: 'primary',
-        });
-      }
-    } else if (current) {
-      if (!started) {
-        if (prevComplete && hasNext && !advanced[p.orderId]) {
-          actions.push({
-            key: 'advance',
-            label: `Advance to ${label}`,
-            onPress: () => handleAdvance(p),
-            variant: 'info',
-          });
-        } else {
-          actions.push({
-            key: 'start',
-            label: `Start ${label}`,
-            onPress: () => runAction(() => startStep(p.orderId)),
-            variant: 'primary',
-          });
-        }
-      } else if (!completed) {
-        actions.push({
-          key: 'complete',
-          label: `Complete ${label}`,
-          onPress: () => runAction(() => completeStep(p.orderId)),
-          variant: 'primary',
-        });
+  const pendingItems = useMemo<QueueItem[]>(() => {
+    const items: QueueItem[] = [];
+    if (selected === 'tagging') {
+      for (const o of claimableOrders) items.push({ key: `o-${o.id}`, orderId: o.id });
+    }
+    for (const p of processes) {
+      if (currentStep(p) !== selected) continue;
+      if (stepQueue(p, selected) && canStartStage(activeRole, selected)) {
+        items.push({ key: p.id, orderId: p.orderId, process: p });
       }
     }
-    return actions;
+    return items;
+  }, [selected, processes, claimableOrders, activeRole]);
+
+  const myItems = useMemo<QueueItem[]>(
+    () =>
+      processes
+        .filter(p => currentStep(p) === selected && hasUnfinishedAssignment(p))
+        .map(p => ({ key: p.id, orderId: p.orderId, process: p })),
+    [selected, processes, user?.id],
+  );
+
+  const renderCard = (item: QueueItem) => {
+    const order = orderById.get(item.orderId);
+    const p = item.process;
+    const cur = p ? currentStep(p) : null;
+    const curStage = p && cur ? stage(p, cur) : undefined;
+    const started = !!curStage?.startedAt;
+    const done = p ? isDone(p) : false;
+    const sla = cur && curStage?.startedAt ? STAGE_SLA_MINUTES[cur] : undefined;
+    const remaining = sla != null ? slaRemainingMinutes(curStage?.startedAt, sla) : undefined;
+    const tone = sla != null && remaining != null ? slaTone(remaining, sla, done) : 'muted';
+    const badge = p ? (done ? 'Complete' : stepLabel(cur || '')) : 'Ready to process';
+    const badgeClass = p ? (done ? 'text-primary' : 'text-info') : 'text-primary';
+
+    return (
+      <TouchableOpacity
+        key={item.key}
+        onPress={() => navigation.navigate('OrderDetail', { orderId: item.orderId })}
+        className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight"
+      >
+        <View className="flex-row items-center justify-between mb-1">
+          <Text className="text-textPrimary font-bold text-lg">#{item.orderId.slice(-6).toUpperCase()}</Text>
+          <Text className={`text-xs font-bold ${badgeClass}`}>{badge}</Text>
+        </View>
+        <Text className="text-textSecondary text-sm mb-1">{order?.customerName || 'Unknown customer'}</Text>
+        <Text className="text-textMuted text-xs mb-3">{order ? serviceSummary(order) : '—'}</Text>
+        {sla != null && remaining != null && (
+          <View className="flex-row items-center">
+            <Clock size={13} color="#94A3B8" className="mr-1" />
+            <Text className={`text-xs font-bold ${TONE_CLASS[tone]}`}>
+              {done ? 'Complete' : `${Math.ceil(remaining)}m left in SLA`}
+            </Text>
+          </View>
+        )}
+      </TouchableOpacity>
+    );
   };
 
-  if (isLoading && myProcesses.length === 0) {
+  if (isLoading && processes.length === 0) {
     return (
       <SafeAreaView className="flex-1 bg-bgDark items-center justify-center">
         <ActivityIndicator size="large" color="#3B82F6" />
@@ -135,169 +166,64 @@ export function ProcessingScreen() {
       <View className="px-4 pt-4 pb-2">
         <Text className="text-2xl font-bold text-textPrimary">Processing</Text>
         <Text className="text-textSecondary">
-          {activeRole === 'helper' ? 'Helper pipeline' : 'Ops queue'} · {myProcesses.length} in your
-          queue · {claimable.length} claimable
+          {stepLabel(selected)} queue · {pendingItems.length} pending · {myItems.length} yours
         </Text>
       </View>
 
-      <FlatList
-        data={myProcesses}
-        keyExtractor={p => p.id}
-        className="flex-1 px-4"
-        contentContainerStyle={{ paddingBottom: 24 }}
-        ListHeaderComponent={
-          <View>
-            {claimable.length > 0 && (
-              <View className="mb-2">
-                <Text className="text-textSecondary font-bold text-xs mb-2 tracking-wide">
-                  CLAIMABLE
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} className="px-4 mb-3">
+        <View className="flex-row">
+          {STAGE_ORDER.map(step => {
+            const c = counts[step] || { pending: 0, mine: 0 };
+            const isSel = step === selected;
+            return (
+              <TouchableOpacity
+                key={step}
+                onPress={() => setSelected(step)}
+                className={`mr-2 px-3 py-2 rounded-full border ${isSel ? 'bg-primary border-primary' : 'bg-bgSurface border-bgSurfaceLight'}`}
+              >
+                <Text className={`text-xs font-bold ${isSel ? 'text-bgDark' : 'text-textSecondary'}`}>
+                  {stepLabel(step)}
                 </Text>
-                {claimable.map(o => (
-                  <View
-                    key={o.id}
-                    className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight"
-                  >
-                    <View className="flex-row items-center justify-between mb-1">
-                      <Text className="text-textPrimary font-bold text-lg">
-                        #{o.id.slice(-6).toUpperCase()}
-                      </Text>
-                      <Text className="text-textMuted text-xs">{timeAgo(o.createdAt)}</Text>
-                    </View>
-                    <Text className="text-textSecondary text-sm mb-1">
-                      {o.customerName || 'Unknown customer'}
-                    </Text>
-                    <Text className="text-textMuted text-xs mb-3">{serviceSummary(o)}</Text>
-                    <TouchableOpacity
-                      onPress={() => runAction(() => claim(o.id))}
-                      className="bg-primary rounded-lg h-11 items-center justify-center flex-row"
-                    >
-                      <Play size={18} color="#0F172A" className="mr-2" />
-                      <Text className="text-bgDark font-bold">Claim</Text>
-                    </TouchableOpacity>
-                  </View>
-                ))}
-              </View>
-            )}
-            {myProcesses.length > 0 && (
-              <Text className="text-textSecondary font-bold text-xs mb-2 mt-2 tracking-wide">
-                MY WORK
-              </Text>
-            )}
+                <Text className={`text-xs ${isSel ? 'text-bgDark/70' : 'text-textMuted'}`}>
+                  {c.pending + c.mine}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </ScrollView>
+
+      <ScrollView className="flex-1 px-4" contentContainerStyle={{ paddingBottom: 24 }}>
+        {pendingItems.length > 0 && (
+          <View className="mb-1">
+            <Text className="text-textSecondary font-bold text-xs mb-2 tracking-wide">PENDING</Text>
+            {pendingItems.map(renderCard)}
           </View>
-        }
-        renderItem={({ item }) => {
-          const actions = processActions(item);
-          return (
-            <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-              <View className="flex-row items-center justify-between mb-2">
-                <View className="flex-row items-center">
-                  <WashingMachine size={16} color="#22C55E" className="mr-2" />
-                  <Text className="text-textPrimary font-bold text-lg">
-                    #{item.orderId.slice(-6).toUpperCase()}
-                  </Text>
-                </View>
-                {item.status === 'done' ? (
-                  <View className="flex-row items-center bg-primary/15 border border-primary/40 rounded-full px-2 py-0.5">
-                    <CheckCircle2 size={13} color="#22C55E" className="mr-1" />
-                    <Text className="text-primary text-xs font-bold">Complete</Text>
-                  </View>
-                ) : (
-                  <Text className="text-textMuted text-xs">{stepLabel(item.status)}</Text>
-                )}
-              </View>
+        )}
 
-              {/* Step stepper */}
-              <View className="flex-row flex-wrap mb-3">
-                {item.steps.length === 0 ? (
-                  <Text className="text-textMuted text-xs">No steps</Text>
-                ) : (
-                  item.steps.map((s, i) => {
-                    const isCurrent = i === item.currentIndex;
-                    const isDone = i < item.currentIndex || !!item.stepTimes[s]?.completedAt;
-                    return (
-                      <View
-                        key={`${s}-${i}`}
-                        className={`rounded-full px-2.5 py-1 mr-1.5 mb-1 border ${
-                          isCurrent
-                            ? 'bg-primary border-primary'
-                            : isDone
-                              ? 'bg-bgSurfaceLight border-bgSurfaceLight'
-                              : 'bg-bgSurface border-bgSurfaceLight'
-                        }`}
-                      >
-                        <Text
-                          className={`text-xs font-bold ${
-                            isCurrent
-                              ? 'text-bgDark'
-                              : isDone
-                                ? 'text-textPrimary'
-                                : 'text-textMuted'
-                          }`}
-                        >
-                          {stepLabel(s)}
-                        </Text>
-                      </View>
-                    );
-                  })
-                )}
-              </View>
+        {myItems.length > 0 && (
+          <View className="mb-1">
+            <Text className="text-textSecondary font-bold text-xs mb-2 mt-2 tracking-wide">MY WORK</Text>
+            {myItems.map(renderCard)}
+          </View>
+        )}
 
-              {/* Action buttons */}
-              {actions.length > 0 && (
-                <View className="flex-row flex-wrap gap-2">
-                  {actions.map(a =>
-                    a.variant === 'info' ? (
-                      <TouchableOpacity
-                        key={a.key}
-                        onPress={a.onPress}
-                        className="bg-info/15 border border-info/40 rounded-lg h-11 px-4 items-center justify-center flex-row"
-                      >
-                        <ArrowRight size={18} color="#3B82F6" className="mr-2" />
-                        <Text className="text-info font-bold">{a.label}</Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <TouchableOpacity
-                        key={a.key}
-                        onPress={a.onPress}
-                        className="bg-primary rounded-lg h-11 px-4 items-center justify-center flex-row"
-                      >
-                        <Play size={18} color="#0F172A" className="mr-2" />
-                        <Text className="text-bgDark font-bold">{a.label}</Text>
-                      </TouchableOpacity>
-                    ),
-                  )}
-                </View>
-              )}
+        {pendingItems.length === 0 && myItems.length === 0 && (
+          <View className="items-center justify-center mt-24 px-6">
+            <Inbox size={36} color="#64748B" />
+            <Text className="text-textSecondary text-lg font-bold mt-3">Nothing here</Text>
+            <Text className="text-textMuted text-center mt-2">
+              {selected === 'tagging'
+                ? 'No orders waiting to be tagged right now.'
+                : `No ${stepLabel(selected)} work right now.`}
+            </Text>
+          </View>
+        )}
+      </ScrollView>
 
-              {item.status === 'done' && (
-                <View className="flex-row items-center mt-1">
-                  <Tag size={13} color="#94A3B8" className="mr-1" />
-                  <Text className="text-textMuted text-xs">
-                    Order ready for the next stage
-                  </Text>
-                </View>
-              )}
-            </View>
-          );
-        }}
-        ListEmptyComponent={
-          hasWork ? null : (
-            <View className="items-center justify-center mt-20">
-              <Inbox size={36} color="#64748B" />
-              <Text className="text-textSecondary text-lg font-bold mt-3">
-                No orders in your queue
-              </Text>
-              <Text className="text-textMuted text-center mt-2">
-                Claim a pickup-completed order to start processing.
-              </Text>
-            </View>
-          )
-        }
-      />
-
-      {(error || actionError) && (
+      {error && (
         <View className="mx-4 mb-4 bg-error/15 border border-error/40 rounded-lg p-3">
-          <Text className="text-error text-xs font-bold">{actionError || error}</Text>
+          <Text className="text-error text-xs font-bold">{error}</Text>
         </View>
       )}
     </SafeAreaView>

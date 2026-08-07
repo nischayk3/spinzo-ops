@@ -9,17 +9,21 @@ import { IntakeScreen } from '../screens/Queue/IntakeScreen';
 import { FloorBoardScreen } from '../screens/Queue/FloorBoardScreen';
 import { PickupsScreen } from '../screens/Rider/PickupsScreen';
 import { ProcessingScreen } from '../screens/Helper/ProcessingScreen';
+import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
 import { Home, ClipboardList, Settings, Bike, WashingMachine } from 'lucide-react-native';
 import { View, ActivityIndicator } from 'react-native';
 
-const Stack = createNativeStackNavigator();
-const Tab = createBottomTabNavigator();
-
 export type RootStackParamList = {
   Auth: undefined;
+  Login: undefined;
+  NotInRoster: undefined;
   Main: undefined;
+  OrderDetail: { orderId: string };
 };
+
+const Stack = createNativeStackNavigator<RootStackParamList>();
+const Tab = createBottomTabNavigator();
 
 const AppTabs = () => {
   const activeRole = useAuthStore(state => state.activeRole);
@@ -116,6 +120,12 @@ export function RootNavigator() {
       ) : (
         <Stack.Screen name="Main" component={AppTabs} />
       )}
+      {/* Order detail opens as a modal above Main, from any role's tab. */}
+      <Stack.Screen
+        name="OrderDetail"
+        component={OrderDetailScreen}
+        options={{ presentation: 'modal' }}
+      />
     </Stack.Navigator>
   );
 }
