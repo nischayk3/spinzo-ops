@@ -15,13 +15,8 @@ function pickupAddressFromOrder(order) {
 async function selectRider() {
   // Authorized rider phones from the roster.
   let rosterPhones = {};
-  try {
-    const rosterSnap = await db.doc('config/opsStaff').get();
-    if (rosterSnap.exists && rosterSnap.data().phones) rosterPhones = rosterSnap.data().phones;
-  } catch (err) {
-    console.error('config/opsStaff read failed', err);
-    return null;
-  }
+  const rosterSnap = await db.doc('config/opsStaff').get();
+  if (rosterSnap.exists && rosterSnap.data().phones) rosterPhones = rosterSnap.data().phones;
 
   // On-shift riders: query by role (single-field), filter onShift in code.
   const riders = await db.collection('ops/staff').where('role', '==', 'rider').get();
@@ -65,32 +60,37 @@ function taskPayload(orderId, order, assignee) {
 
 // Fires once per order (triggers only watch the user path, not the vendor mirror).
 exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', async (event) => {
+  if (!event.data) return; // doc deleted before delivery
   const orderId = event.params.orderId;
   const order = event.data.data();
 
-  // Idempotent: never create a duplicate task.
-  const existing = await db.doc(`ops/tasks/${orderId}`).get();
-  if (existing.exists) return;
-
   const assignee = await selectRider();
-  if (!assignee) {
-    // No rider available; park in the queue for the on-shift catch-up pass.
-    await db.doc(`ops/queue/${orderId}`).set({
-      orderId,
-      status: 'pending',
-      pickupAddress: pickupAddressFromOrder(order),
-      pickupSlot: (order && order.pickupDetails) || null,
-      tokenNumber: (order && order.tokenNumber) || null,
-      pickupOTP: (order && order.pickupOTP) || null,
-      createdAt: TS(),
-    });
-    return;
-  }
-  await db.doc(`ops/tasks/${orderId}`).set(taskPayload(orderId, order, assignee));
+  const payload = assignee
+    ? taskPayload(orderId, order, assignee)
+    : {
+        orderId,
+        status: 'pending',
+        pickupAddress: pickupAddressFromOrder(order),
+        pickupSlot: (order && order.pickupDetails) || null,
+        tokenNumber: (order && order.tokenNumber) || null,
+        pickupOTP: (order && order.pickupOTP) || null,
+        createdAt: TS(),
+      };
+
+  // Atomic: re-read the task inside the tx so concurrent deliveries can't double-assign
+  // or park an already-assigned order (triggers are at-least-once).
+  await db.runTransaction(async (tx) => {
+    const existing = await tx.get(db.doc(`ops/tasks/${orderId}`));
+    if (existing.exists) return;
+    const queueExists = (await tx.get(db.doc(`ops/queue/${orderId}`))).exists;
+    if (queueExists) return;
+    tx.set(assignee ? db.doc(`ops/tasks/${orderId}`) : db.doc(`ops/queue/${orderId}`), payload);
+  });
 });
 
 // When a rider goes on shift, claim any parked orders.
 exports.onShiftCatchUp = onDocumentUpdated('ops/staff/{staffId}', async (event) => {
+  if (!event.data) return; // doc deleted before delivery
   const before = event.data.before.data();
   const after = event.data.after.data();
   if (!after) return;

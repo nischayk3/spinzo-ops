@@ -17,6 +17,10 @@ test('normalizePhone: strips separators', () => {
 test('normalizePhone: non-string -> empty', () => {
   assert.equal(normalizePhone(undefined), '');
 });
+test('normalizePhone: unresolvable format -> empty', () => {
+  assert.equal(normalizePhone('911085871'), '');
+  assert.equal(normalizePhone(''), '');
+});
 
 const ROSTER = {
   '+919108558715': 'supervisor',
