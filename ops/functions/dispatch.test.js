@@ -148,3 +148,17 @@ test('generateLabels: N labels, sequential seq, belongs to order', () => {
   assert.equal(labels.length, 3);
   assert.deepEqual(labels.map(l => l.qr), ['SPNZ:abc123:1','SPNZ:abc123:2','SPNZ:abc123:3']);
 });
+test('parseGarmentQr: non-string -> null', () => {
+  assert.equal(parseGarmentQr(undefined, 'abc123'), null);
+  assert.equal(parseGarmentQr(123, 'abc123'), null);
+});
+test('generateLabels: clamps 0/fractional to a valid minimum', () => {
+  assert.equal(generateLabels('abc123', 0)[0].qr, 'SPNZ:abc123:1');
+  assert.equal(generateLabels('abc123', 2.9).length, 2);
+});
+test('generateLabels: caps above MAX_LABELS', () => {
+  assert.equal(generateLabels('abc123', 100000).length, 500);
+});
+test('firstProductionStep: empty list -> null', () => {
+  assert.equal(firstProductionStep([]), null);
+});

@@ -132,8 +132,10 @@ function parseGarmentQr(qr, orderId) {
 
 // Generate N label payloads for an order (server-controlled, so scanning can be
 // validated against the stored list).
+const MAX_LABELS = 500;
+
 function generateLabels(orderId, count) {
-  const n = Math.max(1, Math.floor(Number(count)) || 0);
+  const n = Math.min(MAX_LABELS, Math.max(1, Math.floor(Number(count)) || 0));
   const out = [];
   for (let seq = 1; seq <= n; seq += 1) out.push({ seq, qr: `SPNZ:${orderId}:${seq}` });
   return out;
