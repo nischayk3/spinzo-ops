@@ -8,8 +8,9 @@ import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { IntakeScreen } from '../screens/Queue/IntakeScreen';
 import { FloorBoardScreen } from '../screens/Queue/FloorBoardScreen';
 import { PickupsScreen } from '../screens/Rider/PickupsScreen';
+import { ProcessingScreen } from '../screens/Helper/ProcessingScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
-import { Home, ClipboardList, Settings, Bike } from 'lucide-react-native';
+import { Home, ClipboardList, Settings, Bike, WashingMachine } from 'lucide-react-native';
 import { View, ActivityIndicator } from 'react-native';
 
 const Stack = createNativeStackNavigator();
@@ -60,6 +61,15 @@ const AppTabs = () => {
           options={{ tabBarIcon: ({ color }) => <Bike color={color} size={24} /> }}
         >
           {() => <PickupsScreen />}
+        </Tab.Screen>
+      )}
+
+      {activeRole === 'helper' && (
+        <Tab.Screen
+          name="Processing"
+          options={{ tabBarIcon: ({ color }) => <WashingMachine color={color} size={24} /> }}
+        >
+          {() => <ProcessingScreen />}
         </Tab.Screen>
       )}
 
