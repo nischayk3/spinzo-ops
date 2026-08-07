@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getFirestore, Firestore } from 'firebase/firestore';
 import { getAuth, Auth } from 'firebase/auth';
+import { getFunctions, Functions } from 'firebase/functions';
 
 export const firebaseConfig = {
   apiKey: 'AIzaSyBnwzJVax1qx2oN3nf7INqpXLF8rVrUWqw',
@@ -14,6 +15,7 @@ export const firebaseConfig = {
 let app: FirebaseApp;
 let db: Firestore;
 let auth: Auth;
+let functions: Functions;
 
 // Ensure Firebase is only initialized once
 if (getApps().length === 0) {
@@ -24,5 +26,6 @@ if (getApps().length === 0) {
 
 db = getFirestore(app);
 auth = getAuth(app);
+functions = getFunctions(app, 'us-central1');
 
-export { app, db, auth };
+export { app, db, auth, functions };
