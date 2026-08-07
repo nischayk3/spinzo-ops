@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep } = require('./dispatch');
+const { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels } = require('./dispatch');
 
 test('normalizePhone: 10 digits -> +91', () => {
   assert.equal(normalizePhone('9108558715'), '+919108558715');
@@ -115,4 +115,36 @@ test('nextStep: advances, null when complete', () => {
   assert.equal(nextStep('getting_washed', ['getting_washed', 'getting_dried']), 'getting_dried');
   assert.equal(nextStep('getting_dried', ['getting_washed', 'getting_dried']), null);
   assert.equal(nextStep('getting_ironed', ['getting_ironed']), null);
+});
+
+test('opsStepsForOrder: wash_fold -> tagging, prestain, wash, fold', () => {
+  assert.deepEqual(opsStepsForOrder({ items: [{ serviceType: 'wash_fold' }] }), ['tagging','prestain','getting_washed','getting_folded']);
+});
+test('opsStepsForOrder: ironing only -> tagging, ironing (no prestain)', () => {
+  assert.deepEqual(opsStepsForOrder({ items: [{ serviceType: 'ironing' }] }), ['tagging','getting_ironed']);
+});
+test('opsStepsForOrder: empty -> tagging, prestain, wash, fold', () => {
+  assert.deepEqual(opsStepsForOrder({}), ['tagging','prestain','getting_washed','getting_folded']);
+});
+test('isProductionStep: true only for the 4 contract values', () => {
+  for (const s of ['getting_washed','getting_dried','getting_folded','getting_ironed']) assert.equal(isProductionStep(s), true);
+  assert.equal(isProductionStep('tagging'), false);
+  assert.equal(isProductionStep('prestain'), false);
+});
+test('firstProductionStep: skips tagging/prestain', () => {
+  assert.equal(firstProductionStep(['tagging','prestain','getting_washed','getting_folded']), 'getting_washed');
+  assert.equal(firstProductionStep(['tagging','getting_ironed']), 'getting_ironed');
+});
+test('parseGarmentQr: valid payload for this order', () => {
+  assert.deepEqual(parseGarmentQr('SPNZ:abc123:3', 'abc123'), { seq: 3 });
+});
+test('parseGarmentQr: rejects other order / bad shape', () => {
+  assert.equal(parseGarmentQr('SPNZ:other:3', 'abc123'), null);
+  assert.equal(parseGarmentQr('SPNZ:abc123', 'abc123'), null);
+  assert.equal(parseGarmentQr('garbage', 'abc123'), null);
+});
+test('generateLabels: N labels, sequential seq, belongs to order', () => {
+  const labels = generateLabels('abc123', 3);
+  assert.equal(labels.length, 3);
+  assert.deepEqual(labels.map(l => l.qr), ['SPNZ:abc123:1','SPNZ:abc123:2','SPNZ:abc123:3']);
 });

@@ -103,4 +103,40 @@ function nextStep(current, steps) {
   return steps[i + 1] || null;
 }
 
-module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep };
+// Ops-only stages prepended to the production pipeline. Prestain is skipped for
+// ironing-only orders (no wash/dry stage to inspect before).
+function opsStepsForOrder(order) {
+  const prod = getProcessingSteps(order);
+  const onlyIroning = prod.length === 1 && prod[0] === 'getting_ironed';
+  return onlyIroning ? ['tagging', ...prod] : ['tagging', 'prestain', ...prod];
+}
+
+const PRODUCTION_STEPS = new Set(['getting_washed', 'getting_dried', 'getting_folded', 'getting_ironed']);
+
+function isProductionStep(step) {
+  return PRODUCTION_STEPS.has(step);
+}
+
+// First step that is part of the production processingStep contract.
+function firstProductionStep(steps) {
+  return (steps || []).find(isProductionStep) || null;
+}
+
+// Parse a garment label QR. Returns { seq } when it belongs to this order.
+function parseGarmentQr(qr, orderId) {
+  if (typeof qr !== 'string') return null;
+  const m = qr.match(/^SPNZ:(.+):(\d+)$/);
+  if (!m || m[1] !== orderId) return null;
+  return { seq: parseInt(m[2], 10) };
+}
+
+// Generate N label payloads for an order (server-controlled, so scanning can be
+// validated against the stored list).
+function generateLabels(orderId, count) {
+  const n = Math.max(1, Math.floor(Number(count)) || 0);
+  const out = [];
+  for (let seq = 1; seq <= n; seq += 1) out.push({ seq, qr: `SPNZ:${orderId}:${seq}` });
+  return out;
+}
+
+module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels };
