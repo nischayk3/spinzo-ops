@@ -1,8 +1,30 @@
 import { create } from 'zustand';
+import { Platform } from 'react-native';
 import { db } from '../config/firebase';
 import { doc, onSnapshot, query, collection, where, setDoc } from 'firebase/firestore';
 import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
 import { primeAlerts, announceAssignedPickup } from '../utils/alerts';
+
+// Persist announced task ids so a page reload doesn't re-announce the same pickup.
+const ANNOUNCED_KEY = 'opsAnnouncedTasks';
+const isWeb = Platform.OS === 'web';
+function loadAnnounced(): Set<string> {
+  if (!isWeb) return new Set();
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(ANNOUNCED_KEY) : null;
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+function saveAnnounced(ids: Set<string>) {
+  if (!isWeb) return;
+  try {
+    window.localStorage.setItem(ANNOUNCED_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // best-effort
+  }
+}
 
 export interface StaffDoc {
   uid: string;
@@ -27,7 +49,7 @@ interface OpsStaffState {
 let unsubStaff: (() => void) | null = null;
 let unsubTasks: (() => void) | null = null;
 // Tracks ids we've already alerted on so a refresh/re-subscribe doesn't re-announce.
-const announcedTaskIds = new Set<string>();
+const announcedTaskIds = loadAnnounced();
 
 export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   staffDoc: null,
@@ -63,6 +85,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
           tasks.push(t);
           if (shouldAnnounce(t, announcedTaskIds) && docSnap.id) {
             announcedTaskIds.add(docSnap.id);
+            saveAnnounced(announcedTaskIds);
             announceAssignedPickup(t);
           }
         });
