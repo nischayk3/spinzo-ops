@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickRider, normalizePhone } = require('./dispatch');
+const { pickRider, normalizePhone, pickupGuard } = require('./dispatch');
 
 test('normalizePhone: 10 digits -> +91', () => {
   assert.equal(normalizePhone('9108558715'), '+919108558715');
@@ -59,4 +59,20 @@ test('pickRider: phone not in roster at all -> excluded', () => {
 
 test('pickRider: no eligible candidates -> null', () => {
   assert.equal(pickRider([], {}, ROSTER), null);
+});
+
+test('pickupGuard: ok for placed/confirmed', () => {
+  assert.equal(pickupGuard('placed'), 'ok');
+  assert.equal(pickupGuard('confirmed'), 'ok');
+});
+test('pickupGuard: alreadyDone for pickup_completed', () => {
+  assert.equal(pickupGuard('pickup_completed'), 'alreadyDone');
+});
+test('pickupGuard: invalidState for later statuses', () => {
+  for (const s of ['processing', 'ready', 'out_for_delivery', 'delivered', 'cancelled']) {
+    assert.equal(pickupGuard(s), 'invalidState');
+  }
+});
+test('pickupGuard: unknown status -> invalidState', () => {
+  assert.equal(pickupGuard('something_else'), 'invalidState');
 });

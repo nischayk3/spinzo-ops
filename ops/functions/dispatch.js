@@ -35,4 +35,15 @@ function pickRider(candidates, taskCounts, rosterPhones) {
   return eligible[0].uid;
 }
 
-module.exports = { pickRider, normalizePhone };
+/**
+ * Guard what statuses may transition to pickup_completed.
+ * @param {string} status - the current order status
+ * @returns {'ok'|'alreadyDone'|'invalidState'}
+ */
+function pickupGuard(status) {
+  if (status === 'pickup_completed') return 'alreadyDone';
+  if (status === 'placed' || status === 'confirmed') return 'ok';
+  return 'invalidState';
+}
+
+module.exports = { pickRider, normalizePhone, pickupGuard };

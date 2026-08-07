@@ -1,6 +1,8 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
+const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider } = require('./dispatch');
+const { FieldPath } = require('firebase-admin/firestore');
+const { pickRider, pickupGuard, normalizePhone } = require('./dispatch');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -130,5 +132,89 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
     } catch (err) {
       console.error(`catch-up failed for ${orderId}`, err);
     }
+  }
+});
+
+exports.opsStatusSync = onCall(async (request) => {
+  // --- Auth: must be a logged-in ops staff phone user with role rider or supervisor.
+  const auth = request.auth;
+  if (!auth) return { ok: false, error: 'unauthorized' };
+  const phone = normalizePhone(auth.token && auth.token.phone_number);
+  if (!phone) return { ok: false, error: 'unauthorized' };
+
+  const rosterSnap = await db.doc('config/opsStaff').get();
+  const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
+  const role = rosterPhones[phone];
+  if (role !== 'rider' && role !== 'supervisor') return { ok: false, error: 'unauthorized' };
+
+  // --- Input validation.
+  const data = request.data || {};
+  const orderId = data.orderId;
+  const otp = String(data.otp || '');
+  if (!orderId || typeof orderId !== 'string' || !/^\d{4}$/.test(otp)) {
+    return { ok: false, error: 'invalid_input' };
+  }
+
+  // --- Soft assignee gate: riders may only verify their own task; supervisors bypass.
+  const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
+  if (taskSnap.exists) {
+    const task = taskSnap.data();
+    if (role === 'rider' && task.assignee && task.assignee !== auth.uid) {
+      return { ok: false, error: 'unauthorized' };
+    }
+  } else if (role === 'rider') {
+    // No task assigned to this order; only a supervisor may verify it.
+    return { ok: false, error: 'unauthorized' };
+  }
+
+  // --- Find the user-path order doc (CG query returns up to 2 docs: user + vendor mirror).
+  const q = await db.collectionGroup('orders').where(FieldPath.documentId(), '==', orderId).get();
+  let userId = null;
+  let order = null;
+  for (const doc of q.docs) {
+    if (doc.ref.path.startsWith('users/')) {
+      userId = doc.data().userId || doc.ref.parent.parent.id;
+      order = doc.data();
+      break;
+    }
+  }
+  if (!userId || !order) return { ok: false, error: 'not_found' };
+
+  // --- Server-side OTP verify.
+  if (String(otp) !== String(order.pickupOTP)) return { ok: false, error: 'invalid_otp' };
+
+  const vendorId = order.vendorId || 'vendor_1';
+  const now = admin.firestore.Timestamp.now();
+
+  // --- Transaction: re-read + status guard + dual write + task flip.
+  try {
+    const result = await db.runTransaction(async (tx) => {
+      const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
+      const snap = await tx.get(orderRef);
+      if (!snap.exists) return { ok: false, error: 'not_found' };
+      const current = snap.data();
+
+      const guard = pickupGuard(current.status);
+      if (guard === 'alreadyDone') return { ok: true, alreadyDone: true };
+      if (guard === 'invalidState') return { ok: false, error: 'invalid_state' };
+
+      const updateData = {
+        status: 'pickup_completed',
+        pickupVerified: true,
+        pickedUpAt: now,
+        updatedAt: now,
+      };
+      const tokenNumber = data.tokenNumber || current.tokenNumber;
+      if (tokenNumber) updateData.tokenNumber = tokenNumber;
+
+      tx.update(db.doc(`users/${userId}/orders/${orderId}`), updateData);
+      tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+      tx.update(db.doc(`ops_tasks/${orderId}`), { status: 'picked_up', pickedUpAt: now });
+      return { ok: true };
+    });
+    return result;
+  } catch (err) {
+    console.error('opsStatusSync failed', err);
+    return { ok: false, error: 'server_error' };
   }
 });
