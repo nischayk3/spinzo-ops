@@ -44,29 +44,30 @@ describe('slaRemainingMinutes', () => {
 
 describe('slaTone', () => {
   it('is muted when done', () => {
-    expect(slaTone(1000, true)).toBe('muted');
-    expect(slaTone(0, true)).toBe('muted');
+    expect(slaTone(1000, 30, true)).toBe('muted');
+    expect(slaTone(0, 30, true)).toBe('muted');
   });
 
-  it('is error at or below 30 minutes remaining', () => {
-    expect(slaTone(30, false)).toBe('error');
-    expect(slaTone(0, false)).toBe('error');
-    expect(slaTone(15, false)).toBe('error');
+  it('is ok when the stage is freshly started (relative to its own SLA)', () => {
+    expect(slaTone(30, 30, false)).toBe('ok'); // full SLA left
+    expect(slaTone(60, 60, false)).toBe('ok');
+    expect(slaTone(20, 20, false)).toBe('ok');
   });
 
-  it('is warning between 30 and 60 minutes remaining', () => {
-    expect(slaTone(31, false)).toBe('warning');
-    expect(slaTone(45, false)).toBe('warning');
-    expect(slaTone(60, false)).toBe('warning');
+  it('is warning when half the SLA has elapsed', () => {
+    expect(slaTone(15, 30, false)).toBe('warning');
+    expect(slaTone(22, 45, false)).toBe('warning');
+    expect(slaTone(30, 60, false)).toBe('warning');
   });
 
-  it('is ok above 60 minutes remaining', () => {
-    expect(slaTone(61, false)).toBe('ok');
-    expect(slaTone(120, false)).toBe('ok');
+  it('is error when a quarter or less of the SLA remains', () => {
+    expect(slaTone(7, 30, false)).toBe('error');
+    expect(slaTone(0, 30, false)).toBe('error');
+    expect(slaTone(10, 45, false)).toBe('error');
   });
 
   it('returns the declared union type values', () => {
     const tones: SlaTone[] = ['muted', 'error', 'warning', 'ok'];
-    expect(tones).toContain(slaTone(10, false));
+    expect(tones).toContain(slaTone(10, 30, false));
   });
 });

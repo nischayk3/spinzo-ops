@@ -29,6 +29,7 @@ export interface OpsProcess {
 
 const LABELS: Record<string, string> = {
   tagging: 'Tagging',
+  prestain: 'Pre-stain',
   getting_washed: 'Washing',
   getting_dried: 'Drying',
   getting_folded: 'Folding',

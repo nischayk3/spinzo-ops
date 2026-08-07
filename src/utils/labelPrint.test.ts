@@ -51,4 +51,19 @@ describe('buildTSPL', () => {
     // 50mm -> 400 dots, 30mm -> 240 dots at 203 dpi
     expect(tspl).toContain('SIZE 400 dots,240 dots');
   });
+
+  it('escapes quotes and backslashes in QR/text content so TSPL commands stay intact', () => {
+    const dirty: GarmentLabel[] = [{ seq: 1, qr: 'SPNZ:a"b\\c"d:1' }];
+    const tspl = buildTSPL(dirty, { orderShort: 'A"B\\C' });
+    expect(tspl).toContain('QRCODE 60,150,M,4,A,0,"SPNZ:a\\"b\\\\c\\"d:1"');
+    expect(tspl).toContain('TEXT 60,60,"3",0,1,1,"#A\\"B\\\\C #1"');
+    // Escaped content must not produce a bare unescaped quote inside the string.
+    expect(tspl).not.toContain('d:1" #');
+  });
+
+  it('strips newlines from content so a label command is never split', () => {
+    const dirty: GarmentLabel[] = [{ seq: 1, qr: 'SPNZ:a\nb:1' }];
+    const tspl = buildTSPL(dirty, { orderShort: 'AB' });
+    expect(tspl).not.toContain('\n"');
+  });
 });

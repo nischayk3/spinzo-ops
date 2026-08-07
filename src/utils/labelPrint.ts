@@ -8,6 +8,11 @@ const DPI = 203;
 
 const mm = (mm: number) => Math.round((mm / 25.4) * DPI);
 
+// TSPL quoted strings escape embedded quotes as \" and backslashes as \\. Newlines
+// would split a command, so strip them. QR payloads are server-controlled
+// (SPNZ:...), but orderShort comes from the UI — escape both defensively.
+const tsplEscape = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]+/g, ' ');
+
 export function buildTSPL(labels: GarmentLabel[], meta: LabelMeta, opts?: { widthMm?: number; heightMm?: number }): string {
   const w = mm(opts?.widthMm ?? 40);
   const h = mm(opts?.heightMm ?? 25);
@@ -17,8 +22,8 @@ export function buildTSPL(labels: GarmentLabel[], meta: LabelMeta, opts?: { widt
   lines.push('DIRECTION 1');
   for (const label of labels) {
     lines.push('CLS');
-    lines.push(`TEXT 60,60,"3",0,1,1,"#${meta.orderShort} #${label.seq}"`);
-    lines.push(`QRCODE 60,150,M,4,A,0,"${label.qr}"`);
+    lines.push(`TEXT 60,60,"3",0,1,1,"#${tsplEscape(meta.orderShort)} #${label.seq}"`);
+    lines.push(`QRCODE 60,150,M,4,A,0,"${tsplEscape(label.qr)}"`);
     lines.push('PRINT 1,1');
   }
   return lines.join(CRLF);

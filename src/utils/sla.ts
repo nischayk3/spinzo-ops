@@ -17,12 +17,18 @@ export function slaRemainingMinutes(startedAt: unknown, slaMinutes: number): num
   else ms = new Date(startedAt as any).getTime();
   if (Number.isNaN(ms)) return slaMinutes;
   const elapsedMin = (Date.now() - ms) / 60000;
-  return Math.max(0, slaMinutes - elapsedMin);
+  // Clamp both ends: a future/backdated startedAt can't stretch the SLA, and an
+  // elapsed past the SLA floor at 0.
+  return Math.min(slaMinutes, Math.max(0, slaMinutes - elapsedMin));
 }
 
-export function slaTone(remaining: number, done: boolean): SlaTone {
+// Urgency is relative to the stage's own SLA so a fresh stage always reads "ok":
+// within 75% of the SLA is ok, 25%..50% remaining is warning, under 25% is error.
+export function slaTone(remaining: number, slaMinutes: number, done: boolean): SlaTone {
   if (done) return 'muted';
-  if (remaining <= 30) return 'error';
-  if (remaining <= 60) return 'warning';
+  if (slaMinutes <= 0) return remaining <= 0 ? 'error' : 'ok';
+  const pct = remaining / slaMinutes;
+  if (pct <= 0.25) return 'error';
+  if (pct <= 0.5) return 'warning';
   return 'ok';
 }

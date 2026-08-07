@@ -1,4 +1,4 @@
-import { OpsProcess, stage } from './opsProcess';
+import { OpsProcess, stage, stepLabel } from './opsProcess';
 
 export interface TimelineEntry {
   step: string;
@@ -8,11 +8,13 @@ export interface TimelineEntry {
   completedAt?: unknown;
   durationMs?: number;
   skipped: boolean;
+  reached: boolean;
 }
 
-export function opsTimeline(p: OpsProcess, stepLabelFn: (s: string) => string): TimelineEntry[] {
-  return p.steps.map(step => {
+export function opsTimeline(p: OpsProcess, stepLabelFn: (s: string) => string = stepLabel): TimelineEntry[] {
+  return p.steps.map((step, index) => {
     const s = stage(p, step);
+    const reached = index < p.currentIndex;
     return {
       step,
       label: stepLabelFn(step),
@@ -20,7 +22,10 @@ export function opsTimeline(p: OpsProcess, stepLabelFn: (s: string) => string): 
       startedAt: s?.startedAt,
       completedAt: s?.completedAt,
       durationMs: s?.durationMs,
-      skipped: !s?.startedAt,
+      // A reached stage that never started was skipped (e.g. a step the pipeline
+      // derived but the store opted out of); unreached stages are merely pending.
+      skipped: reached && !s?.startedAt,
+      reached,
     };
   });
 }
