@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickRider, normalizePhone, pickupGuard, taskTransition } = require('./dispatch');
+const { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep } = require('./dispatch');
 
 test('normalizePhone: 10 digits -> +91', () => {
   assert.equal(normalizePhone('9108558715'), '+919108558715');
@@ -90,4 +90,29 @@ test('taskTransition: other transitions -> no action', () => {
   assert.equal(taskTransition('placed', 'processing'), null);
   assert.equal(taskTransition('ready', 'delivered'), null);
   assert.equal(taskTransition('placed', 'placed'), null);
+});
+
+test('getProcessingSteps: wash_iron -> wash + iron', () => {
+  assert.deepEqual(getProcessingSteps({ items: [{ serviceType: 'wash_iron' }] }), ['getting_washed', 'getting_ironed']);
+});
+test('getProcessingSteps: ironing only -> just iron', () => {
+  assert.deepEqual(getProcessingSteps({ items: [{ serviceType: 'ironing' }] }), ['getting_ironed']);
+});
+test('getProcessingSteps: wash_fold -> wash + fold', () => {
+  assert.deepEqual(getProcessingSteps({ items: [{ serviceType: 'wash_fold' }] }), ['getting_washed', 'getting_folded']);
+});
+test('getProcessingSteps: blanket_wash -> wash + dry', () => {
+  assert.deepEqual(getProcessingSteps({ items: [{ serviceType: 'blanket_wash' }] }), ['getting_washed', 'getting_dried']);
+});
+test('getProcessingSteps: mixed cart aggregates in wash,dry,fold,iron order', () => {
+  assert.deepEqual(getProcessingSteps({ items: [{ serviceType: 'wash_fold' }, { serviceType: 'wash_iron' }, { serviceType: 'blanket_wash' }] }), ['getting_washed', 'getting_dried', 'getting_folded', 'getting_ironed']);
+});
+test('getProcessingSteps: empty/unknown -> fallback wash + fold', () => {
+  assert.deepEqual(getProcessingSteps({}), ['getting_washed', 'getting_folded']);
+  assert.deepEqual(getProcessingSteps(null), ['getting_washed', 'getting_folded']);
+});
+test('nextStep: advances, null when complete', () => {
+  assert.equal(nextStep('getting_washed', ['getting_washed', 'getting_dried']), 'getting_dried');
+  assert.equal(nextStep('getting_dried', ['getting_washed', 'getting_dried']), null);
+  assert.equal(nextStep('getting_ironed', ['getting_ironed']), null);
 });

@@ -1,7 +1,7 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, taskTransition } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, taskTransition, getProcessingSteps, nextStep } = require('./dispatch');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -279,4 +279,130 @@ exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}',
       console.error(`syncTaskFromOrder failed for ${orderId}`, err);
     }
   }
+});
+
+exports.opsProcessing = onCall(async (request) => {
+  const auth = request.auth;
+  if (!auth) return { ok: false, error: 'unauthorized' };
+  const phone = normalizePhone(auth.token && auth.token.phone_number);
+  if (!phone) return { ok: false, error: 'unauthorized' };
+
+  const rosterSnap = await db.doc('config/opsStaff').get();
+  const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
+  const role = rosterPhones[phone];
+  if (role !== 'helper' && role !== 'supervisor') return { ok: false, error: 'unauthorized' };
+
+  const data = request.data || {};
+  const orderId = data.orderId;
+  const action = data.action;
+  if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
+  if (!['claim', 'startStep', 'completeStep', 'advanceStep'].includes(action)) {
+    return { ok: false, error: 'invalid_input' };
+  }
+
+  const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
+  const task = taskSnap.exists ? taskSnap.data() : null;
+  const userId = task && task.userId;
+  const vendorId = (task && task.vendorId) || 'vendor_1';
+  if (!userId) return { ok: false, error: 'not_found' };
+
+  const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
+  const now = admin.firestore.Timestamp.now();
+
+  if (action === 'claim') {
+    // Read the order fresh; only pickup_completed may be claimed.
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) return { ok: false, error: 'not_found' };
+    const order = orderSnap.data();
+    if (order.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
+
+    const steps = getProcessingSteps(order);
+
+    try {
+      const result = await db.runTransaction(async (tx) => {
+        const processRef = db.doc(`ops_process/${orderId}`);
+        const processSnap = await tx.get(processRef);
+        if (processSnap.exists) return { ok: false, error: 'already_claimed' };
+
+        const orderFresh = (await tx.get(orderRef)).data();
+        if (orderFresh.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
+
+        tx.set(processRef, {
+          orderId,
+          userId,
+          vendorId,
+          assignee: auth.uid,
+          steps,
+          currentIndex: 0,
+          status: 'tagging',
+          stepTimes: {},
+          claimedAt: now,
+        });
+
+        const updateData = { status: 'processing', updatedAt: now };
+        if (steps[0]) updateData.processingStep = steps[0];
+        tx.update(orderRef, updateData);
+        tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+        return { ok: true };
+      });
+      return result;
+    } catch (err) {
+      console.error('opsProcessing claim failed', err);
+      return { ok: false, error: 'server_error' };
+    }
+  }
+
+  // startStep / completeStep / advanceStep all operate on the caller's own process doc.
+  const processRef = db.doc(`ops_process/${orderId}`);
+  const processSnap = await processRef.get();
+  if (!processSnap.exists) return { ok: false, error: 'not_found' };
+  const process = processSnap.data();
+  if (process.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+
+  const currentStep = process.steps[process.currentIndex];
+  const stepTimes = process.stepTimes || {};
+  const timeForStep = stepTimes[currentStep] || {};
+
+  if (action === 'startStep') {
+    await processRef.update({ stepTimes: { ...stepTimes, [currentStep]: { ...timeForStep, startedAt: now } } });
+    return { ok: true };
+  }
+
+  if (action === 'completeStep') {
+    const startedAt = timeForStep.startedAt;
+    const completedAt = now;
+    const durationMs = startedAt ? Math.max(0, completedAt.toMillis() - startedAt.toMillis()) : null;
+    const updated = { ...timeForStep, completedAt };
+    if (durationMs !== null) updated.durationMs = durationMs;
+    const newStepTimes = { ...stepTimes, [currentStep]: updated };
+    const nextIndex = process.currentIndex + 1;
+    const nextStepValue = nextIndex < process.steps.length ? process.steps[nextIndex] : null;
+    const newStatus = nextStepValue
+      ? (nextStepValue === 'getting_ironed' ? 'iron_ready' : nextStepValue)
+      : 'done';
+    await processRef.update({ stepTimes: newStepTimes, currentIndex: nextIndex, status: newStatus });
+    return { ok: true, currentIndex: nextIndex, status: newStatus };
+  }
+
+  // advanceStep: set production processingStep to the next step.
+  if (action === 'advanceStep') {
+    const next = nextStep(currentStep, process.steps);
+    if (!next) return { ok: false, error: 'no_next_step' };
+    try {
+      const result = await db.runTransaction(async (tx) => {
+        const fresh = (await tx.get(orderRef)).data();
+        if (fresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
+        const updateData = { processingStep: next, updatedAt: now };
+        tx.update(orderRef, updateData);
+        tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+        return { ok: true, next };
+      });
+      return result;
+    } catch (err) {
+      console.error('opsProcessing advanceStep failed', err);
+      return { ok: false, error: 'server_error' };
+    }
+  }
+
+  return { ok: false, error: 'invalid_input' };
 });

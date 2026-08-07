@@ -62,4 +62,45 @@ function taskTransition(beforeStatus, afterStatus) {
   return null;
 }
 
-module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition };
+/**
+ * Compute the processing step sequence for an order, mirroring production's
+ * AdminOrdersScreen.getOrderProcessingSteps exactly.
+ * @param {{ items?: Array<{ serviceType?: string }> }} order
+ * @returns {string[]}
+ */
+function getProcessingSteps(order) {
+  if (!order || !order.items || order.items.length === 0) {
+    return ['getting_washed', 'getting_folded'];
+  }
+  const serviceTypes = order.items.map((item) => item.serviceType);
+  const onlyIroning = serviceTypes.every((type) => type === 'ironing');
+  if (onlyIroning) return ['getting_ironed'];
+
+  const steps = [];
+  const needsWash = serviceTypes.some((type) =>
+    type === 'wash_fold' || type === 'wash_iron' || type === 'blanket_wash' ||
+    type === 'premium_laundry' || type === 'dry_clean' || type === 'shoe_clean');
+  if (needsWash) steps.push('getting_washed');
+  const needsDry = serviceTypes.some((type) => type === 'blanket_wash' || type === 'shoe_clean' || type === 'dry_clean');
+  const needsFold = serviceTypes.some((type) => type === 'wash_fold' || type === 'premium_laundry');
+  const needsIron = serviceTypes.some((type) => type === 'wash_iron' || type === 'ironing');
+  if (needsDry) steps.push('getting_dried');
+  if (needsFold) steps.push('getting_folded');
+  if (needsIron) steps.push('getting_ironed');
+  if (steps.length === 0) return ['getting_washed', 'getting_folded'];
+  return steps;
+}
+
+/**
+ * Return the next step after `current`, or null when the sequence is complete.
+ * @param {string} current
+ * @param {string[]} steps
+ * @returns {string|null}
+ */
+function nextStep(current, steps) {
+  const i = steps.indexOf(current);
+  if (i === -1) return steps[0] || null;
+  return steps[i + 1] || null;
+}
+
+module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep };
