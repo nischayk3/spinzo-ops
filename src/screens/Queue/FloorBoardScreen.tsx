@@ -3,6 +3,7 @@ import { View, Text, FlatList, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { filterActiveOrders, ACTIVE_STATUSES, FeedOrder, serviceSummary } from '../../utils/orderFeed';
+import { stepLabel } from '../../utils/opsProcess';
 
 const STATUS_LABEL: Record<string, string> = {
   placed: 'New',
@@ -69,6 +70,13 @@ export function FloorBoardScreen() {
             <Text className="text-textSecondary text-sm mb-1">
               {item.customerName || 'Unknown customer'}
             </Text>
+            {item.status === 'processing' && item.processingStep ? (
+              <View className="bg-bgDark px-2 py-1 rounded-md self-start mb-1">
+                <Text className="text-info text-xs font-bold">
+                  Step: {stepLabel(item.processingStep)}
+                </Text>
+              </View>
+            ) : null}
             <Text className="text-textMuted text-xs">{serviceSummary(item)}</Text>
           </View>
         )}

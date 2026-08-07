@@ -32,6 +32,7 @@ const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
     tokenNumber: data.tokenNumber,
     pickupOTP: data.pickupOTP,
     address: data.address,
+    processingStep: data.processingStep,
     createdAt: data.createdAt,
   };
 };

@@ -33,6 +33,7 @@ export interface FeedOrder {
   tokenNumber?: string;
   pickupOTP?: string;
   address?: string;
+  processingStep?: string;
   createdAt?: any;
 }
 
