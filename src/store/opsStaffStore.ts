@@ -42,7 +42,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     set({ isLoading: true });
 
     unsubStaff = onSnapshot(
-      doc(db, 'ops', 'staff', uid),
+      doc(db, 'ops_staff', uid),
       (snap) => {
         if (!snap.exists()) {
           set({ staffDoc: null, isLoading: false });
@@ -55,7 +55,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     );
 
     unsubTasks = onSnapshot(
-      query(collection(db, 'ops', 'tasks'), where('assignee', '==', uid)),
+      query(collection(db, 'ops_tasks'), where('assignee', '==', uid)),
       (snap) => {
         const tasks: OpsTask[] = [];
         snap.forEach((docSnap) => {
@@ -76,7 +76,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     primeAlerts();
     try {
       await setDoc(
-        doc(db, 'ops', 'staff', uid),
+        doc(db, 'ops_staff', uid),
         {
           uid,
           role,
@@ -95,7 +95,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
 
   goOffShift: async (uid) => {
     try {
-      await setDoc(doc(db, 'ops', 'staff', uid), { onShift: false, shiftEndAt: new Date() }, { merge: true });
+      await setDoc(doc(db, 'ops_staff', uid), { onShift: false, shiftEndAt: new Date() }, { merge: true });
     } catch (err) {
       set({ error: String(err) });
       throw err;

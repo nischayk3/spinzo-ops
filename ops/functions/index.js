@@ -19,7 +19,7 @@ async function selectRider() {
   if (rosterSnap.exists && rosterSnap.data().phones) rosterPhones = rosterSnap.data().phones;
 
   // On-shift riders: query by role (single-field), filter onShift in code.
-  const riders = await db.collection('ops/staff').where('role', '==', 'rider').get();
+  const riders = await db.collection('ops_staff').where('role', '==', 'rider').get();
   const candidates = [];
   for (const doc of riders.docs) {
     const d = doc.data();
@@ -35,7 +35,7 @@ async function selectRider() {
   // Pending task count per candidate (single-field query, filter status in code).
   const taskCounts = {};
   for (const c of candidates) {
-    const tasks = await db.collection('ops/tasks').where('assignee', '==', c.uid).get();
+    const tasks = await db.collection('ops_tasks').where('assignee', '==', c.uid).get();
     let pending = 0;
     tasks.forEach((t) => { if (t.data().status === 'pending') pending += 1; });
     taskCounts[c.uid] = pending;
@@ -80,16 +80,16 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   // Atomic: re-read the task inside the tx so concurrent deliveries can't double-assign
   // or park an already-assigned order (triggers are at-least-once).
   await db.runTransaction(async (tx) => {
-    const existing = await tx.get(db.doc(`ops/tasks/${orderId}`));
+    const existing = await tx.get(db.doc(`ops_tasks/${orderId}`));
     if (existing.exists) return;
-    const queueExists = (await tx.get(db.doc(`ops/queue/${orderId}`))).exists;
+    const queueExists = (await tx.get(db.doc(`ops_queue/${orderId}`))).exists;
     if (queueExists) return;
-    tx.set(assignee ? db.doc(`ops/tasks/${orderId}`) : db.doc(`ops/queue/${orderId}`), payload);
+    tx.set(assignee ? db.doc(`ops_tasks/${orderId}`) : db.doc(`ops_queue/${orderId}`), payload);
   });
 });
 
 // When a rider goes on shift, claim any parked orders.
-exports.onShiftCatchUp = onDocumentUpdated('ops/staff/{staffId}', async (event) => {
+exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) => {
   if (!event.data) return; // doc deleted before delivery
   const before = event.data.before.data();
   const after = event.data.after.data();
@@ -98,7 +98,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops/staff/{staffId}', async (event) 
   if (!wentOnShift || after.role !== 'rider') return;
 
   // Oldest parked orders first (top-level collection, single-field index — no composite index).
-  const queue = await db.collection('ops/queue').orderBy('createdAt', 'asc').limit(50).get();
+  const queue = await db.collection('ops_queue').orderBy('createdAt', 'asc').limit(50).get();
   const pending = queue.docs.filter((d) => d.data().status === 'pending');
 
   for (const entry of pending) {
@@ -108,7 +108,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops/staff/{staffId}', async (event) 
       const assignee = await selectRider();
       if (!assignee) continue; // still no eligible rider; leave parked
       await db.runTransaction(async (tx) => {
-        const taskRef = db.doc(`ops/tasks/${orderId}`);
+        const taskRef = db.doc(`ops_tasks/${orderId}`);
         const taskSnap = await tx.get(taskRef);
         if (taskSnap.exists) {
           tx.delete(entry.ref);
