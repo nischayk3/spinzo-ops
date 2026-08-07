@@ -39,9 +39,14 @@ export function PickupsScreen() {
           res.error === 'invalid_otp' ? 'Incorrect OTP. Please try again.'
           : res.error === 'invalid_state' ? 'This order is no longer awaiting pickup.'
           : res.error === 'unauthorized' ? 'You are not assigned to this pickup.'
+          : res.error === 'locked' ? 'Too many incorrect attempts. Contact the supervisor.'
           : 'Could not verify pickup. Please try again.';
         Alert.alert('Verification failed', msg);
       }
+    } catch {
+      // verifyPickupOTP never throws today, but guard against a sync throw so the
+      // modal isn't stuck with no error surface.
+      Alert.alert('Verification failed', 'Could not verify pickup. Please try again.');
     } finally {
       setVerifying(false);
     }

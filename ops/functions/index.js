@@ -135,6 +135,9 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   }
 });
 
+// Max failed OTP attempts per order before verification is locked.
+const MAX_OTP_ATTEMPTS = 5;
+
 exports.opsStatusSync = onCall(async (request) => {
   // --- Auth: must be a logged-in ops staff phone user with role rider or supervisor.
   const auth = request.auth;
@@ -157,8 +160,9 @@ exports.opsStatusSync = onCall(async (request) => {
 
   // --- Soft assignee gate: riders may only verify their own task; supervisors bypass.
   const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
+  let task = null;
   if (taskSnap.exists) {
-    const task = taskSnap.data();
+    task = taskSnap.data();
     if (role === 'rider' && task.assignee && task.assignee !== auth.uid) {
       return { ok: false, error: 'unauthorized' };
     }
@@ -167,26 +171,28 @@ exports.opsStatusSync = onCall(async (request) => {
     return { ok: false, error: 'unauthorized' };
   }
 
+  // --- Rate-limit: fail closed on repeated wrong OTPs (fail-open if no counter yet).
+  const attempts = Number(task && task.otpAttempts) || 0;
+  if (attempts >= MAX_OTP_ATTEMPTS) return { ok: false, error: 'locked' };
+
   // --- Find the user-path order doc (CG query returns up to 2 docs: user + vendor mirror).
   const q = await db.collectionGroup('orders').where(FieldPath.documentId(), '==', orderId).get();
   let userId = null;
   let order = null;
   for (const doc of q.docs) {
     if (doc.ref.path.startsWith('users/')) {
-      userId = doc.data().userId || doc.ref.parent.parent.id;
+      // Trust the path over a possibly-stale/forged userId field.
+      userId = doc.ref.parent.parent.id;
       order = doc.data();
       break;
     }
   }
   if (!userId || !order) return { ok: false, error: 'not_found' };
 
-  // --- Server-side OTP verify.
-  if (String(otp) !== String(order.pickupOTP)) return { ok: false, error: 'invalid_otp' };
-
   const vendorId = order.vendorId || 'vendor_1';
   const now = admin.firestore.Timestamp.now();
 
-  // --- Transaction: re-read + status guard + dual write + task flip.
+  // --- Transaction: re-read + status guard + OTP re-verify + dual write + task flip.
   try {
     const result = await db.runTransaction(async (tx) => {
       const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
@@ -198,6 +204,16 @@ exports.opsStatusSync = onCall(async (request) => {
       if (guard === 'alreadyDone') return { ok: true, alreadyDone: true };
       if (guard === 'invalidState') return { ok: false, error: 'invalid_state' };
 
+      // Re-verify the OTP against the freshly-read doc inside the tx (no stale-OTP race).
+      if (String(otp) !== String(current.pickupOTP)) {
+        if (task) {
+          tx.update(db.doc(`ops_tasks/${orderId}`), { otpAttempts: admin.firestore.FieldValue.increment(1) });
+        }
+        return { ok: false, error: 'invalid_otp' };
+      }
+
+      // The assigned rider always has a task doc; if none exists (supervisor verifying a
+      // parked order), proceed without the task flip rather than aborting the whole write.
       const updateData = {
         status: 'pickup_completed',
         pickupVerified: true,
@@ -209,7 +225,13 @@ exports.opsStatusSync = onCall(async (request) => {
 
       tx.update(db.doc(`users/${userId}/orders/${orderId}`), updateData);
       tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
-      tx.update(db.doc(`ops_tasks/${orderId}`), { status: 'picked_up', pickedUpAt: now });
+      if (task) {
+        tx.update(db.doc(`ops_tasks/${orderId}`), {
+          status: 'picked_up',
+          pickedUpAt: now,
+          otpAttempts: admin.firestore.FieldValue.delete(),
+        });
+      }
       return { ok: true };
     });
     return result;
