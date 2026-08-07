@@ -1,7 +1,15 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, taskTransition, getProcessingSteps } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels } = require('./dispatch');
+
+// Which steps a role may claim/start. Supervisors bypass; iron people take only
+// ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
+function stageRoleGate(step, role) {
+  if (role === 'supervisor') return true;
+  if (role === 'iron') return step === 'getting_ironed';
+  return step !== 'getting_ironed'; // helper
+}
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -263,6 +271,11 @@ exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}',
       // Best-effort; a leftover queue entry is harmless (re-checked on catch-up).
       console.error(`syncTaskFromOrder: queue delete failed for ${orderId}`, err);
     }
+    try {
+      await db.doc(`ops_process/${orderId}`).delete();
+    } catch (err) {
+      console.error(`syncTaskFromOrder: process delete failed for ${orderId}`, err);
+    }
   }
 
   if (trans.taskStatus) {
@@ -290,13 +303,13 @@ exports.opsProcessing = onCall(async (request) => {
   const rosterSnap = await db.doc('config/opsStaff').get();
   const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
   const role = rosterPhones[phone];
-  if (role !== 'helper' && role !== 'supervisor') return { ok: false, error: 'unauthorized' };
+  if (role !== 'helper' && role !== 'iron' && role !== 'supervisor') return { ok: false, error: 'unauthorized' };
 
   const data = request.data || {};
   const orderId = data.orderId;
   const action = data.action;
   if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-  if (!['claim', 'startStep', 'completeStep', 'advanceStep'].includes(action)) {
+  if (!['claim', 'startStep', 'completeStep', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging'].includes(action)) {
     return { ok: false, error: 'invalid_input' };
   }
 
@@ -307,40 +320,48 @@ exports.opsProcessing = onCall(async (request) => {
   if (!userId) return { ok: false, error: 'not_found' };
 
   const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
+  const processRef = db.doc(`ops_process/${orderId}`);
   const now = admin.firestore.Timestamp.now();
 
   if (action === 'claim') {
-    // Read the order fresh; only pickup_completed may be claimed.
+    // Claim = start the tagging stage. A helper claiming an order begins tagging it.
+    // Idempotent and atomic: the process doc existence + fresh order status are
+    // re-checked inside the transaction.
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
     const order = orderSnap.data();
     if (order.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
 
-    const steps = getProcessingSteps(order);
+    const steps = opsStepsForOrder(order);
+    const prodStep = firstProductionStep(steps);
 
     try {
       const result = await db.runTransaction(async (tx) => {
-        const processRef = db.doc(`ops_process/${orderId}`);
         const processSnap = await tx.get(processRef);
         if (processSnap.exists) return { ok: false, error: 'already_claimed' };
 
         const orderFresh = (await tx.get(orderRef)).data();
         if (orderFresh.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
 
+        const staffSnap = await tx.get(db.doc(`ops_staff/${auth.uid}`));
+        const name = staffSnap.exists ? staffSnap.data().name || '' : '';
+
         tx.set(processRef, {
           orderId,
           userId,
           vendorId,
-          assignee: auth.uid,
           steps,
           currentIndex: 0,
-          status: 'tagging',
-          stepTimes: {},
+          status: steps[0],
+          stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, startedAt: now } },
+          garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
           claimedAt: now,
         });
 
+        // tagging/prestain are ops-only; only the first production step reaches the
+        // customer-facing processingStep contract.
         const updateData = { status: 'processing', updatedAt: now };
-        if (steps[0]) updateData.processingStep = steps[0];
+        if (prodStep) updateData.processingStep = prodStep;
         tx.update(orderRef, updateData);
         tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
         return { ok: true };
@@ -352,55 +373,158 @@ exports.opsProcessing = onCall(async (request) => {
     }
   }
 
-  // startStep / completeStep / advanceStep all operate on the caller's own process doc.
-  const processRef = db.doc(`ops_process/${orderId}`);
-  const processSnap = await processRef.get();
-  if (!processSnap.exists) return { ok: false, error: 'not_found' };
-  const process = processSnap.data();
-  if (process.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
-
-  const currentStep = process.steps[process.currentIndex];
-  const stepTimes = process.stepTimes || {};
-  const timeForStep = stepTimes[currentStep] || {};
-
   if (action === 'startStep') {
-    await processRef.update({ stepTimes: { ...stepTimes, [currentStep]: { ...timeForStep, startedAt: now } } });
-    return { ok: true };
-  }
+    const processSnap = await processRef.get();
+    if (!processSnap.exists) return { ok: false, error: 'not_found' };
+    const process = processSnap.data();
+    const step = process.steps[process.currentIndex];
+    if (!step) return { ok: false, error: 'invalid_state' };
+    if (!stageRoleGate(step, role)) return { ok: false, error: 'unauthorized' };
 
-  if (action === 'completeStep') {
-    const startedAt = timeForStep.startedAt;
-    const completedAt = now;
-    const durationMs = startedAt ? Math.max(0, completedAt.toMillis() - startedAt.toMillis()) : null;
-    const updated = { ...timeForStep, completedAt };
-    if (durationMs !== null) updated.durationMs = durationMs;
-    const newStepTimes = { ...stepTimes, [currentStep]: updated };
-    const nextIndex = process.currentIndex + 1;
-    const nextStepValue = nextIndex < process.steps.length ? process.steps[nextIndex] : null;
-    const newStatus = nextStepValue
-      ? (nextStepValue === 'getting_ironed' ? 'iron_ready' : nextStepValue)
-      : 'done';
-    await processRef.update({ stepTimes: newStepTimes, currentIndex: nextIndex, status: newStatus });
-    return { ok: true, currentIndex: nextIndex, status: newStatus };
-  }
+    const stage = process.stages && process.stages[step];
+    if (stage && stage.startedAt) return { ok: false, error: 'already_started' };
 
-  // advanceStep: set production processingStep to the current step the helper is on.
-  if (action === 'advanceStep') {
-    if (!currentStep) return { ok: false, error: 'no_next_step' };
+    const staffSnap = await db.doc(`ops_staff/${auth.uid}`).get();
+    const name = staffSnap.exists ? staffSnap.data().name || '' : '';
+
     try {
       const result = await db.runTransaction(async (tx) => {
-        const fresh = (await tx.get(orderRef)).data();
-        if (fresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
-        const updateData = { processingStep: currentStep, updatedAt: now };
-        tx.update(orderRef, updateData);
-        tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
-        return { ok: true, next: currentStep };
+        const freshSnap = await tx.get(processRef);
+        if (!freshSnap.exists) return { ok: false, error: 'not_found' };
+        const fresh = freshSnap.data();
+        const freshStep = fresh.steps[fresh.currentIndex];
+        if (freshStep !== step) return { ok: false, error: 'invalid_state' };
+        const s = fresh.stages && fresh.stages[step];
+        if (s && s.startedAt) return { ok: false, error: 'already_started' };
+
+        tx.update(processRef, {
+          stages: {
+            ...(fresh.stages || {}),
+            [step]: { assignee: auth.uid, assigneeName: name, startedAt: now },
+          },
+        });
+
+        // Production processingStep is written ONLY for production steps, and only
+        // while the order is still in the processing status. tagging/prestain never
+        // leak into the production contract.
+        if (isProductionStep(step)) {
+          const orderFresh = (await tx.get(orderRef)).data();
+          if (orderFresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
+          const updateData = { processingStep: step, updatedAt: now };
+          tx.update(orderRef, updateData);
+          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+        }
+        return { ok: true, step };
       });
       return result;
     } catch (err) {
-      console.error('opsProcessing advanceStep failed', err);
+      console.error('opsProcessing startStep failed', err);
       return { ok: false, error: 'server_error' };
     }
+  }
+
+  if (action === 'completeStep') {
+    const processSnap = await processRef.get();
+    if (!processSnap.exists) return { ok: false, error: 'not_found' };
+    const process = processSnap.data();
+    const step = process.steps[process.currentIndex];
+    const stage = process.stages && process.stages[step];
+    if (!stage || stage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+    if (!stage.startedAt) return { ok: false, error: 'invalid_state' };
+    if (stage.completedAt) return { ok: false, error: 'already_completed' };
+
+    const completedAt = now;
+    const durationMs = Math.max(0, completedAt.toMillis() - stage.startedAt.toMillis());
+    const nextIndex = process.currentIndex + 1;
+    const nextStatus = nextIndex < process.steps.length ? process.steps[nextIndex] : 'done';
+
+    await processRef.update({
+      stages: { ...process.stages, [step]: { ...stage, completedAt, durationMs } },
+      currentIndex: nextIndex,
+      status: nextStatus,
+    });
+    return { ok: true, currentIndex: nextIndex, status: nextStatus };
+  }
+
+  // Tagging actions operate on the caller's own tagging stage (assigned at claim).
+  const taggingGate = async () => {
+    const ps = await processRef.get();
+    if (!ps.exists) return { ok: false, error: 'not_found', process: null };
+    const p = ps.data();
+    const tagStage = p.stages && p.stages.tagging;
+    if (!tagStage || tagStage.assignee !== auth.uid) return { ok: false, error: 'unauthorized', process: p };
+    if (tagStage.completedAt) return { ok: false, error: 'already_submitted', process: p };
+    return { ok: true, process: p };
+  };
+
+  if (action === 'printLabels') {
+    const count = Number(data.garmentCount);
+    if (!Number.isInteger(count) || count < 1 || count > 500) return { ok: false, error: 'invalid_input' };
+    const g = await taggingGate();
+    if (!g.ok) return g;
+    const labels = generateLabels(orderId, count);
+    await processRef.update({
+      garments: {
+        ...(g.process.garments || {}),
+        count,
+        labelsPrintedAt: now,
+        labels,
+        registered: [],
+      },
+    });
+    return { ok: true, count, labels };
+  }
+
+  if (action === 'scanGarment') {
+    const qr = String(data.qr || '');
+    const g = await taggingGate();
+    if (!g.ok) return g;
+    const parsed = parseGarmentQr(qr, orderId);
+    if (!parsed) return { ok: false, error: 'not_this_order' };
+    const garments = g.process.garments || {};
+    if (parsed.seq < 1 || parsed.seq > (garments.count || 0)) return { ok: false, error: 'not_in_count' };
+    if ((garments.registered || []).some(r => r.seq === parsed.seq)) return { ok: false, error: 'already_registered' };
+    await processRef.update({
+      garments: {
+        ...garments,
+        registered: [...(garments.registered || []), { ...parsed, scannedAt: now, scannedBy: auth.uid }],
+      },
+    });
+    return { ok: true, seq: parsed.seq };
+  }
+
+  if (action === 'unregisterGarment') {
+    const seq = Number(data.seq);
+    const g = await taggingGate();
+    if (!g.ok) return g;
+    const garments = g.process.garments || {};
+    await processRef.update({
+      garments: { ...garments, registered: (garments.registered || []).filter(r => r.seq !== seq) },
+    });
+    return { ok: true };
+  }
+
+  if (action === 'submitTagging') {
+    const g = await taggingGate();
+    if (!g.ok) return g;
+    const garments = g.process.garments || {};
+    const expected = garments.count || 0;
+    const got = (garments.registered || []).length;
+    if (expected === 0 || got < expected) return { ok: false, error: 'not_all_registered' };
+
+    const tagStage = g.process.stages.tagging;
+    const completedAt = now;
+    const durationMs = Math.max(0, completedAt.toMillis() - (tagStage.startedAt ? tagStage.startedAt.toMillis() : completedAt.toMillis()));
+    const nextIndex = g.process.currentIndex + 1;
+    const nextStatus = nextIndex < g.process.steps.length ? g.process.steps[nextIndex] : 'done';
+
+    await processRef.update({
+      garments: { ...garments, submittedAt: now },
+      stages: { ...g.process.stages, tagging: { ...tagStage, completedAt, durationMs } },
+      currentIndex: nextIndex,
+      status: nextStatus,
+    });
+    return { ok: true, currentIndex: nextIndex, status: nextStatus };
   }
 
   return { ok: false, error: 'invalid_input' };
