@@ -333,6 +333,9 @@ exports.opsProcessing = onCall(async (request) => {
     if (order.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
 
     const steps = opsStepsForOrder(order);
+    // Claim assigns the tagging stage to the caller, so stageRoleGate applies here
+    // too — iron-role users must not own tagging (helpers claim, supervisors bypass).
+    if (!stageRoleGate(steps[0], role)) return { ok: false, error: 'unauthorized' };
     const prodStep = firstProductionStep(steps);
 
     try {
@@ -436,6 +439,9 @@ exports.opsProcessing = onCall(async (request) => {
     if (!processSnap.exists) return { ok: false, error: 'not_found' };
     const process = processSnap.data();
     const step = process.steps[process.currentIndex];
+    // Tagging completion goes only through submitTagging (enforces the garment
+    // count/registration checks and sets garments.submittedAt).
+    if (step === 'tagging') return { ok: false, error: 'use_submit' };
     const stage = process.stages && process.stages[step];
     if (!stage || stage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
     if (!stage.startedAt) return { ok: false, error: 'invalid_state' };
@@ -492,10 +498,12 @@ exports.opsProcessing = onCall(async (request) => {
     const garments = g.process.garments || {};
     if (parsed.seq < 1 || parsed.seq > (garments.count || 0)) return { ok: false, error: 'not_in_count' };
     if ((garments.registered || []).some(r => r.seq === parsed.seq)) return { ok: false, error: 'already_registered' };
+    // Belt-and-suspenders: drop any same-seq entry before appending so a concurrent
+    // double-scan (stale snapshot past the pre-check) can't create a duplicate.
     await processRef.update({
       garments: {
         ...garments,
-        registered: [...(garments.registered || []), { ...parsed, scannedAt: now, scannedBy: auth.uid }],
+        registered: [...(garments.registered || []).filter(r => r.seq !== parsed.seq), { ...parsed, scannedAt: now, scannedBy: auth.uid }],
       },
     });
     return { ok: true, seq: parsed.seq };
@@ -503,6 +511,7 @@ exports.opsProcessing = onCall(async (request) => {
 
   if (action === 'unregisterGarment') {
     const seq = Number(data.seq);
+    if (!Number.isInteger(seq) || seq < 1) return { ok: false, error: 'invalid_input' };
     const g = await taggingGate();
     if (!g.ok) return g;
     const garments = g.process.garments || {};
