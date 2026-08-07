@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -120,7 +120,6 @@ export function ProcessingScreen() {
     const p = item.process;
     const cur = p ? currentStep(p) : null;
     const curStage = p && cur ? stage(p, cur) : undefined;
-    const started = !!curStage?.startedAt;
     const done = p ? isDone(p) : false;
     const sla = cur && curStage?.startedAt ? STAGE_SLA_MINUTES[cur] : undefined;
     const remaining = sla != null ? slaRemainingMinutes(curStage?.startedAt, sla) : undefined;
