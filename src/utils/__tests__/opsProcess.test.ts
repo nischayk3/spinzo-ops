@@ -16,17 +16,18 @@ describe('stepLabel', () => {
 
 describe('parseOpsProcess', () => {
   it('maps id + fields', () => {
-    const p = parseOpsProcess('ORD1', { orderId: 'ORD1', assignee: 'u1', steps: ['getting_washed'], currentIndex: 0, status: 'tagging', stepTimes: {} });
+    const p = parseOpsProcess('ORD1', { orderId: 'ORD1', assignee: 'u1', steps: ['tagging', 'getting_washed'], currentIndex: 1, status: 'getting_washed', stepTimes: { tagging: { startedAt: 1 } } });
     expect(p.id).toBe('ORD1');
     expect(p.orderId).toBe('ORD1');
-    expect(p.assignee).toBe('u1');
-    expect(p.status).toBe('tagging');
-    expect(p.steps).toEqual(['getting_washed']);
+    expect(p.status).toBe('getting_washed');
+    expect(p.steps).toEqual(['tagging', 'getting_washed']);
+    expect(p.stages.tagging).toEqual({ assignee: 'u1', startedAt: 1 });
   });
   it('survives null snapshot', () => {
     const p = parseOpsProcess('ORD1', null);
     expect(p.id).toBe('ORD1');
     expect(p.steps).toEqual([]);
+    expect(p.stages).toEqual({});
   });
 });
 
