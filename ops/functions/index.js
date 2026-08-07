@@ -397,6 +397,16 @@ exports.opsProcessing = onCall(async (request) => {
         const s = fresh.stages && fresh.stages[step];
         if (s && s.startedAt) return { ok: false, error: 'already_started' };
 
+        // Validate the order status BEFORE issuing any write. In Firestore,
+        // returning an error from a tx callback still commits writes already
+        // issued — only throwing aborts the whole tx. So for production steps,
+        // re-read the order and reject here if it's no longer processing, so a
+        // failed startStep never leaves the stage started.
+        if (isProductionStep(step)) {
+          const orderFresh = (await tx.get(orderRef)).data();
+          if (orderFresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
+        }
+
         tx.update(processRef, {
           stages: {
             ...(fresh.stages || {}),
@@ -408,8 +418,6 @@ exports.opsProcessing = onCall(async (request) => {
         // while the order is still in the processing status. tagging/prestain never
         // leak into the production contract.
         if (isProductionStep(step)) {
-          const orderFresh = (await tx.get(orderRef)).data();
-          if (orderFresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
           const updateData = { processingStep: step, updatedAt: now };
           tx.update(orderRef, updateData);
           tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
