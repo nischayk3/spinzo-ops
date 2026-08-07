@@ -118,7 +118,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   requestOTP: async (phone) => {
-    set({ isLoading: true, error: null });
+    // Start clean: drop any stale confirmation result/error so a prior attempt's
+    // OTP can't be (mis)used against this request.
+    set({ isLoading: true, error: null, confirmationResult: null });
     try {
       // Ensure phone has country code
       const formattedPhone = phone.startsWith('+') ? phone : `+91${phone}`;
@@ -160,7 +162,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       });
     } catch (error: any) {
       console.error("OTP Verification Failed", error);
-      set({ error: error.message, isLoading: false });
+      // Drop the confirmation result so a failed attempt can't be retried with
+      // the same (possibly stale/wrong) code — force a fresh OTP request.
+      set({ error: error.message, isLoading: false, confirmationResult: null });
       throw error;
     }
   },
