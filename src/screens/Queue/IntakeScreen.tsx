@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { View, Text, FlatList, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Clock } from 'lucide-react-native';
@@ -9,15 +9,38 @@ import {
   serviceSummary,
   slotLabel,
 } from '../../utils/orderFeed';
+import { announceNewOrder } from '../../utils/alerts';
+
+// Tracks intake ids we've already announced so a remount / refresh doesn't re-announce.
+const announcedOrderIds = new Set<string>();
 
 export function IntakeScreen() {
   const { orders, isLoading, initialize } = useOrderFeedStore();
+  const baselineCaptured = useRef(false);
 
   useEffect(() => {
     initialize();
   }, [initialize]);
 
   const intake = filterIntakeOrders(orders);
+
+  // Wait for the initial snapshot to settle (isLoading -> false), then mark every
+  // already-visible order as seen so a fresh login doesn't blast "New order" for old orders.
+  useEffect(() => {
+    if (baselineCaptured.current || isLoading) return;
+    for (const o of intake) announcedOrderIds.add(o.id);
+    baselineCaptured.current = true;
+  }, [isLoading, intake]);
+
+  // Announce intake orders that arrived after the baseline snapshot.
+  useEffect(() => {
+    for (const o of intake) {
+      if (!announcedOrderIds.has(o.id)) {
+        announcedOrderIds.add(o.id);
+        announceNewOrder();
+      }
+    }
+  }, [intake]);
 
   if (isLoading && intake.length === 0) {
     return (

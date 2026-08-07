@@ -6,18 +6,13 @@ import { LoginScreen } from '../screens/Auth/LoginScreen';
 import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { IntakeScreen } from '../screens/Queue/IntakeScreen';
 import { FloorBoardScreen } from '../screens/Queue/FloorBoardScreen';
-import { Home, ClipboardList, Settings } from 'lucide-react-native';
-import { View, Text, ActivityIndicator } from 'react-native';
+import { PickupsScreen } from '../screens/Rider/PickupsScreen';
+import { SettingsScreen } from '../screens/Settings/SettingsScreen';
+import { Home, ClipboardList, Settings, Bike } from 'lucide-react-native';
+import { View, ActivityIndicator } from 'react-native';
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
-
-const Placeholder = ({ name }: { name: string }) => (
-  <View className="flex-1 items-center justify-center bg-bgDark">
-    <Text className="text-xl font-bold text-textPrimary">{name}</Text>
-    <Text className="text-textSecondary mt-2">Coming soon…</Text>
-  </View>
-);
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -58,11 +53,20 @@ const AppTabs = () => {
         </Tab.Screen>
       )}
 
+      {activeRole === 'rider' && (
+        <Tab.Screen
+          name="Pickups"
+          options={{ tabBarIcon: ({ color }) => <Bike color={color} size={24} /> }}
+        >
+          {() => <PickupsScreen />}
+        </Tab.Screen>
+      )}
+
       <Tab.Screen
         name="Settings"
         options={{ tabBarIcon: ({ color }) => <Settings color={color} size={24} /> }}
       >
-        {() => <Placeholder name="Settings" />}
+        {() => <SettingsScreen />}
       </Tab.Screen>
     </Tab.Navigator>
   );
