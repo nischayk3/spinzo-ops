@@ -46,4 +46,20 @@ function pickupGuard(status) {
   return 'invalidState';
 }
 
-module.exports = { pickRider, normalizePhone, pickupGuard };
+/**
+ * Map an order status transition to the ops-side task/queue action.
+ * @param {string} beforeStatus
+ * @param {string} afterStatus
+ * @returns {{ taskStatus: string, dropQueue?: boolean } | null}
+ */
+function taskTransition(beforeStatus, afterStatus) {
+  if (afterStatus === 'cancelled' && beforeStatus !== 'cancelled') {
+    return { taskStatus: 'cancelled', dropQueue: true };
+  }
+  if (afterStatus === 'pickup_completed' && beforeStatus !== 'pickup_completed') {
+    return { taskStatus: 'picked_up' };
+  }
+  return null;
+}
+
+module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition };

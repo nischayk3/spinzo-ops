@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pickRider, normalizePhone, pickupGuard } = require('./dispatch');
+const { pickRider, normalizePhone, pickupGuard, taskTransition } = require('./dispatch');
 
 test('normalizePhone: 10 digits -> +91', () => {
   assert.equal(normalizePhone('9108558715'), '+919108558715');
@@ -75,4 +75,19 @@ test('pickupGuard: invalidState for later statuses', () => {
 });
 test('pickupGuard: unknown status -> invalidState', () => {
   assert.equal(pickupGuard('something_else'), 'invalidState');
+});
+
+test('taskTransition: cancel -> task cancelled + drop queue', () => {
+  assert.deepEqual(taskTransition('placed', 'cancelled'), { taskStatus: 'cancelled', dropQueue: true });
+});
+test('taskTransition: already cancelled -> no action', () => {
+  assert.equal(taskTransition('cancelled', 'cancelled'), null);
+});
+test('taskTransition: pickup_completed -> task picked_up', () => {
+  assert.deepEqual(taskTransition('placed', 'pickup_completed'), { taskStatus: 'picked_up' });
+});
+test('taskTransition: other transitions -> no action', () => {
+  assert.equal(taskTransition('placed', 'processing'), null);
+  assert.equal(taskTransition('ready', 'delivered'), null);
+  assert.equal(taskTransition('placed', 'placed'), null);
 });

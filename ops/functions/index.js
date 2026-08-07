@@ -1,8 +1,7 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { FieldPath } = require('firebase-admin/firestore');
-const { pickRider, pickupGuard, normalizePhone } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, taskTransition } = require('./dispatch');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -46,9 +45,11 @@ async function selectRider() {
   return pickRider(candidates, taskCounts, rosterPhones);
 }
 
-function taskPayload(orderId, order, assignee) {
+function taskPayload(orderId, order, assignee, userId, vendorId) {
   return {
     orderId,
+    userId,
+    vendorId,
     assignee,
     status: 'pending',
     pickupAddress: pickupAddressFromOrder(order),
@@ -67,10 +68,14 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const order = event.data.data();
 
   const assignee = await selectRider();
+  const userId = event.params.userId;
+  const vendorId = order.vendorId || 'vendor_1';
   const payload = assignee
-    ? taskPayload(orderId, order, assignee)
+    ? taskPayload(orderId, order, assignee, userId, vendorId)
     : {
         orderId,
+        userId,
+        vendorId,
         status: 'pending',
         pickupAddress: pickupAddressFromOrder(order),
         pickupSlot: (order && order.pickupDetails) || null,
@@ -118,6 +123,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
         }
         tx.set(taskRef, {
           orderId,
+          userId: data.userId || null,
+          vendorId: data.vendorId || null,
           assignee,
           status: 'pending',
           pickupAddress: data.pickupAddress || '',
@@ -175,21 +182,16 @@ exports.opsStatusSync = onCall(async (request) => {
   const attempts = Number(task && task.otpAttempts) || 0;
   if (attempts >= MAX_OTP_ATTEMPTS) return { ok: false, error: 'locked' };
 
-  // --- Find the user-path order doc (CG query returns up to 2 docs: user + vendor mirror).
-  const q = await db.collectionGroup('orders').where(FieldPath.documentId(), '==', orderId).get();
-  let userId = null;
-  let order = null;
-  for (const doc of q.docs) {
-    if (doc.ref.path.startsWith('users/')) {
-      // Trust the path over a possibly-stale/forged userId field.
-      userId = doc.ref.parent.parent.id;
-      order = doc.data();
-      break;
-    }
-  }
-  if (!userId || !order) return { ok: false, error: 'not_found' };
+  // --- Resolve the order via the task's userId (task docs carry it from Phase 3).
+  // A direct doc read avoids the collection-group documentId lookup, which the
+  // Admin SDK rejects for bare ids.
+  const userId = task && task.userId;
+  if (!userId) return { ok: false, error: 'not_found' };
+  const orderSnap = await db.doc(`users/${userId}/orders/${orderId}`).get();
+  if (!orderSnap.exists) return { ok: false, error: 'not_found' };
+  const order = orderSnap.data();
 
-  const vendorId = order.vendorId || 'vendor_1';
+  const vendorId = (task && task.vendorId) || order.vendorId || 'vendor_1';
   const now = admin.firestore.Timestamp.now();
 
   // --- Transaction: re-read + status guard + OTP re-verify + dual write + task flip.
@@ -238,5 +240,43 @@ exports.opsStatusSync = onCall(async (request) => {
   } catch (err) {
     console.error('opsStatusSync failed', err);
     return { ok: false, error: 'server_error' };
+  }
+});
+
+// Keep the rider's task/queue in sync when an order's status changes elsewhere
+// (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync).
+exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}', async (event) => {
+  if (!event.data) return;
+  const before = event.data.before.data();
+  const after = event.data.after.data();
+  if (!before || !after) return;
+
+  const trans = taskTransition(before.status, after.status);
+  if (!trans) return;
+
+  const orderId = event.params.orderId;
+
+  if (trans.dropQueue) {
+    try {
+      await db.doc(`ops_queue/${orderId}`).delete();
+    } catch (err) {
+      // Best-effort; a leftover queue entry is harmless (re-checked on catch-up).
+      console.error(`syncTaskFromOrder: queue delete failed for ${orderId}`, err);
+    }
+  }
+
+  if (trans.taskStatus) {
+    try {
+      const taskRef = db.doc(`ops_tasks/${orderId}`);
+      const snap = await taskRef.get();
+      if (snap.exists && snap.data().status === 'pending') {
+        await taskRef.update({
+          status: trans.taskStatus,
+          ...(trans.taskStatus === 'picked_up' ? { pickedUpAt: TS() } : { cancelledAt: TS() }),
+        });
+      }
+    } catch (err) {
+      console.error(`syncTaskFromOrder failed for ${orderId}`, err);
+    }
   }
 });
