@@ -1,7 +1,7 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, taskTransition, getProcessingSteps, nextStep } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, taskTransition, getProcessingSteps } = require('./dispatch');
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -384,18 +384,17 @@ exports.opsProcessing = onCall(async (request) => {
     return { ok: true, currentIndex: nextIndex, status: newStatus };
   }
 
-  // advanceStep: set production processingStep to the next step.
+  // advanceStep: set production processingStep to the current step the helper is on.
   if (action === 'advanceStep') {
-    const next = nextStep(currentStep, process.steps);
-    if (!next) return { ok: false, error: 'no_next_step' };
+    if (!currentStep) return { ok: false, error: 'no_next_step' };
     try {
       const result = await db.runTransaction(async (tx) => {
         const fresh = (await tx.get(orderRef)).data();
         if (fresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
-        const updateData = { processingStep: next, updatedAt: now };
+        const updateData = { processingStep: currentStep, updatedAt: now };
         tx.update(orderRef, updateData);
         tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
-        return { ok: true, next };
+        return { ok: true, next: currentStep };
       });
       return result;
     } catch (err) {
