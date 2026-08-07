@@ -6,17 +6,44 @@ import type { OpsTask } from './opsTasks';
 let audioCtx: { ctx: AudioContext; resume: () => Promise<void> } | null = null;
 const web = Platform.OS === 'web';
 
-function chime() {
-  if (!web || typeof window === 'undefined') return;
+function ensureAudioCtx(): { ctx: AudioContext; resume: () => Promise<void> } | null {
+  if (!web || typeof window === 'undefined') return null;
   try {
     if (!audioCtx) {
       const AC = (window as any).AudioContext || (window as any).webkitAudioContext;
-      if (!AC) return;
+      if (!AC) return null;
       const ac = new AC();
       audioCtx = { ctx: ac, resume: () => ac.resume() };
     }
-    audioCtx.resume().catch(() => {});
-    const ctx = audioCtx.ctx;
+    return audioCtx;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Unlock the AudioContext on the first user interaction anywhere on the page,
+// so snapshot-triggered chimes (which fire outside a gesture) still sound.
+function installWebGesturePrime() {
+  if (!web || typeof window === 'undefined') return;
+  const prime = () => {
+    const ac = ensureAudioCtx();
+    ac?.resume().catch(() => {});
+    for (const evt of ['pointerdown', 'touchstart', 'keydown'] as const) {
+      window.removeEventListener(evt, prime);
+    }
+  };
+  for (const evt of ['pointerdown', 'touchstart', 'keydown'] as const) {
+    window.addEventListener(evt, prime);
+  }
+}
+installWebGesturePrime();
+
+function chime() {
+  const ac = ensureAudioCtx();
+  if (!ac) return;
+  try {
+    ac.resume().catch(() => {});
+    const ctx = ac.ctx;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = 'sine';

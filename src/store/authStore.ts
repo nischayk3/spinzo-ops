@@ -3,6 +3,7 @@ import { ShiftRole, UserProfile } from '../types';
 import { OpsStaffRoster, resolveRoleFromRoster } from '../utils/opsRole';
 import { Platform } from 'react-native';
 import { auth, db } from '../config/firebase';
+import { useOpsStaffStore } from './opsStaffStore';
 import { 
   signInWithPhoneNumber, 
   ConfirmationResult,
@@ -170,6 +171,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   logout: async () => {
     try {
       await firebaseSignOut(auth);
+      // Drop the rider's live staff/task listeners so they don't leak past logout
+      // and keep announcing for the previous user.
+      useOpsStaffStore.getState().reset();
       set({ user: null, isLoggedIn: false, activeRole: null, currentStoreId: null });
     } catch (error) {
       console.error("Logout failed", error);

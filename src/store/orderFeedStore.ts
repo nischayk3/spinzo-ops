@@ -40,7 +40,9 @@ let unsubscribe: (() => void) | null = null;
 
 export const useOrderFeedStore = create<OrderFeedState>((set) => ({
   orders: [],
-  isLoading: false,
+  // Start as loading so consumers that key logic off the first snapshot (e.g. the
+  // Intake "new order" announce baseline) don't see an empty-but-idle state first.
+  isLoading: true,
   error: null,
 
   initialize: () => {

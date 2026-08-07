@@ -68,21 +68,25 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         });
         set({ myTasks: tasks });
       },
-      (err) => set({ error: String(err) })
+      (err) => set({ error: String(err), isLoading: false })
     );
   },
 
   goOnShift: async (uid, role, phone, name) => {
     primeAlerts();
     try {
-      await setDoc(doc(db, 'ops', 'staff', uid), {
-        uid,
-        role,
-        phone,
-        name: name || '',
-        onShift: true,
-        shiftStartAt: new Date(),
-      });
+      await setDoc(
+        doc(db, 'ops', 'staff', uid),
+        {
+          uid,
+          role,
+          phone,
+          name: name || '',
+          onShift: true,
+          shiftStartAt: new Date(),
+        },
+        { merge: true }
+      );
     } catch (err) {
       set({ error: String(err) });
       throw err;

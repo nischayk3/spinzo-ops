@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuthStore } from '../store/authStore';
+import { useOpsStaffStore } from '../store/opsStaffStore';
 import { LoginScreen } from '../screens/Auth/LoginScreen';
 import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { IntakeScreen } from '../screens/Queue/IntakeScreen';
@@ -73,11 +74,20 @@ const AppTabs = () => {
 };
 
 export function RootNavigator() {
-  const { isLoggedIn, activeRole, authInitialized, initializeAuth } = useAuthStore();
+  const { isLoggedIn, activeRole, authInitialized, initializeAuth, user } = useAuthStore();
 
   useEffect(() => {
     initializeAuth();
   }, [initializeAuth]);
+
+  // Initialize the rider's live listeners as soon as they're authenticated, so
+  // task announcements + shift state work regardless of which tab is open.
+  const uid = user?.id;
+  useEffect(() => {
+    if (uid && activeRole === 'rider') {
+      useOpsStaffStore.getState().initialize(uid);
+    }
+  }, [uid, activeRole]);
 
   if (!authInitialized) {
     return (
