@@ -133,9 +133,15 @@ export function HomeScreen() {
       geoError = 'unavailable';
     }
 
-    // Geo is a soft corroboration — the store QR + face are the primary in-store
-    // proof. Record the outcome and still allow going online.
     if (geoError) {
+      // Soft by default: the store QR + face are the primary in-store proof. When
+      // the store confirms its location, config/opsStores.enforceGeofence: true
+      // makes the geo check a hard gate.
+      if (store.enforceGeofence) {
+        setNotice(`Location not verified (${geoError}). Stay within ${store.radiusMeters}m of the store to go online.`);
+        setBusy(false);
+        return;
+      }
       setNotice(`Location not verified (${geoError}). Continuing without the geo check.`);
     }
 

@@ -45,6 +45,7 @@ export interface StoreInfo {
   lat: number;
   lng: number;
   radiusMeters: number;
+  enforceGeofence: boolean;
 }
 
 interface OpsStaffState {
@@ -145,6 +146,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         lat: s.lat,
         lng: s.lng,
         radiusMeters: s.radiusMeters || 150,
+        enforceGeofence: s.enforceGeofence === true,
       };
     } catch (err) {
       console.error('[opsStaff] fetchStore failed:', err);
