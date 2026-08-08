@@ -33,8 +33,8 @@ function fmtDurationMs(ms: number): string {
 export function HomeScreen() {
   const user = useAuthStore(s => s.user);
   const activeRole = useAuthStore(s => s.activeRole);
-  const { staffDoc, goOnShift, goOffShift, fetchStore, error } = useOpsStaffStore();
-  const { processes, initialize } = useOpsProcessStore();
+  const { staffDoc, goOnShift, goOffShift, fetchStore, initialize: initializeStaff, error } = useOpsStaffStore();
+  const { processes, initialize: initializeProcess } = useOpsProcessStore();
 
   const [verifyStep, setVerifyStep] = useState<VerifyStep>('none');
   const [store, setStore] = useState<StoreInfo | null>(null);
@@ -42,21 +42,29 @@ export function HomeScreen() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user?.id) initialize(user.id);
-  }, [user?.id, initialize]);
+    if (user?.id) {
+      initializeStaff(user.id);
+      initializeProcess(user.id);
+    }
+  }, [user?.id, initializeStaff, initializeProcess]);
 
   const onShift = !!staffDoc?.onShift;
   const displayName = staffDoc?.name || user?.name || 'Staff';
   const staffId = user?.phone || user?.id || '';
 
   const performance = useMemo(() => {
-    const done = processes.filter(isDone);
+    let ordersCompleted = 0;
     let totalMs = 0;
-    for (const p of done) {
-      for (const st of Object.values(p.stages)) totalMs += st.durationMs || 0;
+    for (const p of processes) {
+      if (!isDone(p)) continue;
+      // The helper's own contribution: stages they worked on this order.
+      const mine = Object.values(p.stages).filter(s => s.assignee === user?.id);
+      if (mine.length === 0) continue;
+      ordersCompleted += 1;
+      for (const s of mine) totalMs += s.durationMs || 0;
     }
-    return { ordersCompleted: done.length, avgMs: done.length > 0 ? totalMs / done.length : 0 };
-  }, [processes]);
+    return { ordersCompleted, avgMs: ordersCompleted > 0 ? totalMs / ordersCompleted : 0 };
+  }, [processes, user?.id]);
 
   const shiftMinutes = (() => {
     const v = staffDoc?.shiftStartAt;
@@ -80,7 +88,7 @@ export function HomeScreen() {
       setStore(null);
       setVerifyStep('face');
     } else if (user?.id) {
-      goOffShift(user.id);
+      goOffShift(user.id).catch(() => {});
     }
   };
 
@@ -131,16 +139,19 @@ export function HomeScreen() {
       setNotice(`Location not verified (${geoError}). Continuing without the geo check.`);
     }
 
-    await goOnShift(user.id, user.role, user.phone, user.name, {
-      storeId: store.storeId,
-      storeName: store.name,
-      ...(geoError
-        ? { geoVerifiedAt: null, geoError }
-        : { geoVerifiedAt: new Date(), geoError: null }),
-      verifiedAt: new Date(),
-    });
-    setBusy(false);
-    setVerifyStep('none');
+    try {
+      await goOnShift(user.id, activeRole || user.role, user.phone, user.name, {
+        storeId: store.storeId,
+        storeName: store.name,
+        ...(geoError
+          ? { geoVerifiedAt: null, geoError }
+          : { geoVerifiedAt: new Date(), geoError: null }),
+        verifiedAt: new Date(),
+      });
+    } finally {
+      setBusy(false);
+      setVerifyStep('none');
+    }
   };
 
   return (
@@ -152,9 +163,11 @@ export function HomeScreen() {
           <View className="flex-1 mr-3">
             <Text className="text-xl font-bold text-textPrimary">{displayName}</Text>
             <Text className="text-textSecondary text-sm mt-1">ID: {staffId}</Text>
-            {onShift && store && (
-              <Text className="text-textSecondary text-xs mt-1">Active at {store.name}</Text>
-            )}
+            {onShift && (staffDoc?.storeName || store?.name) ? (
+              <Text className="text-textSecondary text-xs mt-1">
+                Active at {staffDoc?.storeName || store?.name}
+              </Text>
+            ) : null}
             {activeRole ? (
               <Text className="text-primary text-xs mt-0.5 font-semibold uppercase tracking-wide">
                 {activeRole}
