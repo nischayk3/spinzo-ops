@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { Platform } from 'react-native';
 import { db } from '../config/firebase';
-import { doc, onSnapshot, query, collection, where, setDoc } from 'firebase/firestore';
+import { doc, onSnapshot, query, collection, where, setDoc, getDoc } from 'firebase/firestore';
 import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
 import { primeAlerts, announceAssignedPickup } from '../utils/alerts';
 
@@ -33,6 +33,18 @@ export interface StaffDoc {
   name?: string;
   onShift?: boolean;
   shiftStartAt?: unknown;
+  storeId?: string;
+  storeName?: string;
+  geoVerifiedAt?: unknown;
+  verifiedAt?: unknown;
+}
+
+export interface StoreInfo {
+  storeId: string;
+  name: string;
+  lat: number;
+  lng: number;
+  radiusMeters: number;
 }
 
 interface OpsStaffState {
@@ -41,8 +53,9 @@ interface OpsStaffState {
   isLoading: boolean;
   error: string | null;
   initialize: (uid: string) => void;
-  goOnShift: (uid: string, role: string, phone: string, name?: string) => Promise<void>;
+  goOnShift: (uid: string, role: string, phone: string, name?: string, extra?: Record<string, unknown>) => Promise<void>;
   goOffShift: (uid: string) => Promise<void>;
+  fetchStore: (storeId: string) => Promise<StoreInfo | null>;
   reset: () => void;
 }
 
@@ -95,7 +108,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     );
   },
 
-  goOnShift: async (uid, role, phone, name) => {
+  goOnShift: async (uid, role, phone, name, extra) => {
     primeAlerts();
     try {
       await setDoc(
@@ -107,12 +120,35 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
           name: name || '',
           onShift: true,
           shiftStartAt: new Date(),
+          ...(extra || {}),
         },
         { merge: true }
       );
     } catch (err) {
       set({ error: String(err) });
       throw err;
+    }
+  },
+
+  fetchStore: async (storeId) => {
+    try {
+      // config/opsStores is a single config doc with a `stores` map, matching the
+      // existing config/adminPhones pattern (see firestore.rules).
+      const snap = await getDoc(doc(db, 'config', 'opsStores'));
+      if (!snap.exists()) return null;
+      const stores = (snap.data() as any).stores || {};
+      const s = stores[storeId];
+      if (!s) return null;
+      return {
+        storeId,
+        name: s.name || storeId,
+        lat: s.lat,
+        lng: s.lng,
+        radiusMeters: s.radiusMeters || 150,
+      };
+    } catch (err) {
+      console.error('[opsStaff] fetchStore failed:', err);
+      return null;
     }
   },
 

@@ -8,10 +8,11 @@ import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { IntakeScreen } from '../screens/Queue/IntakeScreen';
 import { FloorBoardScreen } from '../screens/Queue/FloorBoardScreen';
 import { PickupsScreen } from '../screens/Rider/PickupsScreen';
+import { HomeScreen } from '../screens/Helper/HomeScreen';
 import { ProcessingScreen } from '../screens/Helper/ProcessingScreen';
 import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
-import { Home, ClipboardList, Settings, Bike, WashingMachine } from 'lucide-react-native';
+import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox } from 'lucide-react-native';
 import { View, ActivityIndicator } from 'react-native';
 
 export type RootStackParamList = {
@@ -43,9 +44,18 @@ const AppTabs = () => {
         tabBarInactiveTintColor: '#64748B',
       }}
     >
+      {(activeRole === 'helper' || activeRole === 'iron') && (
+        <Tab.Screen
+          name="Home"
+          options={{ tabBarIcon: ({ color }) => <Home color={color} size={24} /> }}
+        >
+          {() => <HomeScreen />}
+        </Tab.Screen>
+      )}
+
       <Tab.Screen
         name="Intake"
-        options={{ tabBarIcon: ({ color }) => <Home color={color} size={24} /> }}
+        options={{ tabBarIcon: ({ color }) => <Inbox color={color} size={24} /> }}
       >
         {() => <IntakeScreen />}
       </Tab.Screen>
@@ -68,7 +78,7 @@ const AppTabs = () => {
         </Tab.Screen>
       )}
 
-      {activeRole === 'helper' && (
+      {(activeRole === 'helper' || activeRole === 'iron') && (
         <Tab.Screen
           name="Processing"
           options={{ tabBarIcon: ({ color }) => <WashingMachine color={color} size={24} /> }}
