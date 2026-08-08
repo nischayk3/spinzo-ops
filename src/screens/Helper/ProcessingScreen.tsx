@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
@@ -8,7 +8,7 @@ import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { serviceSummary, FeedOrder } from '../../utils/orderFeed';
-import { currentStep, isDone, stage, stepLabel, stepQueue, OpsProcess } from '../../utils/opsProcess';
+import { currentStep, isDone, myInProgress, stage, stepLabel, stepQueue, OpsProcess } from '../../utils/opsProcess';
 import { slaRemainingMinutes, slaTone, STAGE_SLA_MINUTES, SlaTone } from '../../utils/sla';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
 
@@ -22,6 +22,11 @@ const STAGE_ORDER = [
   'getting_folded',
   'getting_ironed',
 ];
+const KNOWN_STAGES = new Set(STAGE_ORDER);
+
+// Fallback bucket for a process whose current step isn't in STAGE_ORDER, so it
+// never silently vanishes from the counts/queues.
+const OTHER_KEY = '__other__';
 
 // Mirrors the server's stageRoleGate: helpers take everything except ironing;
 // only iron-role staff (and supervisors) take ironing. The UI uses this to keep
@@ -31,6 +36,8 @@ const canStartStage = (role: string | null | undefined, step: string): boolean =
   if (role === 'iron') return step === 'getting_ironed';
   return step !== 'getting_ironed';
 };
+
+const tabLabel = (step: string): string => (step === OTHER_KEY ? 'Other' : stepLabel(step));
 
 const TONE_CLASS: Record<SlaTone, string> = {
   muted: 'text-textMuted',
@@ -65,13 +72,6 @@ export function ProcessingScreen() {
     return m;
   }, [orders]);
 
-  // A process is this helper's work while any stage is assigned to them and not
-  // completed — captures claimed-but-paused orders that myInProgress would drop.
-  const hasUnfinishedAssignment = (p: OpsProcess): boolean => {
-    if (!user?.id) return false;
-    return Object.values(p.stages).some(s => s.assignee === user.id && !s.completedAt);
-  };
-
   // pickup_completed orders with no ops_process yet — the helper's entry point
   // to claim new work (claiming starts the tagging stage in OrderDetail).
   const claimableOrders = useMemo(() => {
@@ -80,14 +80,26 @@ export function ProcessingScreen() {
     return orders.filter(o => o.status === 'pickup_completed' && !claimed.has(o.id));
   }, [orders, processes, activeRole]);
 
+  // Which tab bucket a process belongs to. Unknown current steps fall through to
+  // an "Other" bucket so they never silently disappear.
+  const bucketOf = (p: OpsProcess): string | null => {
+    const cur = currentStep(p);
+    if (!cur) return null;
+    return KNOWN_STAGES.has(cur) ? cur : OTHER_KEY;
+  };
+
   const counts = useMemo(() => {
     const c: Record<string, { pending: number; mine: number }> = {};
     for (const step of STAGE_ORDER) c[step] = { pending: 0, mine: 0 };
+    c[OTHER_KEY] = { pending: 0, mine: 0 };
     for (const p of processes) {
+      const bucket = bucketOf(p);
+      if (!bucket) continue;
+      if (myInProgress(p, user?.id || '')) c[bucket].mine += 1;
       const cur = currentStep(p);
-      if (!cur || !c[cur]) continue;
-      if (hasUnfinishedAssignment(p)) c[cur].mine += 1;
-      if (stepQueue(p, cur) && canStartStage(activeRole, cur)) c[cur].pending += 1;
+      if (cur && stepQueue(p, cur) && !myInProgress(p, user?.id || '') && canStartStage(activeRole, cur)) {
+        c[bucket].pending += 1;
+      }
     }
     c.tagging.pending += claimableOrders.length;
     return c;
@@ -99,21 +111,27 @@ export function ProcessingScreen() {
       for (const o of claimableOrders) items.push({ key: `o-${o.id}`, orderId: o.id });
     }
     for (const p of processes) {
-      if (currentStep(p) !== selected) continue;
-      if (stepQueue(p, selected) && canStartStage(activeRole, selected)) {
-        items.push({ key: p.id, orderId: p.orderId, process: p });
-      }
+      if (bucketOf(p) !== selected) continue;
+      const cur = currentStep(p);
+      if (!cur) continue;
+      // Pending is other people's unclaimed work — never my own current step.
+      if (!stepQueue(p, cur) || myInProgress(p, user?.id || '') || !canStartStage(activeRole, cur)) continue;
+      items.push({ key: p.id, orderId: p.orderId, process: p });
     }
     return items;
-  }, [selected, processes, claimableOrders, activeRole]);
+  }, [selected, processes, claimableOrders, activeRole, user?.id]);
 
-  const myItems = useMemo<QueueItem[]>(
-    () =>
-      processes
-        .filter(p => currentStep(p) === selected && hasUnfinishedAssignment(p))
-        .map(p => ({ key: p.id, orderId: p.orderId, process: p })),
-    [selected, processes, user?.id],
-  );
+  const myItems = useMemo<QueueItem[]>(() => {
+    const items: QueueItem[] = [];
+    for (const p of processes) {
+      if (bucketOf(p) !== selected) continue;
+      // "Mine" is scoped to the CURRENT step: myInProgress already catches
+      // claimed-but-paused current-step work.
+      if (!myInProgress(p, user?.id || '')) continue;
+      items.push({ key: p.id, orderId: p.orderId, process: p });
+    }
+    return items;
+  }, [selected, processes, user?.id]);
 
   const renderCard = (item: QueueItem) => {
     const order = orderById.get(item.orderId);
@@ -160,18 +178,22 @@ export function ProcessingScreen() {
     );
   }
 
+  const tabs = [...STAGE_ORDER];
+  if ((counts[OTHER_KEY]?.pending || 0) + (counts[OTHER_KEY]?.mine || 0) > 0) tabs.push(OTHER_KEY);
+  const selectedLabel = tabLabel(selected);
+
   return (
     <SafeAreaView className="flex-1 bg-bgDark">
       <View className="px-4 pt-4 pb-2">
         <Text className="text-2xl font-bold text-textPrimary">Processing</Text>
         <Text className="text-textSecondary">
-          {stepLabel(selected)} queue · {pendingItems.length} pending · {myItems.length} yours
+          {selectedLabel} queue · {pendingItems.length} pending · {myItems.length} yours
         </Text>
       </View>
 
       <ScrollView horizontal showsHorizontalScrollIndicator={false} className="px-4 mb-3">
         <View className="flex-row">
-          {STAGE_ORDER.map(step => {
+          {tabs.map(step => {
             const c = counts[step] || { pending: 0, mine: 0 };
             const isSel = step === selected;
             return (
@@ -181,7 +203,7 @@ export function ProcessingScreen() {
                 className={`mr-2 px-3 py-2 rounded-full border ${isSel ? 'bg-primary border-primary' : 'bg-bgSurface border-bgSurfaceLight'}`}
               >
                 <Text className={`text-xs font-bold ${isSel ? 'text-bgDark' : 'text-textSecondary'}`}>
-                  {stepLabel(step)}
+                  {tabLabel(step)}
                 </Text>
                 <Text className={`text-xs ${isSel ? 'text-bgDark/70' : 'text-textMuted'}`}>
                   {c.pending + c.mine}
@@ -214,7 +236,9 @@ export function ProcessingScreen() {
             <Text className="text-textMuted text-center mt-2">
               {selected === 'tagging'
                 ? 'No orders waiting to be tagged right now.'
-                : `No ${stepLabel(selected)} work right now.`}
+                : selected === OTHER_KEY
+                  ? 'No other-stage work right now.'
+                  : `No ${selectedLabel} work right now.`}
             </Text>
           </View>
         )}

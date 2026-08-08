@@ -14,6 +14,14 @@ import type { RootStackParamList } from '../../navigation/RootNavigator';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
 
+// Mirrors ProcessingScreen's stageRoleGate: helpers take everything except
+// ironing; only iron-role staff (and supervisors) take ironing.
+const canStartStage = (role: string | null | undefined, step: string): boolean => {
+  if (role === 'supervisor') return true;
+  if (role === 'iron') return step === 'getting_ironed';
+  return step !== 'getting_ironed';
+};
+
 // Map server error codes (the httpsCallable returns them as res.data.error) to
 // friendly copy for the garment flow.
 const friendlyScanError = (code: string): string => {
@@ -67,6 +75,7 @@ const fmtDuration = (ms?: number): string => {
 export function OrderDetailScreen({ route, navigation }: Props) {
   const { orderId } = route.params;
   const user = useAuthStore(s => s.user);
+  const activeRole = useAuthStore(s => s.activeRole);
   const orders = useOrderFeedStore(s => s.orders);
   const { processes, claim, startStep, completeStep, printLabels, scanGarment, unregisterGarment, submitTagging } =
     useOpsProcessStore();
@@ -89,17 +98,32 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const registered = garments.registered || [];
   const registeredCount = registered.length;
 
-  // The garment flow is the tagging stage up until it's submitted.
-  const inTaggingFlow = !!(process && cur === 'tagging' && !taggingDone);
+  // The garment flow is the tagging stage up until it's submitted, and only for
+  // the helper who claimed the order (or a supervisor).
+  const isTaggingAssignee =
+    user?.role === 'supervisor' || (!!taggingStage && taggingStage.assignee === user?.id);
+  const inTaggingFlow = !!(process && cur === 'tagging' && !taggingDone && isTaggingAssignee);
+  const taggingInProgressByOther = !!(process && cur === 'tagging' && !taggingDone && !isTaggingAssignee);
   // Submit is only meaningful once labels have been printed (count set).
   const showSubmit = inTaggingFlow && garments.count != null;
+
+  // Claim is only offered when there is no process yet, the order is ready, and
+  // the caller's role can start the tagging stage.
+  const claimable = !process && order?.status === 'pickup_completed' && canStartStage(activeRole, 'tagging');
+
+  // Submit requires every printed garment to be registered (the server enforces
+  // not_all_registered too; the UI makes the requirement visible up front).
+  const submitReady = showSubmit && registeredCount === garments.count;
 
   const runAction = async (fn: () => Promise<OpsProcessingResult>) => {
     setBusy(true);
     setActionError(null);
-    const res = await fn();
-    if (!res.ok) setActionError(friendlyActionError(res.error));
-    setBusy(false);
+    try {
+      const res = await fn();
+      if (!res.ok) setActionError(friendlyActionError(res.error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleClaim = () => runAction(() => claim(orderId));
@@ -115,23 +139,30 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     setBusy(true);
     setPrintError(null);
     setActionError(null);
-    const res = await printLabels(orderId, n);
-    if (res.ok && res.labels) {
-      await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
-    } else if (!res.ok) {
-      setPrintError(friendlyActionError(res.error));
-    } else {
-      setPrintError('No labels returned. Try again.');
+    try {
+      const res = await printLabels(orderId, n);
+      if (res.ok && res.labels) {
+        await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
+      } else if (!res.ok) {
+        setPrintError(friendlyActionError(res.error));
+      } else {
+        setPrintError('No labels returned. Try again.');
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const handleScan = async (data: string) => {
     setBusy(true);
     setScanError(null);
-    const res = await scanGarment(orderId, data);
-    if (!res.ok) setScanError(friendlyScanError(res.error));
-    setBusy(false);
+    setActionError(null);
+    try {
+      const res = await scanGarment(orderId, data);
+      if (!res.ok) setScanError(friendlyScanError(res.error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleUnregister = (seq: number) => {
@@ -183,26 +214,37 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
         {/* Main content */}
         {!process ? (
-          <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-            <Text className="text-textPrimary font-bold mb-1">Claim this order</Text>
-            <Text className="text-textSecondary text-sm mb-4">
-              Claiming assigns the tagging stage to you and starts the garment flow.
-            </Text>
-            <TouchableOpacity
-              onPress={handleClaim}
-              disabled={busy}
-              className={`h-12 rounded-xl items-center justify-center flex-row ${busy ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
-            >
-              {busy ? (
-                <ActivityIndicator size="small" color="#0F172A" />
-              ) : (
-                <>
-                  <Play size={18} color="#0F172A" className="mr-2" />
-                  <Text className="text-bgDark font-bold">Claim & Start Tagging</Text>
-                </>
-              )}
-            </TouchableOpacity>
-          </View>
+          claimable ? (
+            <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
+              <Text className="text-textPrimary font-bold mb-1">Claim this order</Text>
+              <Text className="text-textSecondary text-sm mb-4">
+                Claiming assigns the tagging stage to you and starts the garment flow.
+              </Text>
+              <TouchableOpacity
+                onPress={handleClaim}
+                disabled={busy}
+                className={`h-12 rounded-xl items-center justify-center flex-row ${busy ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
+              >
+                {busy ? (
+                  <ActivityIndicator size="small" color="#0F172A" />
+                ) : (
+                  <>
+                    <Play size={18} color="#0F172A" className="mr-2" />
+                    <Text className="text-bgDark font-bold">Claim & Start Tagging</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
+              <Text className="text-textPrimary font-bold mb-1">Not claimable</Text>
+              <Text className="text-textSecondary text-sm">
+                {order?.status === 'pickup_completed'
+                  ? "Your role can't start tagging for this order."
+                  : "This order isn't ready for processing yet."}
+              </Text>
+            </View>
+          )
         ) : done ? (
           <View className="bg-primary/15 border border-primary/40 rounded-xl p-4 mb-3 items-center">
             <CheckCircle2 size={28} color="#22C55E" className="mb-1" />
@@ -295,6 +337,14 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 )}
               </>
             )}
+          </View>
+        ) : taggingInProgressByOther ? (
+          <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
+            <Text className="text-textSecondary font-bold text-xs mb-1 tracking-wide">TAGGING</Text>
+            <Text className="text-textPrimary font-bold text-lg mb-1">Tagging</Text>
+            <Text className="text-textSecondary text-sm">
+              In progress by {taggingStage?.assigneeName || 'another staff member'}.
+            </Text>
           </View>
         ) : (
           <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
@@ -415,10 +465,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         <View className="px-4 py-3 border-t border-bgSurfaceLight">
           <TouchableOpacity
             onPress={handleSubmit}
-            disabled={busy || registeredCount === 0}
-            className={`h-12 rounded-xl items-center justify-center ${busy || registeredCount === 0 ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
+            disabled={busy || !submitReady}
+            className={`h-12 rounded-xl items-center justify-center ${busy || !submitReady ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
           >
-            <Text className={`font-bold ${busy || registeredCount === 0 ? 'text-textMuted' : 'text-bgDark'}`}>
+            <Text className={`font-bold ${busy || !submitReady ? 'text-textMuted' : 'text-bgDark'}`}>
               Submit Tagged Garments ({registeredCount})
             </Text>
           </TouchableOpacity>
