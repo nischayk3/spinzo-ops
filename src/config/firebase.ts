@@ -12,10 +12,13 @@ export const firebaseConfig = {
   appId: '1:597897149776:web:c9a7d4b5c2291f8b35c055',
 };
 
+import { getStorage, FirebaseStorage } from 'firebase/storage';
+
 let app: FirebaseApp;
 let db: Firestore;
 let auth: Auth;
 let functions: Functions;
+let storage: FirebaseStorage;
 
 // Ensure Firebase is only initialized once
 if (getApps().length === 0) {
@@ -27,5 +30,6 @@ if (getApps().length === 0) {
 db = getFirestore(app);
 auth = getAuth(app);
 functions = getFunctions(app, 'us-central1');
+storage = getStorage(app);
 
-export { app, db, auth, functions };
+export { app, db, auth, functions, storage };

@@ -3,6 +3,7 @@ import { OrderStatus } from '../types';
 export const ACTIVE_STATUSES: OrderStatus[] = [
   'placed',
   'confirmed',
+  'in_transit_to_store',
   'pickup_completed',
   'processing',
   'ready',
@@ -18,22 +19,35 @@ export interface FeedOrder {
   status: OrderStatus;
   customerName?: string;
   customerPhone?: string;
+  phone?: string;
   pickupDetails?: {
     type?: string;
     scheduledDate?: string;
     scheduledTime?: string;
     isInstant?: boolean;
   };
+  deliveryDetails?: {
+    scheduledDate?: string;
+    scheduledTime?: string;
+  };
+  deliverySlot?: string;
   items?: Array<{
     serviceName?: string;
     serviceType?: string;
     quantity?: number;
     totalPrice?: number;
   }>;
+  totalAmount?: number;
+  paymentStatus?: string;
+  notes?: string;
   tokenNumber?: string;
   pickupOTP?: string;
-  address?: string;
+  storeOTP?: string;
+  address?: { formattedAddress?: string; latitude?: number; longitude?: number } | any;
   processingStep?: string;
+  deliveryDate?: string;
+  deliveryTime?: string;
+  deliveryOTP?: string;
   createdAt?: any;
 }
 
@@ -50,11 +64,15 @@ export function filterActiveOrders(orders: FeedOrder[]): FeedOrder[] {
 }
 
 export function sortNewestFirst(orders: FeedOrder[]): FeedOrder[] {
-  const getMs = (v: any): number => {
-    if (!v) return 0;
-    if (typeof v.toDate === 'function') return v.toDate().getTime();
-    if (typeof v.seconds === 'number') return v.seconds * 1000;
-    return new Date(v).getTime() || 0;
+  const getMs = (t: any): number => {
+    if (!t) return 0;
+    if (typeof t === 'number') return t;
+    if (typeof t.toMillis === 'function') return t.toMillis();
+    if (typeof t.toDate === 'function') return t.toDate().getTime();
+    if (t.seconds) return t.seconds * 1000;
+    if (typeof t.getTime === 'function') return t.getTime();
+    const parsed = new Date(t).getTime();
+    return isNaN(parsed) ? 0 : parsed;
   };
   return [...orders].sort((a, b) => getMs(b.createdAt) - getMs(a.createdAt));
 }

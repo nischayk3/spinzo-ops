@@ -81,13 +81,17 @@ function getProcessingSteps(order) {
     type === 'wash_fold' || type === 'wash_iron' || type === 'blanket_wash' ||
     type === 'premium_laundry' || type === 'dry_clean' || type === 'shoe_clean');
   if (needsWash) steps.push('getting_washed');
-  const needsDry = serviceTypes.some((type) => type === 'blanket_wash' || type === 'shoe_clean' || type === 'dry_clean');
+  
+  // Anything that is washed must be dried.
+  const needsDry = needsWash;
   const needsFold = serviceTypes.some((type) => type === 'wash_fold' || type === 'premium_laundry');
-  const needsIron = serviceTypes.some((type) => type === 'wash_iron' || type === 'ironing');
+  const needsIron = serviceTypes.some((type) => type === 'wash_iron' || type === 'ironing' || type === 'dry_clean');
+  
   if (needsDry) steps.push('getting_dried');
   if (needsFold) steps.push('getting_folded');
   if (needsIron) steps.push('getting_ironed');
-  if (steps.length === 0) return ['getting_washed', 'getting_folded'];
+  
+  if (steps.length === 0) return ['getting_washed', 'getting_dried', 'getting_folded'];
   return steps;
 }
 
@@ -103,12 +107,10 @@ function nextStep(current, steps) {
   return steps[i + 1] || null;
 }
 
-// Ops-only stages prepended to the production pipeline. Prestain is skipped for
-// ironing-only orders (no wash/dry stage to inspect before).
+// Ops-only stages prepended to the production pipeline.
 function opsStepsForOrder(order) {
   const prod = getProcessingSteps(order);
-  const onlyIroning = prod.length === 1 && prod[0] === 'getting_ironed';
-  return onlyIroning ? ['tagging', ...prod] : ['tagging', 'prestain', ...prod];
+  return ['tagging', ...prod, 'packaging'];
 }
 
 const PRODUCTION_STEPS = new Set(['getting_washed', 'getting_dried', 'getting_folded', 'getting_ironed']);

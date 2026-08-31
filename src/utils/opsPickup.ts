@@ -32,3 +32,26 @@ export async function verifyPickupOTP(
     return { ok: false, error: `request_failed: ${msg}` };
   }
 }
+
+export async function verifyStoreOTP(
+  orderId: string,
+  otp: string
+): Promise<VerifyPickupResult> {
+  try {
+    const callable = httpsCallable<{ action: string; orderId: string; otp: string }, VerifyPickupResult>(functions, 'opsStatusSync');
+    const res = await callable({ action: 'verifyStoreOTP', orderId, otp });
+    return res.data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'network_error' };
+  }
+}
+
+export async function acceptTask(orderId: string, isDelivery?: boolean): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const callable = httpsCallable<{ action: string; orderId: string; isDelivery?: boolean }, { ok: boolean; error?: string }>(functions, 'opsStatusSync');
+    const res = await callable({ action: 'acceptTask', orderId, isDelivery: !!isDelivery });
+    return res.data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'network_error' };
+  }
+}

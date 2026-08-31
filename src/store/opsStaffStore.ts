@@ -48,9 +48,28 @@ export interface StoreInfo {
   enforceGeofence: boolean;
 }
 
+export interface DeliveryTask {
+  id: string;
+  orderId: string;
+  userId: string;
+  vendorId: string;
+  status: string;
+  assignee: string | null;
+  deliveryAddress: string;
+  deliveryDate: string | null;
+  deliveryTime: string | null;
+  deliveryOTP: string | null;
+  customerName: string;
+  customerPhone: string;
+  assignedAt?: unknown;
+  acceptedAt?: unknown;
+  createdAt?: unknown;
+}
+
 interface OpsStaffState {
   staffDoc: StaffDoc | null;
   myTasks: OpsTask[];
+  myDeliveries: DeliveryTask[];
   isLoading: boolean;
   error: string | null;
   initialize: (uid: string) => void;
@@ -62,18 +81,21 @@ interface OpsStaffState {
 
 let unsubStaff: (() => void) | null = null;
 let unsubTasks: (() => void) | null = null;
+let unsubDeliveries: (() => void) | null = null;
 // Tracks ids we've already alerted on so a refresh/re-subscribe doesn't re-announce.
 const announcedTaskIds = loadAnnounced();
 
 export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   staffDoc: null,
   myTasks: [],
+  myDeliveries: [],
   isLoading: false,
   error: null,
 
   initialize: (uid) => {
     unsubStaff?.();
     unsubTasks?.();
+    unsubDeliveries?.();
 
     set({ isLoading: true });
 
@@ -106,6 +128,36 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         set({ myTasks: tasks });
       },
       (err) => set({ error: String(err), isLoading: false })
+    );
+
+    // Listen for delivery tasks assigned to this rider
+    unsubDeliveries = onSnapshot(
+      query(collection(db, 'ops_delivery_tasks'), where('assignee', '==', uid)),
+      (snap) => {
+        const deliveries: DeliveryTask[] = [];
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          deliveries.push({
+            id: docSnap.id,
+            orderId: d.orderId || docSnap.id,
+            userId: d.userId || '',
+            vendorId: d.vendorId || 'vendor_1',
+            status: d.status || 'pending',
+            assignee: d.assignee || null,
+            deliveryAddress: d.deliveryAddress || '',
+            deliveryDate: d.deliveryDate || null,
+            deliveryTime: d.deliveryTime || null,
+            deliveryOTP: d.deliveryOTP || null,
+            customerName: d.customerName || '',
+            customerPhone: d.customerPhone || '',
+            assignedAt: d.assignedAt,
+            acceptedAt: d.acceptedAt,
+            createdAt: d.createdAt,
+          });
+        });
+        set({ myDeliveries: deliveries });
+      },
+      (err) => console.error('[opsStaff] delivery tasks error:', err)
     );
   },
 
@@ -166,8 +218,10 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   reset: () => {
     unsubStaff?.();
     unsubTasks?.();
+    unsubDeliveries?.();
     unsubStaff = null;
     unsubTasks = null;
-    set({ staffDoc: null, myTasks: [], isLoading: false, error: null });
+    unsubDeliveries = null;
+    set({ staffDoc: null, myTasks: [], myDeliveries: [], isLoading: false, error: null });
   },
 }));

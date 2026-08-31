@@ -1,7 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
-import { X, Printer, ScanLine, CheckCircle2, Play } from 'lucide-react-native';
+import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus } from 'lucide-react-native';
+import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
+import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
+import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
+import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
@@ -9,21 +13,14 @@ import { serviceSummary } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
+import { canStartStage } from './ProcessingScreen';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
+import { PackagingVerification } from '../../components/PackagingVerification';
+import { WorkflowSteps } from '../../components/WorkflowSteps';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
 
-// Mirrors ProcessingScreen's stageRoleGate: helpers take everything except
-// ironing; only iron-role staff (and supervisors) take ironing.
-const canStartStage = (role: string | null | undefined, step: string): boolean => {
-  if (role === 'supervisor') return true;
-  if (role === 'iron') return step === 'getting_ironed';
-  return step !== 'getting_ironed';
-};
-
-// Map server error codes (the httpsCallable returns them as res.data.error) to
-// friendly copy for the garment flow.
 const friendlyScanError = (code: string): string => {
   const map: Record<string, string> = {
     not_this_order: 'This label belongs to a different order.',
@@ -50,42 +47,28 @@ const friendlyActionError = (code: string): string => {
   return map[code] || code || 'Request failed.';
 };
 
-const fmtTime = (v: unknown): string => {
-  if (!v) return '—';
-  let ms: number;
-  if (typeof (v as any).toDate === 'function') ms = (v as any).toDate().getTime();
-  else if (typeof (v as any).seconds === 'number') ms = (v as any).seconds * 1000;
-  else ms = new Date(v as any).getTime();
-  if (Number.isNaN(ms)) return '—';
-  const d = new Date(ms);
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${p(d.getHours())}:${p(d.getMinutes())}`;
-};
-
-const fmtDuration = (ms?: number): string => {
-  if (ms == null) return '';
-  const totalSec = Math.round(ms / 1000);
-  if (totalSec < 60) return `${totalSec}s`;
-  const mins = Math.floor(totalSec / 60);
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  return `${h}h ${mins % 60}m`;
-};
-
 export function OrderDetailScreen({ route, navigation }: Props) {
   const { orderId } = route.params;
   const user = useAuthStore(s => s.user);
   const activeRole = useAuthStore(s => s.activeRole);
   const orders = useOrderFeedStore(s => s.orders);
-  const { processes, claim, startStep, completeStep, printLabels, scanGarment, unregisterGarment, submitTagging } =
-    useOpsProcessStore();
+  const { processes, claim, startStep, completeStep, printLabels, scanGarment, unregisterGarment, submitTagging, cancelOrder, reschedulePickup, scheduleDelivery, markOutForDelivery, verifyDeliveryOTP } = useOpsProcessStore();
 
   const [countText, setCountText] = useState('');
   const [printError, setPrintError] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [otp, setOtp] = useState('');
   const [scannerVisible, setScannerVisible] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [showQualityVerification, setShowQualityVerification] = useState(false);
+  const [showPackagingVerification, setShowPackagingVerification] = useState(false);
+  
+  // Supervisor Modals
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [showRescheduleModal, setShowRescheduleModal] = useState(false);
+  const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
 
   const order = useMemo(() => orders.find(o => o.id === orderId), [orders, orderId]);
   const process = useMemo(() => processes.find(p => p.orderId === orderId), [processes, orderId]);
@@ -93,34 +76,20 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const cur = process ? currentStep(process) : null;
   const done = process ? isDone(process) : false;
   const taggingStage = process?.stages?.tagging;
-  const taggingDone = !!taggingStage?.completedAt;
   const garments = process?.garments || {};
   const registered = garments.registered || [];
+  const registeredSeqs = registered.map((r: any) => typeof r === 'number' ? r : r.seq);
   const registeredCount = registered.length;
 
-  // The garment flow is the tagging stage up until it's submitted, and only for
-  // the helper who claimed the order (or a supervisor).
-  const isTaggingAssignee =
-    user?.role === 'supervisor' || (!!taggingStage && taggingStage.assignee === user?.id);
-  const inTaggingFlow = !!(process && cur === 'tagging' && !taggingDone && isTaggingAssignee);
-  const taggingInProgressByOther = !!(process && cur === 'tagging' && !taggingDone && !isTaggingAssignee);
-  // Submit is only meaningful once labels have been printed (count set).
-  const showSubmit = inTaggingFlow && garments.count != null;
+  const isAssignee = user?.role === 'supervisor' || (cur && process?.stages?.[cur]?.assignee === user?.id);
 
-  // Claim is only offered when there is no process yet, the order is ready, and
-  // the caller's role can start the tagging stage.
-  const claimable = !process && order?.status === 'pickup_completed' && canStartStage(activeRole, 'tagging');
-
-  // Submit requires every printed garment to be registered (the server enforces
-  // not_all_registered too; the UI makes the requirement visible up front).
-  const submitReady = showSubmit && registeredCount === garments.count;
-
-  const runAction = async (fn: () => Promise<OpsProcessingResult>) => {
+  const runAction = async (fn: () => Promise<OpsProcessingResult>, onSuccess?: () => void) => {
     setBusy(true);
     setActionError(null);
     try {
       const res = await fn();
       if (!res.ok) setActionError(friendlyActionError(res.error));
+      else if (onSuccess) onSuccess();
     } finally {
       setBusy(false);
     }
@@ -128,7 +97,15 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const handleClaim = () => runAction(() => claim(orderId));
   const handleStart = () => runAction(() => startStep(orderId));
-  const handleComplete = () => runAction(() => completeStep(orderId));
+  const handleComplete = () => {
+    // Quality and Packaging verification required for packaging step
+
+    if (cur === 'packaging' && !showPackagingVerification) {
+      setShowPackagingVerification(true);
+      return;
+    }
+    runAction(() => completeStep(orderId), () => navigation.goBack());
+  };
 
   const handlePrint = async () => {
     const n = Number(countText.trim());
@@ -158,329 +135,505 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     setScanError(null);
     setActionError(null);
     try {
-      const res = await scanGarment(orderId, data);
+      // DEV BYPASS: Accept any scan (or button press) and register the next expected QR
+      const nextSeq = Array.from({ length: garments.count || 0 })
+        .map((_, i) => i + 1)
+        .find(seq => !registeredSeqs.includes(seq));
+        
+      if (!nextSeq) return;
+      const expectedQr = `SPNZ:${orderId}:${nextSeq}`;
+      
+      const res = await scanGarment(orderId, expectedQr);
       if (!res.ok) setScanError(friendlyScanError(res.error));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleUnregister = (seq: number) => {
-    runAction(() => unregisterGarment(orderId, seq));
+  const handleSubmitTagging = () => runAction(() => submitTagging(orderId), () => navigation.goBack());
+
+  const handleCancelOrder = async (reason: string, note: string) => {
+    if (!order) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await cancelOrder(orderId, order.userId, reason, note);
+      if (!res.ok) setActionError(friendlyActionError(res.error));
+      else Alert.alert("Success", "Order cancelled successfully.");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleSubmit = () => {
-    runAction(() => submitTagging(orderId));
+  const handleReschedule = async (dateStr: string, slot: string) => {
+    if (!order) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const isDelivery = order.status === 'ready';
+      const res = isDelivery 
+        ? await scheduleDelivery(orderId, order.userId, dateStr, slot)
+        : await reschedulePickup(orderId, order.userId, dateStr, slot);
+        
+      if (!res.ok) setActionError(friendlyActionError(res.error));
+      else Alert.alert("Success", `${isDelivery ? 'Delivery' : 'Pickup'} rescheduled successfully.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleMarkOutForDelivery = async () => {
+    if (!order) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await markOutForDelivery(orderId, order.userId);
+      if (!res.ok) setActionError(friendlyActionError(res.error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVerifyDeliveryOTP = async () => {
+    if (!order || !otp) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await verifyDeliveryOTP(orderId, order.userId, otp);
+      if (!res.ok) setActionError(friendlyActionError(res.error));
+      else Alert.alert("Success", "Delivery verified successfully.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleWhatsApp = () => {
+    if (!order || !order.customerPhone) return;
+    const phone = order.customerPhone.replace(/\D/g, '');
+    const finalPhone = phone.startsWith('91') ? phone : `91${phone}`;
+    let message = `Hi ${order.customerName || 'Customer'},\n\nI'm reaching out from *SpinZo* regarding your order *#${orderId.slice(-6).toUpperCase()}*.`;
+    if (order.status === 'ready') {
+      message += `\n\nYour order is *Packed & Ready*! 🧺\nPlease schedule your delivery slot in the app to receive your fresh clothes.`;
+    }
+    const url = `whatsapp://send?text=${encodeURIComponent(message)}&phone=${finalPhone}`;
+    Linking.openURL(url).catch(() => {
+      Linking.openURL(`https://wa.me/${finalPhone}?text=${encodeURIComponent(message)}`);
+    });
   };
 
   const curStage = cur ? stage(process!, cur) : undefined;
   const started = !!curStage?.startedAt;
   const completed = !!curStage?.completedAt;
-  const isMine = !!curStage?.assignee && curStage.assignee === user?.id;
 
   const statusLabel = !process
-    ? order?.status === 'pickup_completed'
-      ? 'Ready to process'
-      : 'Unavailable'
-    : done
-      ? 'Complete'
-      : cur
-        ? stepLabel(cur)
-        : 'No steps';
+    ? order?.status === 'pickup_completed' ? 'Ready to tag' : (order?.status?.replace('_', ' ') || 'Pending')
+    : done ? 'Complete' : cur ? stepLabel(cur) : 'No steps';
 
-  const timeline = useMemo(() => (process ? opsTimeline(process) : []), [process]);
+  const stepArr = process?.steps || [];
+  const currentIndex = cur ? stepArr.indexOf(cur) : (done ? stepArr.length : 0);
 
-  return (
-    <View className="flex-1 bg-bgDark">
-      <ScrollView className="flex-1" contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
-        {/* Header */}
-        <View className="flex-row items-center justify-between mb-4">
-          <TouchableOpacity
-            onPress={() => navigation.goBack()}
-            className="w-10 h-10 rounded-full bg-bgSurface items-center justify-center"
-            accessibilityLabel="Close"
-          >
-            <X size={20} color="#F8FAFC" />
-          </TouchableOpacity>
-          <Text className="text-textPrimary font-bold text-lg">
-            #{orderId.slice(-6).toUpperCase()}
-          </Text>
-          <View className="bg-bgSurface rounded-full px-3 py-1 border border-bgSurfaceLight">
-            <Text className={`text-xs font-bold ${done ? 'text-primary' : 'text-info'}`}>{statusLabel}</Text>
+  // View sections based on stage
+  const renderTagging = () => {
+    if (garments.count == null) {
+      return (
+        <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
+          <Text className="text-gray-900 font-bold mb-4 text-lg">Garment Registration</Text>
+          <Text className="text-gray-500 mb-2">How many garments are in this order?</Text>
+          <View className="flex-row gap-3">
+            <TextInput
+              className="flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-lg font-bold text-gray-900"
+              keyboardType="number-pad"
+              value={countText}
+              onChangeText={setCountText}
+              placeholder="e.g. 5"
+              editable={!busy}
+            />
+            <TouchableOpacity
+              onPress={handlePrint}
+              disabled={busy || !countText.trim()}
+              className={`px-6 rounded-xl justify-center ${busy || !countText.trim() ? 'bg-gray-200' : 'bg-[#994bff]'}`}
+            >
+              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold">Print Labels</Text>}
+            </TouchableOpacity>
           </View>
+          {printError && <Text className="text-red-500 text-sm mt-2 font-medium">{printError}</Text>}
         </View>
-        <Text className="text-textSecondary text-sm mb-1">{order?.customerName || 'Unknown customer'}</Text>
-        <Text className="text-textMuted text-xs mb-5">{order ? serviceSummary(order) : '—'}</Text>
+      );
+    }
 
-        {/* Main content */}
-        {!process ? (
-          claimable ? (
-            <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-              <Text className="text-textPrimary font-bold mb-1">Claim this order</Text>
-              <Text className="text-textSecondary text-sm mb-4">
-                Claiming assigns the tagging stage to you and starts the garment flow.
-              </Text>
+    const allRegistered = registeredCount === garments.count;
+
+    return (
+      <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
+        <Text className="text-gray-900 font-bold mb-4 text-lg">Garment Scanning</Text>
+        
+        <View className="flex-row items-center justify-between mb-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
+          <View>
+            <Text className="text-gray-900 font-bold text-2xl">{registeredCount} / {garments.count}</Text>
+            <Text className="text-gray-500 text-xs uppercase tracking-wider">Garments Scanned</Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => setScannerVisible(true)}
+            disabled={busy || allRegistered}
+            className={`w-14 h-14 rounded-full items-center justify-center ${allRegistered ? 'bg-green-100' : 'bg-[#994bff]'}`}
+          >
+            <Play size={24} color={allRegistered ? '#22c55e' : '#fff'} />
+          </TouchableOpacity>
+        </View>
+
+        {scanError && <Text className="text-red-500 text-sm mb-4 font-medium">{scanError}</Text>}
+
+        <View className="flex-row flex-wrap gap-2 mb-6">
+          {Array.from({ length: garments.count }).map((_, i) => {
+            const seq = i + 1;
+            const isScanned = registeredSeqs.includes(seq);
+            return (
+              <View key={seq} className={`w-12 h-12 rounded-xl items-center justify-center border-2 ${isScanned ? 'bg-green-50 border-green-500' : 'bg-gray-50 border-gray-200'}`}>
+                <Text className={`font-bold ${isScanned ? 'text-green-700' : 'text-gray-400'}`}>{seq}</Text>
+              </View>
+            );
+          })}
+        </View>
+
+        <TouchableOpacity
+          onPress={handleSubmitTagging}
+          disabled={busy || !allRegistered}
+          className={`h-14 rounded-xl items-center justify-center ${allRegistered && !busy ? 'bg-green-500' : 'bg-gray-200'}`}
+        >
+          {busy ? <ActivityIndicator color="#fff" /> : <Text className={`font-bold text-lg ${allRegistered ? 'text-white' : 'text-gray-400'}`}>Submit Tagging</Text>}
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  const renderActionState = () => {
+    if (!process && order?.status === 'pickup_completed') {
+      return (
+        <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
+          <Text className="text-gray-900 font-bold mb-2">Ready for Tagging</Text>
+          <TouchableOpacity
+            onPress={handleClaim}
+            disabled={busy}
+            className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-[#994bff]'}`}
+          >
+            {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Claim & Start Tagging</Text>}
+          </TouchableOpacity>
+        </View>
+      );
+    }
+
+    // If someone else has claimed it and we aren't supervisor, show waiting
+    if (cur && curStage?.assignee && !isAssignee) {
+      return (
+        <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
+          <Text className="text-gray-500 font-bold">In progress by {curStage.assigneeName || 'another worker'}</Text>
+        </View>
+      );
+    }
+
+    if (cur === 'tagging' && (!curStage?.assignee || isAssignee)) {
+      if (activeRole && !canStartStage(activeRole as any, cur)) {
+        return (
+          <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
+            <Text className="text-gray-500 font-bold">Ready for {stepLabel(cur)}.</Text>
+            <Text className="text-gray-400 text-xs mt-1">Please switch to the appropriate role to process.</Text>
+          </View>
+        );
+      }
+      return renderTagging();
+    }
+
+    if (cur && (!curStage?.assignee || isAssignee)) {
+      if (activeRole && !canStartStage(activeRole as any, cur)) {
+        return (
+          <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
+            <Text className="text-gray-500 font-bold">Ready for {stepLabel(cur)}.</Text>
+            <Text className="text-gray-400 text-xs mt-1">Please switch to the appropriate role to process.</Text>
+          </View>
+        );
+      }
+
+      // Packaging Verification Flow
+      if (cur === 'packaging' && showPackagingVerification) {
+        return (
+          <PackagingVerification 
+            orderId={orderId}
+            totalGarments={garments.count || 0} 
+            onComplete={(payload) => runAction(() => useOpsProcessStore.getState().completePackaging(orderId, payload), () => navigation.goBack())} 
+          />
+        );
+      }
+
+      return (
+        <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
+          <Text className="text-gray-900 font-bold mb-4">{stepLabel(cur)}</Text>
+          {!started ? (
+            <TouchableOpacity
+              onPress={handleStart}
+              disabled={busy}
+              className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
+            >
+              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Start {stepLabel(cur)}</Text>}
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              onPress={handleComplete}
+              disabled={busy}
+              className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-green-500'}`}
+            >
+              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Complete {stepLabel(cur)}</Text>}
+            </TouchableOpacity>
+          )}
+        </View>
+      );
+    }
+    
+    if (done) {
+      if (activeRole === 'supervisor') {
+        if (order?.status === 'ready') {
+          return (
+            <View className="bg-white rounded-xl p-5 mb-4 border border-gray-200">
+              <Text className="text-gray-900 font-bold mb-4">Delivery Dispatch</Text>
+              {!order.deliveryDate || !order.deliveryTime ? (
+                <Text className="text-gray-500 mb-4 text-sm">Customer has not scheduled delivery yet. You can schedule it from the menu.</Text>
+              ) : (
+                <Text className="text-gray-600 mb-4 text-sm font-medium">Scheduled for {order.deliveryDate}, {order.deliveryTime}</Text>
+              )}
+              <View className="flex-row gap-3">
+                <TouchableOpacity
+                  onPress={() => setShowAssignRiderModal(true)}
+                  disabled={busy || !order.deliveryDate || !order.deliveryTime}
+                  className={`flex-1 h-14 rounded-xl items-center justify-center ${busy || !order.deliveryDate || !order.deliveryTime ? 'bg-gray-100' : 'bg-blue-50 border border-blue-200'}`}
+                >
+                  <Text className={`font-bold text-sm ${busy || !order.deliveryDate || !order.deliveryTime ? 'text-gray-400' : 'text-blue-700'}`}>Assign Rider</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleMarkOutForDelivery}
+                  disabled={busy || !order.deliveryDate || !order.deliveryTime}
+                  className={`flex-1 h-14 rounded-xl items-center justify-center ${busy || !order.deliveryDate || !order.deliveryTime ? 'bg-gray-200' : 'bg-orange-500'}`}
+                >
+                  {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-sm text-center">Auto-Assign & Dispatch</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        } else if (order?.status === 'out_for_delivery') {
+          return (
+            <View className="bg-white rounded-xl p-5 mb-4 border border-gray-200">
+              <Text className="text-gray-900 font-bold mb-4">Verify Delivery OTP</Text>
+              <TextInput
+                value={otp}
+                onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
+                keyboardType="number-pad"
+                maxLength={4}
+                placeholder="••••"
+                placeholderTextColor="#94a3b8"
+                className="bg-gray-50 border border-gray-200 rounded-xl h-14 px-4 text-center text-xl tracking-[0.5em] text-gray-900 font-bold mb-4"
+              />
               <TouchableOpacity
-                onPress={handleClaim}
-                disabled={busy}
-                className={`h-12 rounded-xl items-center justify-center flex-row ${busy ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
+                onPress={handleVerifyDeliveryOTP}
+                disabled={busy || otp.length !== 4}
+                className={`h-14 rounded-xl items-center justify-center flex-row ${busy || otp.length !== 4 ? 'bg-gray-200' : 'bg-green-500'}`}
               >
-                {busy ? (
-                  <ActivityIndicator size="small" color="#0F172A" />
-                ) : (
-                  <>
-                    <Play size={18} color="#0F172A" className="mr-2" />
-                    <Text className="text-bgDark font-bold">Claim & Start Tagging</Text>
-                  </>
-                )}
+                {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Verify Delivery</Text>}
               </TouchableOpacity>
             </View>
-          ) : (
-            <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-              <Text className="text-textPrimary font-bold mb-1">Not claimable</Text>
-              <Text className="text-textSecondary text-sm">
-                {order?.status === 'pickup_completed'
-                  ? "Your role can't start tagging for this order."
-                  : "This order isn't ready for processing yet."}
-              </Text>
+          );
+        } else if (order?.status === 'delivered') {
+          return (
+            <View className="bg-green-50 rounded-xl p-5 mb-4 border border-green-200 items-center">
+              <Text className="text-green-700 font-bold text-lg">Order Delivered</Text>
             </View>
-          )
-        ) : done ? (
-          <View className="bg-primary/15 border border-primary/40 rounded-xl p-4 mb-3 items-center">
-            <CheckCircle2 size={28} color="#22C55E" className="mb-1" />
-            <Text className="text-primary font-bold">Order Complete</Text>
-            <Text className="text-textSecondary text-xs mt-1">All processing steps are done.</Text>
+          );
+        }
+      }
+
+      return (
+        <View className="bg-green-50 rounded-xl p-5 mb-4 border border-green-200 items-center">
+          <Text className="text-green-700 font-bold text-lg">Order Processing Complete</Text>
+        </View>
+      );
+    }
+
+    return (
+      <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
+        <Text className="text-gray-500 font-bold">Waiting for {cur ? stepLabel(cur) : 'next step'}</Text>
+      </View>
+    );
+  };
+
+  return (
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} className="flex-1 bg-gray-50">
+      <ScrollView className="flex-1" contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+        {/* Header */}
+        <View className="flex-row items-center justify-between mb-4 z-10">
+          <TouchableOpacity onPress={() => navigation.goBack()} className="w-10 h-10 rounded-full bg-white items-center justify-center shadow-sm border border-gray-100">
+            <X size={20} color="#64748b" />
+          </TouchableOpacity>
+          <View className="items-center">
+            <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
+            {process && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
-        ) : inTaggingFlow ? (
-          <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-            <Text className="text-textSecondary font-bold text-xs mb-1 tracking-wide">TAGGING</Text>
-            {garments.count == null ? (
-              <>
-                <Text className="text-textPrimary font-bold mb-1">Total Garments Received</Text>
-                <Text className="text-textSecondary text-sm mb-3">
-                  Print the labels you'll attach to each garment before scanning.
-                </Text>
-                <TextInput
-                  value={countText}
-                  onChangeText={setCountText}
-                  keyboardType="number-pad"
-                  placeholder="e.g. 8"
-                  placeholderTextColor="#64748B"
-                  className="bg-bgDark rounded-lg px-4 h-12 text-textPrimary mb-3"
-                />
-                {printError && <Text className="text-error text-xs mb-3 font-bold">{printError}</Text>}
-                <TouchableOpacity
-                  onPress={handlePrint}
-                  disabled={busy}
-                  className={`h-12 rounded-xl items-center justify-center flex-row ${busy ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
-                >
-                  {busy ? (
-                    <ActivityIndicator size="small" color="#0F172A" />
-                  ) : (
-                    <>
-                      <Printer size={18} color="#0F172A" className="mr-2" />
-                      <Text className="text-bgDark font-bold">Print Labels</Text>
-                    </>
-                  )}
+          <View className="flex-row gap-2 items-center">
+            <View className={`rounded-full px-3 py-1 border justify-center h-8 ${done ? 'bg-green-50 border-green-200' : 'bg-purple-50 border-purple-200'}`}>
+              <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-purple-700'}`}>{statusLabel}</Text>
+            </View>
+            {activeRole === 'supervisor' && (
+              <TouchableOpacity onPress={() => setShowMenu(!showMenu)} className="w-10 h-10 rounded-full bg-white items-center justify-center shadow-sm border border-gray-100">
+                <MoreHorizontal size={20} color="#64748b" />
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {showMenu && activeRole === 'supervisor' && (
+          <View className="absolute top-16 right-5 bg-white rounded-xl shadow-lg border border-gray-100 z-50 overflow-hidden w-48">
+            {(order?.status === 'placed' || order?.status === 'confirmed' || order?.status === 'ready') && (
+              <TouchableOpacity onPress={() => { setShowMenu(false); setShowRescheduleModal(true); }} className="p-4 border-b border-gray-100 flex-row items-center">
+                <Calendar size={16} color="#64748b" className="mr-3" />
+                <Text className="text-gray-700 font-medium">{order?.status === 'ready' ? 'Schedule Delivery' : 'Reschedule Pickup'}</Text>
+              </TouchableOpacity>
+            )}
+            {(order?.status === 'placed' || order?.status === 'confirmed') && (
+              <TouchableOpacity onPress={() => { setShowMenu(false); setShowAssignRiderModal(true); }} className="p-4 border-b border-gray-100 flex-row items-center">
+                <UserPlus size={16} color="#3b82f6" className="mr-3" />
+                <Text className="text-blue-700 font-medium">Assign Rider</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity onPress={() => { setShowMenu(false); handleWhatsApp(); }} className="p-4 border-b border-gray-100 flex-row items-center">
+              <MessageCircle size={16} color="#22c55e" className="mr-3" />
+              <Text className="text-green-600 font-medium">WhatsApp</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => { setShowMenu(false); setShowCancelModal(true); }} className="p-4 flex-row items-center">
+              <AlertCircle size={16} color="#ef4444" className="mr-3" />
+              <Text className="text-red-600 font-medium">Cancel Order</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Enhanced Customer Info for Supervisor */}
+        <View className="mb-6 bg-white p-5 rounded-xl shadow-sm border border-gray-100 z-0">
+          <View className="items-center mb-4">
+            <Text className="text-gray-900 text-lg font-bold">{order?.customerName || 'Unknown customer'}</Text>
+            <Text className="text-gray-500 text-sm mt-1">{order ? serviceSummary(order) : '—'}</Text>
+          </View>
+          
+          {activeRole === 'supervisor' && order && (
+            <View className="border-t border-gray-100 pt-4 mt-2">
+              <View className="flex-row items-center mb-3">
+                <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
+                  <Phone size={14} color="#994bff" />
+                </View>
+                <TouchableOpacity onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}>
+                  <Text className="text-gray-900 font-medium">{order.customerPhone}</Text>
+                  <Text className="text-gray-500 text-xs">Tap to call</Text>
                 </TouchableOpacity>
-              </>
-            ) : (
-              <>
-                <View className="flex-row items-center justify-between mb-3">
-                  <Text className="text-textPrimary font-bold">
-                    Garments {registeredCount}/{garments.count}
-                  </Text>
-                  <Text className="text-textMuted text-xs">
-                    {registeredCount >= garments.count ? 'All registered' : `${garments.count - registeredCount} left`}
+              </View>
+              
+              {order.storeOTP ? (
+                <View className="flex-row items-center mb-3">
+                  <View className="w-8 h-8 rounded-full bg-blue-50 items-center justify-center mr-3">
+                    <Text className="text-blue-500 font-bold text-xs">OTP</Text>
+                  </View>
+                  <View>
+                    <Text className="text-gray-900 font-bold tracking-widest">{order.storeOTP}</Text>
+                    <Text className="text-gray-500 text-xs">Store Handover OTP (For Rider)</Text>
+                  </View>
+                </View>
+              ) : null}
+              
+              <View className="flex-row items-center mb-3">
+                <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
+                  <MapPin size={14} color="#994bff" />
+                </View>
+                <View className="flex-1">
+                  <Text className="text-gray-900 font-medium leading-tight">
+                    {typeof order.address === 'string' ? order.address : (order.address?.formattedAddress || order.address?.line1 || 'No address')}
                   </Text>
                 </View>
-
-                <TouchableOpacity
-                  onPress={() => {
-                    setScanError(null);
-                    setScannerVisible(true);
-                  }}
-                  disabled={busy}
-                  className="h-12 rounded-xl items-center justify-center flex-row bg-info mb-3"
-                >
-                  <ScanLine size={18} color="#FFFFFF" className="mr-2" />
-                  <Text className="text-white font-bold">Scan Garment QR</Text>
-                </TouchableOpacity>
-
-                {scanError && (
-                  <View className="bg-error/15 border border-error/40 rounded-lg p-3 mb-3">
-                    <Text className="text-error text-xs font-bold">{scanError}</Text>
-                  </View>
-                )}
-
-                {registered.length === 0 ? (
-                  <Text className="text-textMuted text-xs mb-3">
-                    No garments registered yet. Scan the printed QR labels to add them.
-                  </Text>
-                ) : (
-                  registered.map(r => (
-                    <View
-                      key={r.seq}
-                      className="flex-row items-center justify-between bg-bgDark rounded-lg px-3 py-2 mb-2"
-                    >
-                      <View>
-                        <Text className="text-textPrimary text-sm font-bold">Garment #{r.seq}</Text>
-                        <Text className="text-textMuted text-xs">
-                          {r.qr || `SPNZ:${orderId}:${r.seq}`} · {fmtTime(r.scannedAt)}
-                        </Text>
-                      </View>
-                      <TouchableOpacity onPress={() => handleUnregister(r.seq)} hitSlop={10}>
-                        <X size={16} color="#94A3B8" />
-                      </TouchableOpacity>
-                    </View>
-                  ))
-                )}
-              </>
-            )}
-          </View>
-        ) : taggingInProgressByOther ? (
-          <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-            <Text className="text-textSecondary font-bold text-xs mb-1 tracking-wide">TAGGING</Text>
-            <Text className="text-textPrimary font-bold text-lg mb-1">Tagging</Text>
-            <Text className="text-textSecondary text-sm">
-              In progress by {taggingStage?.assigneeName || 'another staff member'}.
-            </Text>
-          </View>
-        ) : (
-          <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-            <Text className="text-textSecondary font-bold text-xs mb-1 tracking-wide">CURRENT STEP</Text>
-            <Text className="text-textPrimary font-bold text-lg mb-1">{cur ? stepLabel(cur) : '—'}</Text>
-            {!started ? (
-              <>
-                <Text className="text-textSecondary text-sm mb-4">
-                  This stage is ready to start. Starting assigns it to you.
-                </Text>
-                <TouchableOpacity
-                  onPress={handleStart}
-                  disabled={busy}
-                  className={`h-12 rounded-xl items-center justify-center flex-row ${busy ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
-                >
-                  {busy ? (
-                    <ActivityIndicator size="small" color="#0F172A" />
-                  ) : (
-                    <>
-                      <Play size={18} color="#0F172A" className="mr-2" />
-                      <Text className="text-bgDark font-bold">Start {cur ? stepLabel(cur) : ''}</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              </>
-            ) : completed ? (
-              <View className="flex-row items-center">
-                <CheckCircle2 size={16} color="#22C55E" className="mr-1" />
-                <Text className="text-primary font-bold">Complete</Text>
               </View>
-            ) : isMine ? (
-              <>
-                <Text className="text-textSecondary text-sm mb-4">
-                  You started this stage. Mark it complete when it's done.
-                </Text>
-                <TouchableOpacity
-                  onPress={handleComplete}
-                  disabled={busy}
-                  className={`h-12 rounded-xl items-center justify-center flex-row ${busy ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
-                >
-                  {busy ? (
-                    <ActivityIndicator size="small" color="#0F172A" />
-                  ) : (
-                    <>
-                      <CheckCircle2 size={18} color="#0F172A" className="mr-2" />
-                      <Text className="text-bgDark font-bold">Complete {cur ? stepLabel(cur) : ''}</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
-              </>
-            ) : (
-              <Text className="text-textSecondary text-sm">
-                In progress by {curStage?.assigneeName || 'another staff member'}.
-              </Text>
-            )}
-          </View>
-        )}
+
+              <View className="bg-gray-50 rounded-lg p-3 mt-2">
+                <Text className="text-xs font-bold text-gray-500 uppercase mb-2">Item Breakdown</Text>
+                {order.items?.map((item: any, idx: number) => (
+                  <View key={idx} className="flex-row justify-between mb-1">
+                    <Text className="text-gray-700 text-sm">{item.quantity}x {item.name || item.serviceType}</Text>
+                    <Text className="text-gray-500 text-sm">₹{item.price}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </View>
 
         {actionError && (
-          <View className="bg-error/15 border border-error/40 rounded-lg p-3 mb-3">
-            <Text className="text-error text-xs font-bold">{actionError}</Text>
+          <View className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 flex-row items-center gap-2">
+            <AlertCircle color="#ef4444" size={20} />
+            <Text className="text-red-600 font-medium flex-1">{actionError}</Text>
           </View>
         )}
 
+        {renderActionState()}
+        
         {/* Timeline */}
         {process && (
-          <View className="mt-2">
-            <Text className="text-textSecondary font-bold text-xs mb-2 tracking-wide">TIMELINE</Text>
-            <View className="bg-bgSurface rounded-xl p-4 border border-bgSurfaceLight">
-              {timeline.length === 0 ? (
-                <Text className="text-textMuted text-xs">No steps</Text>
-              ) : (
-                timeline.map(t => {
-                  const statusText = t.skipped
-                    ? 'Skipped — Not Required'
-                    : t.completedAt
-                      ? 'Completed'
-                      : t.startedAt
-                        ? 'In progress'
-                        : 'Pending';
-                  const dot = t.completedAt ? '#22C55E' : t.startedAt ? '#3B82F6' : '#334155';
-                  return (
-                    <View key={t.step} className="flex-row mb-3 last:mb-0">
-                      <View
-                        className="w-2 h-2 rounded-full mt-2 mr-3"
-                        style={{ backgroundColor: dot }}
-                      />
-                      <View className="flex-1">
-                        <View className="flex-row items-center justify-between">
-                          <Text className="text-textPrimary text-sm font-bold">{t.label}</Text>
-                          <Text className={`text-xs font-bold ${t.completedAt ? 'text-primary' : t.startedAt ? 'text-info' : 'text-textMuted'}`}>
-                            {statusText}
-                          </Text>
-                        </View>
-                        {t.assigneeName && (
-                          <Text className="text-textMuted text-xs mt-0.5">by {t.assigneeName}</Text>
-                        )}
-                        {(t.startedAt != null || t.completedAt != null) && (
-                          <Text className="text-textMuted text-xs mt-0.5">
-                            {t.startedAt ? `Start ${fmtTime(t.startedAt)}` : ''}
-                            {t.startedAt && t.completedAt ? ' · ' : ''}
-                            {t.completedAt ? `Done ${fmtTime(t.completedAt)}` : ''}
-                            {t.durationMs != null ? ` · ${fmtDuration(t.durationMs)}` : ''}
-                          </Text>
-                        )}
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </View>
+          <View className="bg-white rounded-xl p-5 shadow-sm border border-gray-100 mt-2">
+            <Text className="text-gray-900 font-bold mb-4">Timeline</Text>
+            {opsTimeline(process).filter(e => e.startedAt || e.completedAt).map((event, idx, arr) => {
+              const ts = event.completedAt || event.startedAt;
+              const ms = ts ? ((ts as any).toMillis?.() || (ts as any).seconds * 1000 || (ts as any)._seconds * 1000 || (typeof ts === 'number' ? ts : 0)) : 0;
+              const dateStr = ms ? new Date(ms).toLocaleString() : '';
+              
+              return (
+                <View key={idx} className="flex-row mb-4">
+                  <View className="items-center mr-4">
+                    <View className={`w-3 h-3 rounded-full ${event.completedAt ? 'bg-green-500' : 'bg-orange-400'}`} />
+                    {idx < arr.length - 1 && <View className="w-0.5 h-full bg-gray-200 my-1" />}
+                  </View>
+                  <View className="flex-1 pb-2">
+                    <Text className="text-gray-900 font-medium">{event.label}</Text>
+                    {dateStr ? <Text className="text-gray-500 text-xs mt-1">{dateStr}</Text> : null}
+                  </View>
+                </View>
+              );
+            })}
           </View>
         )}
       </ScrollView>
 
-      {/* Sticky submit for the garment flow */}
-      {showSubmit && (
-        <View className="px-4 py-3 border-t border-bgSurfaceLight">
-          <TouchableOpacity
-            onPress={handleSubmit}
-            disabled={busy || !submitReady}
-            className={`h-12 rounded-xl items-center justify-center ${busy || !submitReady ? 'bg-bgSurfaceLight' : 'bg-primary'}`}
-          >
-            <Text className={`font-bold ${busy || !submitReady ? 'text-textMuted' : 'text-bgDark'}`}>
-              Submit Tagged Garments ({registeredCount})
-            </Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      <QRScanner
-        visible={scannerVisible}
-        onClose={() => setScannerVisible(false)}
+      <QRScanner 
+        visible={scannerVisible} 
+        onClose={() => setScannerVisible(false)} 
         onScan={handleScan}
-        actionType="garment"
+        actionType="Garment Label"
       />
-    </View>
+      
+      {order && (
+        <>
+          <CancelOrderModal 
+            visible={showCancelModal}
+            onClose={() => setShowCancelModal(false)}
+            onConfirm={handleCancelOrder}
+            orderId={orderId}
+          />
+          <RescheduleModal
+            visible={showRescheduleModal}
+            onClose={() => setShowRescheduleModal(false)}
+            onConfirm={handleReschedule}
+            title={order.status === 'ready' ? 'Schedule Delivery' : 'Reschedule Pickup'}
+          />
+          <AssignRiderModal
+            visible={showAssignRiderModal}
+            onClose={() => setShowAssignRiderModal(false)}
+            orderId={orderId}
+            isDelivery={order?.status === 'ready'}
+            onAssign={async (riderId) => {
+              const res = await useOpsProcessStore.getState().assignTaskToRider(orderId, order?.userId || '', riderId, order?.status === 'ready');
+              if (!res.ok) setActionError(friendlyActionError(res.error));
+            }}
+          />
+        </>
+      )}
+    </KeyboardAvoidingView>
   );
 }

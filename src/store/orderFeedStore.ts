@@ -29,10 +29,17 @@ const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
     customerPhone: data.customerPhone || data.userPhone,
     pickupDetails: data.pickupDetails || data.pickup,
     items: data.items || [],
+    totalAmount: data.totalAmount || data.cartTotal,
+    paymentStatus: data.paymentStatus || data.paymentMethod,
+    notes: data.notes || data.instruction,
     tokenNumber: data.tokenNumber,
     pickupOTP: data.pickupOTP,
+    storeOTP: data.storeOTP,
     address: data.address,
     processingStep: data.processingStep,
+    deliveryDate: data.deliveryDate,
+    deliveryTime: data.deliveryTime,
+    deliveryOTP: data.deliveryOTP,
     createdAt: data.createdAt,
   };
 };
@@ -57,7 +64,22 @@ export const useOrderFeedStore = create<OrderFeedState>((set) => ({
       (snapshot) => {
         if (unsubscribe !== unsub) return;
         const map = new Map<string, FeedOrder>();
-        snapshot.forEach((d) => map.set(d.id, orderFromDoc(d)));
+        
+        let found = false;
+        snapshot.forEach((d) => {
+          if (d.id === 'XCmY40zo73swLw0WIwXH') {
+            found = true;
+            console.log('[DEBUG] FOUND XCmY... IN SNAPSHOT! Path:', d.ref.path, 'Data:', JSON.stringify(d.data()));
+          }
+          // Ignore vendor mirror documents to prevent them from overwriting user documents
+          if (d.ref.path.includes('/vendors/')) return;
+          map.set(d.id, orderFromDoc(d));
+        });
+        
+        if (!found) {
+          console.log('[DEBUG] XCmY40zo73swLw0WIwXH NOT IN SNAPSHOT! Total docs:', snapshot.size);
+        }
+        
         set({ orders: sortNewestFirst(Array.from(map.values())), isLoading: false });
       },
       (err) => {

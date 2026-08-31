@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, StyleSheet, Platform } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { X, CameraOff, AlertCircle } from 'lucide-react-native';
@@ -13,6 +13,12 @@ interface QRScannerProps {
 export function QRScanner({ visible, onClose, onScan, actionType }: QRScannerProps) {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      setScanned(false);
+    }
+  }, [visible]);
 
   if (!visible) return null;
 

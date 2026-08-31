@@ -10,6 +10,7 @@ export interface OpsTask {
   tokenNumber?: string;
   pickupOTP?: string;
   assignedAt?: unknown;
+  acceptedAt?: unknown;
   createdAt?: unknown;
 }
 
@@ -26,12 +27,13 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     tokenNumber: d.tokenNumber ?? undefined,
     pickupOTP: d.pickupOTP ?? undefined,
     assignedAt: d.assignedAt ?? undefined,
+    acceptedAt: d.acceptedAt ?? undefined,
     createdAt: d.createdAt ?? undefined,
   };
 }
 
 export function isPending(task: Pick<OpsTask, 'status'>): boolean {
-  return task.status === 'pending';
+  return task.status === 'pending' || task.status === 'assigned' || task.status === 'in_transit_to_store';
 }
 
 export function shouldAnnounce(task: Pick<OpsTask, 'id' | 'status'>, seenIds: Set<string>): boolean {

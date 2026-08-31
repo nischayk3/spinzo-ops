@@ -75,10 +75,23 @@ const fetchRosterRole = async (phone: string): Promise<ShiftRole | null> => {
   }
 };
 
-const buildUserProfile = (uid: string, phone: string, role: ShiftRole | null): UserProfile => ({
+const fetchStaffName = async (uid: string): Promise<string> => {
+  try {
+    const snap = await getDoc(doc(db, 'ops_staff', uid));
+    if (snap.exists() && snap.data().name) {
+      return snap.data().name;
+    }
+    return 'Admin User';
+  } catch (err) {
+    console.error('[auth] staff name lookup failed:', err);
+    return 'Admin User';
+  }
+};
+
+const buildUserProfile = (uid: string, phone: string, role: ShiftRole | null, name: string = 'Admin User'): UserProfile => ({
   id: uid,
   phone,
-  name: 'Admin User',
+  name,
   role: role || FALLBACK_ROLE,
   isActive: true,
   createdAt: new Date().toISOString(),
@@ -105,8 +118,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const phone = firebaseUser.phoneNumber || '';
         set({ authInitialized: true });
         const role = await fetchRosterRole(phone);
+        const name = await fetchStaffName(firebaseUser.uid);
         set({
-          user: buildUserProfile(firebaseUser.uid, phone, role),
+          user: buildUserProfile(firebaseUser.uid, phone, role, name),
           isLoggedIn: true,
           activeRole: role,
           error: null,
@@ -152,9 +166,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       const result = await confirmationResult.confirm(otp);
       const user = result.user;
       const role = await fetchRosterRole(user.phoneNumber || '');
+      const name = await fetchStaffName(user.uid);
 
       set({
-        user: buildUserProfile(user.uid, user.phoneNumber || '', role),
+        user: buildUserProfile(user.uid, user.phoneNumber || '', role, name),
         isLoggedIn: true,
         activeRole: role,
         isLoading: false,
