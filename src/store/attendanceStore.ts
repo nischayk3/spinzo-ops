@@ -3,12 +3,7 @@ import { auth, db } from '../config/firebase';
 import { doc, onSnapshot, setDoc, updateDoc, getDoc, Unsubscribe } from 'firebase/firestore';
 import { useAuthStore } from './authStore';
 
-export type AttendanceStatus = 'off' | 'working' | 'break' | 'lunch';
-
-export interface BreakRecord {
-  startAt: number;
-  endAt: number | null;
-}
+export type AttendanceStatus = 'off' | 'working' | 'lunch';
 
 export interface ShiftDoc {
   staffId: string;
@@ -17,30 +12,29 @@ export interface ShiftDoc {
   loginAt: number;
   logoutAt: number | null;
   status: AttendanceStatus;
-  breaks: BreakRecord[];
-  lunch: BreakRecord | null;
+  lunch: { startAt: number; endAt: number | null } | null;
   totalWorkMs: number;
-  totalBreakMs: number;
   totalLunchMs: number;
 }
+
+const LUNCH_LIMIT_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 interface AttendanceState {
   currentShift: ShiftDoc | null;
   status: AttendanceStatus;
   isLoading: boolean;
+  lunchOverdue: boolean;
+  lunchRemainingMs: number;
   
   initializeListener: () => void;
   clockIn: (storeId: string) => Promise<void>;
-  startBreak: () => Promise<void>;
-  endBreak: () => Promise<void>;
   lunchOut: () => Promise<void>;
   lunchIn: () => Promise<void>;
   clockOut: () => Promise<void>;
 }
 
 let unsubShift: Unsubscribe | null = null;
-let breakTimeout: NodeJS.Timeout | null = null;
-let lunchTimeout: NodeJS.Timeout | null = null;
+let lunchTicker: NodeJS.Timeout | null = null;
 
 const getTodayStr = () => {
   const d = new Date();
@@ -51,9 +45,13 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
   currentShift: null,
   status: 'off',
   isLoading: false,
+  lunchOverdue: false,
+  lunchRemainingMs: LUNCH_LIMIT_MS,
 
   initializeListener: () => {
     unsubShift?.();
+    if (lunchTicker) clearInterval(lunchTicker);
+
     const user = useAuthStore.getState().user;
     if (!user) {
       set({ currentShift: null, status: 'off' });
@@ -68,40 +66,24 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         const data = snap.data() as ShiftDoc;
         set({ currentShift: data, status: data.status });
 
-        // Auto-end break timer
-        if (breakTimeout) clearTimeout(breakTimeout);
-        if (data.status === 'break') {
-          const activeBreak = data.breaks.find(b => !b.endAt);
-          if (activeBreak) {
-            const elapsed = Date.now() - activeBreak.startAt;
-            const remaining = (10 * 60 * 1000) - elapsed;
-            if (remaining <= 0) {
-              get().endBreak();
-            } else {
-              breakTimeout = setTimeout(() => {
-                get().endBreak();
-              }, remaining);
-            }
-          }
-        }
-
-        // Lunch warning timer
-        if (lunchTimeout) clearTimeout(lunchTimeout);
-        if (data.status === 'lunch') {
-          const lunch = data.lunch;
-          if (lunch && !lunch.endAt) {
-            const elapsed = Date.now() - lunch.startAt;
-            const remaining = (45 * 60 * 1000) - elapsed;
-            if (remaining > 0) {
-              lunchTimeout = setTimeout(() => {
-                // In a real app, fire a local notification or alert here
-                console.warn('Lunch break exceeded 45 minutes!');
-              }, remaining);
-            }
-          }
+        // Start lunch countdown ticker
+        if (lunchTicker) clearInterval(lunchTicker);
+        if (data.status === 'lunch' && data.lunch && !data.lunch.endAt) {
+          const tickFn = () => {
+            const elapsed = Date.now() - data.lunch!.startAt;
+            const remaining = LUNCH_LIMIT_MS - elapsed;
+            set({
+              lunchRemainingMs: Math.max(0, remaining),
+              lunchOverdue: remaining <= 0,
+            });
+          };
+          tickFn(); // immediate
+          lunchTicker = setInterval(tickFn, 1000);
+        } else {
+          set({ lunchRemainingMs: LUNCH_LIMIT_MS, lunchOverdue: false });
         }
       } else {
-        set({ currentShift: null, status: 'off' });
+        set({ currentShift: null, status: 'off', lunchRemainingMs: LUNCH_LIMIT_MS, lunchOverdue: false });
       }
     });
   },
@@ -123,72 +105,16 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
           loginAt: Date.now(),
           logoutAt: null,
           status: 'working',
-          breaks: [],
           lunch: null,
           totalWorkMs: 0,
-          totalBreakMs: 0,
-          totalLunchMs: 0
+          totalLunchMs: 0,
         };
         await setDoc(shiftRef, newShift);
       } else {
-        // Resume shift if it was previously off
-        await updateDoc(shiftRef, { status: 'working' });
+        await updateDoc(shiftRef, { status: 'working', logoutAt: null });
       }
     } catch (err) {
       console.error('Failed to clock in:', err);
-    } finally {
-      set({ isLoading: false });
-    }
-  },
-
-  startBreak: async () => {
-    const { currentShift } = get();
-    if (!currentShift || currentShift.status !== 'working') return;
-    
-    // Check max breaks (3)
-    if (currentShift.breaks.length >= 3) return;
-
-    set({ isLoading: true });
-    try {
-      const user = useAuthStore.getState().user;
-      if (!user) return;
-      const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, currentShift.date);
-      
-      await updateDoc(shiftRef, {
-        status: 'break',
-        breaks: [...currentShift.breaks, { startAt: Date.now(), endAt: null }]
-      });
-    } catch (err) {
-      console.error('Failed to start break:', err);
-    } finally {
-      set({ isLoading: false });
-    }
-  },
-
-  endBreak: async () => {
-    const { currentShift } = get();
-    if (!currentShift || currentShift.status !== 'break') return;
-
-    set({ isLoading: true });
-    try {
-      const user = useAuthStore.getState().user;
-      if (!user) return;
-      const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, currentShift.date);
-      
-      const updatedBreaks = [...currentShift.breaks];
-      const activeBreak = updatedBreaks[updatedBreaks.length - 1];
-      if (activeBreak && !activeBreak.endAt) {
-        activeBreak.endAt = Date.now();
-        const duration = activeBreak.endAt - activeBreak.startAt;
-        
-        await updateDoc(shiftRef, {
-          status: 'working',
-          breaks: updatedBreaks,
-          totalBreakMs: (currentShift.totalBreakMs || 0) + duration
-        });
-      }
-    } catch (err) {
-      console.error('Failed to end break:', err);
     } finally {
       set({ isLoading: false });
     }
@@ -207,7 +133,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       
       await updateDoc(shiftRef, {
         status: 'lunch',
-        lunch: { startAt: Date.now(), endAt: null }
+        lunch: { startAt: Date.now(), endAt: null },
       });
     } catch (err) {
       console.error('Failed to start lunch:', err);
@@ -232,7 +158,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       await updateDoc(shiftRef, {
         status: 'working',
         lunch,
-        totalLunchMs: (currentShift.totalLunchMs || 0) + duration
+        totalLunchMs: (currentShift.totalLunchMs || 0) + duration,
       });
     } catch (err) {
       console.error('Failed to end lunch:', err);
@@ -251,33 +177,24 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       if (!user) return;
       const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, currentShift.date);
       
-      // If currently on break/lunch, end it first before clocking out
-      let updates: any = {
+      const updates: any = {
         status: 'off',
-        logoutAt: Date.now()
+        logoutAt: Date.now(),
       };
       
+      // If on lunch, end it before clocking out
       const now = Date.now();
-      if (currentShift.status === 'break') {
-        const breaks = [...currentShift.breaks];
-        const active = breaks[breaks.length - 1];
-        if (active && !active.endAt) {
-          active.endAt = now;
-          updates.breaks = breaks;
-          updates.totalBreakMs = (currentShift.totalBreakMs || 0) + (now - active.startAt);
-        }
-      } else if (currentShift.status === 'lunch') {
-        if (currentShift.lunch && !currentShift.lunch.endAt) {
-          updates.lunch = { ...currentShift.lunch, endAt: now };
-          updates.totalLunchMs = (currentShift.totalLunchMs || 0) + (now - currentShift.lunch.startAt);
-        }
+      if (currentShift.status === 'lunch' && currentShift.lunch && !currentShift.lunch.endAt) {
+        updates.lunch = { ...currentShift.lunch, endAt: now };
+        updates.totalLunchMs = (currentShift.totalLunchMs || 0) + (now - currentShift.lunch.startAt);
       }
 
       await updateDoc(shiftRef, updates);
+      if (lunchTicker) clearInterval(lunchTicker);
     } catch (err) {
       console.error('Failed to clock out:', err);
     } finally {
       set({ isLoading: false });
     }
-  }
+  },
 }));

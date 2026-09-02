@@ -19,4 +19,4 @@ export type ServiceType = 'wash_fold' | 'wash_iron' | 'ironing' | 'blanket_wash'
 export type OrderStatus = 'placed' | 'confirmed' | 'in_transit_to_store' | 'pickup_completed' | 'processing' | 'ready' | 'out_for_delivery' | 'delivered' | 'cancelled';
 
 // ─── Processing Sub-Steps (exact match to Livfresh admin panel) ───
-export type ProcessingStep = 'getting_washed' | 'getting_folded' | 'getting_ironed' | 'getting_dried';
+export type ProcessingStep = 'getting_washed' | 'getting_ironed' | 'getting_dried';

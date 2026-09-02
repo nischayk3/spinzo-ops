@@ -12,6 +12,14 @@ export interface OpsTask {
   assignedAt?: unknown;
   acceptedAt?: unknown;
   createdAt?: unknown;
+  bundleCount?: number;
+  bundleLabels?: { seq: number; qr: string }[];
+  deliveryOTP?: string | null;
+  customerName?: string;
+  customerPhone?: string;
+  pickedUpAt?: any;
+  cancelledAt?: any;
+  proofUrl?: string | null;
 }
 
 export function parseOpsTask(id: string, snapData: Record<string, any> | null | undefined): OpsTask {
@@ -29,6 +37,14 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     assignedAt: d.assignedAt ?? undefined,
     acceptedAt: d.acceptedAt ?? undefined,
     createdAt: d.createdAt ?? undefined,
+    bundleCount: d.bundleCount ?? undefined,
+    bundleLabels: d.bundleLabels ?? undefined,
+    deliveryOTP: d.deliveryOTP ?? undefined,
+    customerName: d.customerName ?? undefined,
+    customerPhone: d.customerPhone ?? undefined,
+    pickedUpAt: d.pickedUpAt ?? undefined,
+    cancelledAt: d.cancelledAt ?? undefined,
+    proofUrl: d.proofUrl ?? undefined,
   };
 }
 

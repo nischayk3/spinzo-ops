@@ -8,12 +8,13 @@ import { uploadMediaToStorage } from '../utils/firebaseUpload';
 interface PackagingVerificationProps {
   orderId: string;
   totalGarments: number;
+  onPrint: (bundles: number) => Promise<boolean>;
   onComplete: (payload: any) => void;
 }
 
-type WizardStep = 'evidence' | 'scan' | 'finalize';
+type WizardStep = 'evidence' | 'scan' | 'finalize' | 'print';
 
-export const PackagingVerification = ({ orderId, totalGarments, onComplete }: PackagingVerificationProps) => {
+export const PackagingVerification = ({ orderId, totalGarments, onPrint, onComplete }: PackagingVerificationProps) => {
   const [step, setStep] = useState<WizardStep>('scan');
   const [uploading, setUploading] = useState(false);
   
@@ -222,12 +223,43 @@ export const PackagingVerification = ({ orderId, totalGarments, onComplete }: Pa
         </View>
 
         <TouchableOpacity
-          onPress={() => onComplete({ photos, videoUrl, bundles })}
+          onPress={() => setStep('print')}
           disabled={!canComplete}
-          className={`h-14 rounded-xl flex-row items-center justify-center ${canComplete ? 'bg-green-600' : 'bg-gray-200'}`}
+          className={`h-14 rounded-xl flex-row items-center justify-center ${canComplete ? 'bg-blue-600' : 'bg-gray-200'}`}
         >
-          <CheckCircle2 color={canComplete ? 'white' : '#9ca3af'} size={20} className="mr-2" />
-          <Text className={`font-bold text-lg ${canComplete ? 'text-white' : 'text-gray-400'}`}>Complete Packaging</Text>
+          <Text className={`font-bold text-lg ${canComplete ? 'text-white' : 'text-gray-400'}`}>Next: Print Bundle Labels</Text>
+          <ChevronRight color={canComplete ? 'white' : '#9ca3af'} size={20} className="ml-2" />
+        </TouchableOpacity>
+      </View>
+    );
+  };
+
+  const renderPrintStep = () => {
+    return (
+      <View>
+        <Text className="text-gray-500 text-sm mb-4">Step 4: Print bundle labels and attach them to the packages.</Text>
+        
+        <View className="bg-blue-50 border border-blue-200 p-4 rounded-xl mb-6 items-center">
+          <Text className="text-blue-800 font-medium mb-1">Generating labels for</Text>
+          <Text className="text-3xl font-bold text-blue-900">{bundles} Bundle{bundles > 1 ? 's' : ''}</Text>
+        </View>
+
+        <TouchableOpacity
+          onPress={async () => {
+            setUploading(true);
+            const success = await onPrint(bundles);
+            setUploading(false);
+            if (success) {
+              onComplete({ photos, videoUrl, bundles });
+            } else {
+              Alert.alert('Print Failed', 'Could not generate bundle labels.');
+            }
+          }}
+          disabled={uploading}
+          className={`h-14 rounded-xl flex-row items-center justify-center ${uploading ? 'bg-gray-200' : 'bg-green-600'}`}
+        >
+          {uploading ? <ActivityIndicator color="#fff" /> : <CheckCircle2 color="white" size={20} className="mr-2" />}
+          <Text className="font-bold text-lg text-white">Print & Complete Packaging</Text>
         </TouchableOpacity>
       </View>
     );
@@ -245,12 +277,13 @@ export const PackagingVerification = ({ orderId, totalGarments, onComplete }: Pa
       )}
       <View className="flex-row items-center justify-between mb-4 border-b border-gray-100 pb-3">
         <Text className="text-gray-900 font-bold text-lg">Packaging Verification</Text>
-        <Text className="text-sm font-bold text-blue-600 uppercase">Step {step === 'scan' ? 1 : step === 'evidence' ? 2 : 3} of 3</Text>
+        <Text className="text-sm font-bold text-blue-600 uppercase">Step {step === 'scan' ? 1 : step === 'evidence' ? 2 : step === 'finalize' ? 3 : 4} of 4</Text>
       </View>
       
       {step === 'scan' && renderScanStep()}
       {step === 'evidence' && renderEvidenceStep()}
       {step === 'finalize' && renderFinalizeStep()}
+      {step === 'print' && renderPrintStep()}
     </View>
   );
 };

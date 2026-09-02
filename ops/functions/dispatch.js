@@ -70,7 +70,7 @@ function taskTransition(beforeStatus, afterStatus) {
  */
 function getProcessingSteps(order) {
   if (!order || !order.items || order.items.length === 0) {
-    return ['getting_washed', 'getting_folded'];
+    return ['getting_washed', 'getting_dried'];
   }
   const serviceTypes = order.items.map((item) => item.serviceType);
   const onlyIroning = serviceTypes.every((type) => type === 'ironing');
@@ -84,14 +84,12 @@ function getProcessingSteps(order) {
   
   // Anything that is washed must be dried.
   const needsDry = needsWash;
-  const needsFold = serviceTypes.some((type) => type === 'wash_fold' || type === 'premium_laundry');
   const needsIron = serviceTypes.some((type) => type === 'wash_iron' || type === 'ironing' || type === 'dry_clean');
   
   if (needsDry) steps.push('getting_dried');
-  if (needsFold) steps.push('getting_folded');
   if (needsIron) steps.push('getting_ironed');
   
-  if (steps.length === 0) return ['getting_washed', 'getting_dried', 'getting_folded'];
+  if (steps.length === 0) return ['getting_washed', 'getting_dried'];
   return steps;
 }
 
@@ -113,7 +111,7 @@ function opsStepsForOrder(order) {
   return ['tagging', ...prod, 'packaging'];
 }
 
-const PRODUCTION_STEPS = new Set(['getting_washed', 'getting_dried', 'getting_folded', 'getting_ironed']);
+const PRODUCTION_STEPS = new Set(['getting_washed', 'getting_dried', 'getting_ironed']);
 
 function isProductionStep(step) {
   return PRODUCTION_STEPS.has(step);

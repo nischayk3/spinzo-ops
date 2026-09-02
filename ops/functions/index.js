@@ -405,6 +405,10 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     if (existing.exists) return;
 
     const deliveryAddress = pickupAddressFromOrder(after); // reuse same address helper
+    const processSnap = await db.doc(`ops_process/${orderId}`).get();
+    const bundleCount = processSnap.exists ? processSnap.data().stages?.packaging?.bundleCount || 1 : 1;
+    const bundleLabels = processSnap.exists ? processSnap.data().stages?.packaging?.bundleLabels || [] : [];
+
     await db.doc(`ops_delivery_tasks/${orderId}`).set({
       orderId,
       userId,
@@ -418,6 +422,8 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       deliveryOTP: after.deliveryOTP || null,
       customerName: after.customerName || after.userName || '',
       customerPhone: after.customerPhone || after.userPhone || '',
+      bundleCount,
+      bundleLabels,
       createdAt: TS(),
     });
   } catch (err) {
@@ -440,7 +446,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   const orderId = data.orderId;
   const action = data.action;
   if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-  if (!['claim', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging'].includes(action)) {
+  if (!['claim', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels'].includes(action)) {
     return { ok: false, error: 'invalid_input' };
   }
 
@@ -456,8 +462,12 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   if (action === 'claim') {
     // Claim = start the tagging stage. A helper claiming an order begins tagging it.
-    // Idempotent and atomic: the process doc existence + fresh order status are
-    // re-checked inside the transaction.
+    // Token number is mandatory — the physical store token tag for this order.
+    const tokenNumber = data.tokenNumber;
+    if (!tokenNumber || typeof tokenNumber !== 'string' || tokenNumber.trim() === '') {
+      return { ok: false, error: 'token_required' };
+    }
+
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
     const order = orderSnap.data();
@@ -487,6 +497,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           steps,
           currentIndex: 0,
           status: steps[0],
+          tokenNumber: tokenNumber.trim(),
           stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, startedAt: now } },
           garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
           claimedAt: now,
@@ -494,7 +505,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         // tagging/prestain are ops-only; only the first production step reaches the
         // customer-facing processingStep contract.
-        const updateData = { status: 'processing', updatedAt: now };
+        const updateData = { status: 'processing', updatedAt: now, tokenNumber: tokenNumber.trim() };
         if (prodStep) updateData.processingStep = prodStep;
         tx.update(orderRef, updateData);
         tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
@@ -647,6 +658,28 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       },
     });
     return { ok: true, count, labels };
+  }
+
+  if (action === 'printBundleLabels') {
+    const count = Number(data.count);
+    if (!Number.isInteger(count) || count < 1 || count > 500) return { ok: false, error: 'invalid_input' };
+    const ps = await processRef.get();
+    if (!ps.exists) return { ok: false, error: 'not_found' };
+    const process = ps.data();
+    const stage = process.stages && process.stages.packaging;
+    if (!stage || stage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+
+    const bundleLabels = [];
+    for (let seq = 1; seq <= count; seq++) {
+      bundleLabels.push({ seq, qr: `SPNZ_BDL:${orderId}:${seq}` });
+    }
+
+    await processRef.update({
+      'stages.packaging.bundleLabelsPrintedAt': now,
+      'stages.packaging.bundleLabels': bundleLabels,
+      'stages.packaging.bundleCount': count,
+    });
+    return { ok: true, count, labels: bundleLabels };
   }
 
   if (action === 'scanGarment') {
@@ -943,7 +976,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (role === 'rider' && delTaskSnap.exists && delTaskSnap.data().assignee !== auth.uid) {
           return { ok: false, error: 'unauthorized' };
         }
-        const { otp } = data;
+        const { otp, proofUrl } = data;
         if (!otp || String(otp) !== String(order.deliveryOTP)) {
           return { ok: false, error: 'invalid_otp' };
         }
@@ -953,13 +986,18 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           deliveryVerified: true,
           deliveredAt: now,
           updatedAt: now,
+          ...(proofUrl ? { deliveryProofUrl: proofUrl } : {}),
         };
         tx.update(orderRef, updateData);
         tx.set(vendorRef, updateData, { merge: true });
 
         // Update delivery task (delTaskSnap/delTaskRef read at top)
         if (delTaskSnap.exists) {
-          tx.update(delTaskRef, { status: 'delivered', deliveredAt: now });
+          tx.update(delTaskRef, { 
+            status: 'delivered', 
+            deliveredAt: now,
+            ...(proofUrl ? { proofUrl } : {})
+          });
         }
 
         return { ok: true, status: 'delivered' };

@@ -25,11 +25,12 @@ interface OpsProcessState {
   isLoading: boolean;
   error: string | null;
   initialize: (uid: string) => void;
-  claim: (orderId: string) => Promise<OpsProcessingResult>;
+  claim: (orderId: string, tokenNumber: string) => Promise<OpsProcessingResult>;
   startStep: (orderId: string) => Promise<OpsProcessingResult>;
   completeStep: (orderId: string) => Promise<OpsProcessingResult>;
   completePackaging: (orderId: string, qualityMedia?: any) => Promise<OpsProcessingResult>;
   printLabels: (orderId: string, garmentCount: number) => Promise<OpsProcessingResult>;
+  printBundleLabels: (orderId: string, count: number) => Promise<OpsProcessingResult>;
   scanGarment: (orderId: string, qr: string) => Promise<OpsProcessingResult>;
   unregisterGarment: (orderId: string, seq: number) => Promise<OpsProcessingResult>;
   submitTagging: (orderId: string) => Promise<OpsProcessingResult>;
@@ -82,9 +83,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
     );
   },
 
-  claim: async (orderId) => {
+  claim: async (orderId, tokenNumber) => {
     try {
-      const res = await callOps()({ orderId, action: 'claim' });
+      const res = await callOps()({ orderId, action: 'claim', tokenNumber } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
@@ -117,6 +118,14 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
   printLabels: async (orderId, garmentCount) => {
     try {
       const res = await callOps()({ orderId, action: 'printLabels', garmentCount });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+  printBundleLabels: async (orderId, count) => {
+    try {
+      const res = await callOps()({ orderId, action: 'printBundleLabels', count } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
@@ -199,9 +208,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
     }
   },
 
-  verifyDeliveryOTP: async (orderId, userId, otp) => {
+  verifyDeliveryOTP: async (orderId, userId, otp, proofUrl) => {
     try {
-      const res = await callSupervisor()({ action: 'verifyDeliveryOTP', orderId, userId, otp });
+      const res = await callSupervisor()({ action: 'verifyDeliveryOTP', orderId, userId, otp, proofUrl });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

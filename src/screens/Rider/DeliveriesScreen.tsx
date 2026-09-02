@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator, Modal, TextInput, TouchableOpacity, Alert, Linking, Platform } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, Alert, Linking, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Package, Clock, MapPin, ShieldCheck, Phone, Navigation } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
@@ -7,14 +7,13 @@ import { useOpsStaffStore, DeliveryTask } from '../../store/opsStaffStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { timeAgo } from '../../utils/orderFeed';
+import { DeliveryVerification } from '../../components/DeliveryVerification';
 
 export function DeliveriesScreen() {
   const user = useAuthStore(state => state.user);
   const { myDeliveries, isLoading, initialize } = useOpsStaffStore();
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [otp, setOtp] = useState('');
-  const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     if (user?.id) initialize(user.id);
@@ -23,19 +22,19 @@ export function DeliveriesScreen() {
 
   // Only show active delivery tasks (out_for_delivery)
   const activeDeliveries = myDeliveries.filter(d => d.status === 'out_for_delivery');
+  const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
 
-  const handleVerifyDelivery = async () => {
-    if (!activeTaskId || otp.length !== 4 || verifying) return;
+  const handleVerifyDelivery = async ({ otp, proofUrl }: { otp: string; proofUrl: string | null }) => {
+    if (!activeTaskId || otp.length !== 4) return false;
     const task = myDeliveries.find(d => d.id === activeTaskId);
-    if (!task) return;
+    if (!task) return false;
 
-    setVerifying(true);
     try {
-      const res = await useOpsProcessStore.getState().verifyDeliveryOTP(task.orderId, task.userId, otp);
+      const res = await useOpsProcessStore.getState().verifyDeliveryOTP(task.orderId, task.userId, otp, proofUrl);
       if (res.ok) {
         setActiveTaskId(null);
-        setOtp('');
         Alert.alert('Delivery verified', 'Order marked as delivered.');
+        return true;
       } else {
         const msg =
           res.error === 'invalid_otp' ? 'Incorrect OTP. Please try again.'
@@ -43,11 +42,11 @@ export function DeliveriesScreen() {
           : res.error === 'unauthorized' ? 'You are not authorized for this delivery.'
           : 'Could not verify delivery. Please try again.';
         Alert.alert('Verification failed', msg);
+        return false;
       }
     } catch {
       Alert.alert('Verification failed', 'Could not verify delivery. Please try again.');
-    } finally {
-      setVerifying(false);
+      return false;
     }
   };
 
@@ -173,7 +172,7 @@ export function DeliveriesScreen() {
                   <Text className="text-info font-bold ml-2">Directions</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  onPress={() => { setOtp(''); setActiveTaskId(item.id); }}
+                  onPress={() => setActiveTaskId(item.id)}
                   className="flex-1 bg-green-500/15 border border-green-500/40 rounded-lg h-11 items-center justify-center flex-row"
                 >
                   <ShieldCheck size={16} color="#22c55e" />
@@ -185,53 +184,14 @@ export function DeliveriesScreen() {
         }}
       />
 
-      {/* OTP Verification Modal */}
-      <Modal
+      <DeliveryVerification
         visible={activeTaskId !== null}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setActiveTaskId(null)}
-      >
-        <View className="flex-1 justify-center items-center bg-black/60 p-6">
-          <View className="w-full bg-bgSurface rounded-2xl p-5 border border-bgSurfaceLight">
-            <Text className="text-textPrimary text-lg font-bold mb-1">Verify Delivery</Text>
-            <Text className="text-textSecondary text-sm mb-4">Enter the 4-digit OTP the customer shared.</Text>
-
-            <TextInput
-              value={otp}
-              onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
-              keyboardType="number-pad"
-              maxLength={4}
-              placeholder="••••"
-              placeholderTextColor="#64748B"
-              autoFocus
-              className="bg-bgDark border border-bgSurfaceLight rounded-xl h-14 text-center text-2xl tracking-[0.5em] text-textPrimary font-bold"
-            />
-
-            {verifying ? (
-              <View className="mt-4">
-                <ActivityIndicator size="small" color="#22c55e" />
-              </View>
-            ) : (
-              <View className="flex-row gap-3 mt-4">
-                <TouchableOpacity
-                  onPress={() => setActiveTaskId(null)}
-                  className="flex-1 bg-bgSurfaceLight rounded-xl h-12 items-center justify-center"
-                >
-                  <Text className="text-textSecondary font-bold">Cancel</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={handleVerifyDelivery}
-                  disabled={otp.length !== 4}
-                  className="flex-1 bg-green-500 rounded-xl h-12 items-center justify-center"
-                >
-                  <Text className="text-white font-bold">Verify</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-        </View>
-      </Modal>
+        onClose={() => setActiveTaskId(null)}
+        orderId={activeTask?.orderId || ''}
+        expectedBundles={activeTask?.bundleCount || 1}
+        expectedLabels={activeTask?.bundleLabels || []}
+        onVerifyDelivery={handleVerifyDelivery}
+      />
     </SafeAreaView>
   );
 }

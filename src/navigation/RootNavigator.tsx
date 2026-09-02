@@ -14,6 +14,7 @@ import { ProcessingScreen } from '../screens/Helper/ProcessingScreen';
 import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
+import { useLifecycleNotifications } from '../utils/lifecycleNotifications';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
 import { View, ActivityIndicator, Text } from 'react-native';
@@ -108,6 +109,7 @@ const AppTabs = () => {
 
 export function RootNavigator() {
   const { isLoggedIn, activeRole, authInitialized, initializeAuth, user } = useAuthStore();
+  useLifecycleNotifications();
 
   useEffect(() => {
     initializeAuth();

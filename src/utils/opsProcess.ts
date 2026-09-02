@@ -25,6 +25,7 @@ export interface OpsProcess {
   stages: Record<string, StageRecord>;
   garments: GarmentsRecord;
   claimedAt?: unknown;
+  tokenNumber?: string;
 }
 
 const LABELS: Record<string, string> = {
@@ -32,9 +33,9 @@ const LABELS: Record<string, string> = {
   prestain: 'Pre-stain',
   getting_washed: 'Washing',
   getting_dried: 'Drying',
-  getting_folded: 'Folding',
   getting_ironed: 'Ironing',
   iron_ready: 'Ready for iron',
+  packaging: 'Packaging',
   done: 'Done',
 };
 
@@ -74,6 +75,7 @@ export function parseOpsProcess(id: string, snapData: Record<string, any> | null
     stages,
     garments: d.garments ?? { labels: [], registered: [] },
     claimedAt: d.claimedAt ?? undefined,
+    tokenNumber: d.tokenNumber ?? undefined,
   };
 }
 

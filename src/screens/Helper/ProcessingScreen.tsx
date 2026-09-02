@@ -22,7 +22,6 @@ const STAGE_ORDER = [
   'tagging',
   'getting_washed',
   'getting_dried',
-  'getting_folded',
   'getting_ironed',
   'packaging'
 ];
@@ -215,6 +214,11 @@ export function ProcessingScreen() {
         <View className="flex-row items-center justify-between mb-2">
           <View className="flex-row items-center gap-2">
             <Text className="text-gray-900 font-bold text-lg">#{item.orderId.toUpperCase()}</Text>
+            {p?.tokenNumber && (
+              <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
+                <Text className="text-amber-800 font-bold text-xs">T-{p.tokenNumber}</Text>
+              </View>
+            )}
             {p && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
           <View className={`px-2 py-1 rounded-md ${done ? 'bg-green-100' : 'bg-[#994bff]/10'}`}>
