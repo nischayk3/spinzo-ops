@@ -32,15 +32,13 @@ const HELPER_TABS = STAGE_ORDER.filter(s => s !== 'getting_ironed');
 
 export const canStartStage = (role: AppRole, step: string): boolean => {
   if (role === 'supervisor') return true;
-  if (role === 'iron') return step === 'getting_ironed';
-  if (role === 'helper') return HELPER_TABS.includes(step);
+  if (role === 'iron' || role === 'helper') return STAGE_ORDER.includes(step);
   return false;
 };
 
 const getTabsForRole = (role: AppRole) => {
   if (role === 'supervisor') return STAGE_ORDER;
-  if (role === 'iron') return IRON_TABS;
-  if (role === 'helper') return HELPER_TABS;
+  if (role === 'iron' || role === 'helper') return STAGE_ORDER;
   return [];
 };
 
@@ -214,7 +212,7 @@ export function ProcessingScreen() {
         <View className="flex-row items-center justify-between mb-2">
           <View className="flex-row items-center gap-2">
             <Text className="text-gray-900 font-bold text-lg">#{item.orderId.toUpperCase()}</Text>
-            {p?.tokenNumber && (
+            {!!p?.tokenNumber && (
               <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
                 <Text className="text-amber-800 font-bold text-xs">T-{p.tokenNumber}</Text>
               </View>
@@ -229,7 +227,7 @@ export function ProcessingScreen() {
         <View className="flex-row items-center justify-between mb-3 border-b border-gray-100 pb-3">
           <View className="flex-1">
             <Text className="text-gray-900 font-medium text-base mb-1">{order?.customerName || 'Unknown Customer'}</Text>
-            {order?.phone && (
+            {!!order?.phone && (
               <TouchableOpacity onPress={() => Linking.openURL(`tel:${order.phone}`)} className="flex-row items-center">
                 <Phone size={12} color="#64748B" className="mr-1" />
                 <Text className="text-gray-500 text-xs">{order.phone}</Text>
@@ -244,7 +242,7 @@ export function ProcessingScreen() {
 
         <View className="flex-row items-center justify-between">
           <View>
-            {order?.deliverySlot && (
+            {!!order?.deliverySlot && (
               <View className="flex-row items-center mb-1">
                 <MapPin size={12} color="#64748B" className="mr-1" />
                 <Text className="text-gray-500 text-xs">Delivery: {order.deliverySlot}</Text>
@@ -362,7 +360,7 @@ export function ProcessingScreen() {
         )}
       </ScrollView>
 
-      {error && (
+      {!!error && (
         <View className="absolute top-32 left-4 right-4 bg-red-50 border border-red-200 rounded-xl p-3 shadow-sm z-40">
           <Text className="text-red-600 text-xs font-bold">{error}</Text>
         </View>

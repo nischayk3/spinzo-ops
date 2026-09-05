@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal } from 'react-native';
 import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
@@ -63,18 +63,28 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [busy, setBusy] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showQualityVerification, setShowQualityVerification] = useState(false);
-  const [showPackagingVerification, setShowPackagingVerification] = useState(false);
-  
-  const [showCancelModal, setShowCancelModal] = useState(false);
-  const [showRescheduleModal, setShowRescheduleModal] = useState(false);
-  const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
-  const [showTokenModal, setShowTokenModal] = useState(false);
-  const [assignTokenNumber, setAssignTokenNumber] = useState('');
+
+  const [machineStartedLocal, setMachineStartedLocal] = useState(false);
 
   const order = useMemo(() => orders.find(o => o.id === orderId), [orders, orderId]);
   const process = useMemo(() => processes.find(p => p.orderId === orderId), [processes, orderId]);
 
   const cur = process ? currentStep(process) : null;
+  const curStage = cur ? stage(process!, cur) : undefined;
+  const isAssignee = activeRole === 'supervisor' || (curStage?.assignee === user?.id);
+
+  // If the stage is changed/completed, reset the local state
+  useEffect(() => {
+    setMachineStartedLocal(false);
+  }, [cur]);
+
+  const [showPackagingVerification, setShowPackagingVerification] = useState(false);
+  
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [showRescheduleModal, setShowRescheduleModal] = useState(false);
+  const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
+
+
   const done = process ? isDone(process) : false;
   const taggingStage = process?.stages?.tagging;
   const garments = process?.garments || {};
@@ -82,7 +92,6 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const registeredSeqs = registered.map((r: any) => typeof r === 'number' ? r : r.seq);
   const registeredCount = registered.length;
 
-  const isAssignee = user?.role === 'supervisor' || (cur && process?.stages?.[cur]?.assignee === user?.id);
 
   const runAction = async (fn: () => Promise<OpsProcessingResult>, onSuccess?: () => void) => {
     setBusy(true);
@@ -96,7 +105,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
-  const handleClaim = (token: string) => runAction(() => claim(orderId, token), () => setShowTokenModal(false));
+  const handleClaim = () => runAction(() => claim(orderId, ''));
   const handleStart = () => runAction(() => startStep(orderId));
   const handleComplete = () => {
     // Quality and Packaging verification required for packaging step
@@ -222,7 +231,6 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     });
   };
 
-  const curStage = cur ? stage(process!, cur) : undefined;
   const started = !!curStage?.startedAt;
   const completed = !!curStage?.completedAt;
 
@@ -313,7 +321,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
           <Text className="text-gray-900 font-bold mb-2">Ready for Tagging</Text>
           <TouchableOpacity
-            onPress={() => setShowTokenModal(true)}
+            onPress={handleClaim}
             disabled={busy}
             className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-[#994bff]'}`}
           >
@@ -363,7 +371,11 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             onPrint={async (bundles: number) => {
               const res = await useOpsProcessStore.getState().printBundleLabels(orderId, bundles);
               if (res.ok && res.labels) {
-                await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
+                try {
+                  await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
+                } catch (e) {
+                  Alert.alert('Printer Error', 'Could not connect to the printer, but labels are recorded. Please print manually later.');
+                }
                 return true;
               }
               return false;
@@ -385,13 +397,25 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
           <Text className="text-gray-900 font-bold mb-4">{stepLabel(cur)}</Text>
           {!started ? (
-            <TouchableOpacity
-              onPress={handleStart}
-              disabled={busy}
-              className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
-            >
-              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">{isMachineStep ? `${machineIcon} Load Machine & Start` : `Start ${stepLabel(cur)}`}</Text>}
-            </TouchableOpacity>
+            <View>
+              {isMachineStep && !machineStartedLocal ? (
+                <TouchableOpacity
+                  onPress={() => setMachineStartedLocal(true)}
+                  disabled={busy}
+                  className="h-14 rounded-xl bg-orange-100 border border-orange-200 items-center justify-center flex-row"
+                >
+                  <Text className="text-orange-700 font-bold text-lg">Start {stepLabel(cur)}</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  onPress={handleStart}
+                  disabled={busy}
+                  className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
+                >
+                  {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">{isMachineStep ? `${machineIcon} Load Machine & Start` : `Start ${stepLabel(cur)}`}</Text>}
+                </TouchableOpacity>
+              )}
+            </View>
           ) : (
             <View>
               {isMachineStep && (
@@ -498,7 +522,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           <View className="items-center">
             <View className="flex-row items-center gap-2">
               <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
-              {process?.tokenNumber && (
+              {!!process?.tokenNumber && (
                 <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
                   <Text className="text-amber-800 font-bold text-xs">T-{process.tokenNumber}</Text>
                 </View>
@@ -598,7 +622,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           )}
         </View>
 
-        {actionError && (
+        {!!actionError && (
           <View className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 flex-row items-center gap-2">
             <AlertCircle color="#ef4444" size={20} />
             <Text className="text-red-600 font-medium flex-1">{actionError}</Text>
@@ -667,40 +691,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         </>
       )}
 
-      {/* Token Assignment Modal */}
-      <Modal visible={showTokenModal} transparent animationType="fade">
-        <View className="flex-1 bg-black/50 justify-center items-center p-4">
-          <View className="bg-white rounded-2xl w-full max-w-sm p-6">
-            <Text className="text-lg font-bold text-gray-900 mb-2">Assign Token</Text>
-            <Text className="text-gray-500 mb-4">Enter the physical token number attached to this order.</Text>
-            
-            <TextInput
-              className="bg-gray-50 border border-gray-200 rounded-xl px-4 py-3 text-lg font-bold text-gray-900 mb-4"
-              value={assignTokenNumber}
-              onChangeText={setAssignTokenNumber}
-              placeholder="e.g. 42"
-              autoFocus
-            />
 
-            <View className="flex-row gap-3">
-              <TouchableOpacity
-                onPress={() => setShowTokenModal(false)}
-                disabled={busy}
-                className="flex-1 bg-gray-100 rounded-xl py-3 items-center"
-              >
-                <Text className="text-gray-600 font-bold">Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => handleClaim(assignTokenNumber)}
-                disabled={busy || !assignTokenNumber.trim()}
-                className={`flex-1 rounded-xl py-3 items-center ${busy || !assignTokenNumber.trim() ? 'bg-gray-200' : 'bg-[#994bff]'}`}
-              >
-                {busy ? <ActivityIndicator color="#fff" size="small" /> : <Text className="text-white font-bold">Confirm</Text>}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </KeyboardAvoidingView>
   );
 }

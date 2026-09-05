@@ -17,10 +17,7 @@ interface DeliveryVerificationProps {
 type DeliveryStep = 'scan' | 'evidence' | 'otp';
 
 export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundles, expectedLabels, onVerifyDelivery }: DeliveryVerificationProps) => {
-  const [step, setStep] = useState<DeliveryStep>('scan');
-  const [scannedSeqs, setScannedSeqs] = useState<Set<number>>(new Set());
-  const [showScanner, setShowScanner] = useState(false);
-  const [scanError, setScanError] = useState<string | null>(null);
+  const [step, setStep] = useState<DeliveryStep>('evidence');
 
   const [proofUrl, setProofUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -29,18 +26,7 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
   const [verifying, setVerifying] = useState(false);
   const [otpError, setOtpError] = useState<string | null>(null);
 
-  const handleScan = (data: string) => {
-    setShowScanner(false);
-    setScanError(null);
-    
-    // Check if the QR matches any expected bundle label
-    const matched = expectedLabels.find(l => l.qr === data);
-    if (matched) {
-      setScannedSeqs(prev => new Set(prev).add(matched.seq));
-    } else {
-      setScanError('Invalid bundle label. Please scan a bundle for this order.');
-    }
-  };
+
 
   const takePhoto = async () => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
@@ -76,7 +62,6 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
     }
   };
 
-  const allScanned = expectedBundles > 0 ? scannedSeqs.size >= expectedBundles : true;
 
   if (!visible) return null;
 
@@ -87,7 +72,7 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
           <View className="flex-row items-center justify-between p-4 border-b border-bgSurfaceLight">
             <View>
               <Text className="text-textPrimary text-lg font-bold">Delivery Verification</Text>
-              <Text className="text-textSecondary text-sm">Step {step === 'scan' ? 1 : step === 'evidence' ? 2 : 3} of 3</Text>
+              <Text className="text-textSecondary text-sm">Step {step === 'evidence' ? 1 : 2} of 2</Text>
             </View>
             <TouchableOpacity onPress={onClose} className="p-2">
               <X size={24} color="#94a3b8" />
@@ -95,50 +80,10 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
           </View>
 
           <View className="p-4 flex-1">
-            {step === 'scan' && (
-              <View className="flex-1">
-                <Text className="text-textSecondary mb-4">Step 1: Scan all bundle QR labels at the customer doorstep.</Text>
-                
-                <View className="bg-bgDark p-4 rounded-xl border border-bgSurfaceLight mb-6">
-                  <Text className="text-textPrimary font-bold text-lg mb-2">Bundles Scanned: {scannedSeqs.size} / {expectedBundles}</Text>
-                  <View className="w-full bg-bgSurfaceLight h-2 rounded-full overflow-hidden">
-                    <View 
-                      className="h-full bg-blue-500" 
-                      style={{ width: `${expectedBundles > 0 ? (scannedSeqs.size / expectedBundles) * 100 : 100}%` }} 
-                    />
-                  </View>
-                </View>
-
-                {scanError && (
-                  <Text className="text-red-500 text-sm mb-4 text-center bg-red-500/10 p-2 rounded-lg">{scanError}</Text>
-                )}
-
-                {!allScanned && (
-                  <TouchableOpacity
-                    onPress={() => setShowScanner(true)}
-                    className="h-14 bg-bgDark border border-blue-500/40 rounded-xl flex-row items-center justify-center mb-4"
-                  >
-                    <Package color="#3B82F6" size={20} className="mr-2" />
-                    <Text className="text-info font-bold text-lg">Scan Bundle Label</Text>
-                  </TouchableOpacity>
-                )}
-
-                <View className="flex-1 justify-end">
-                  <TouchableOpacity
-                    onPress={() => setStep('evidence')}
-                    disabled={!allScanned}
-                    className={`h-14 rounded-xl flex-row items-center justify-center ${allScanned ? 'bg-blue-600' : 'bg-bgSurfaceLight'}`}
-                  >
-                    <Text className={`font-bold text-lg ${allScanned ? 'text-white' : 'text-textMuted'}`}>Next: Delivery Proof</Text>
-                    <ChevronRight color={allScanned ? 'white' : '#64748B'} size={20} className="ml-2" />
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
 
             {step === 'evidence' && (
               <View className="flex-1">
-                <Text className="text-textSecondary mb-4">Step 2: Take a photo at the delivery location.</Text>
+                <Text className="text-textSecondary mb-4">Step 1: Take a photo at the delivery location.</Text>
                 
                 <View className="items-center justify-center bg-bgDark rounded-xl border border-bgSurfaceLight mb-6 overflow-hidden h-48">
                   {uploading ? (
@@ -176,7 +121,7 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
 
             {step === 'otp' && (
               <View className="flex-1">
-                <Text className="text-textSecondary mb-4">Step 3: Enter the 4-digit OTP from the customer.</Text>
+                <Text className="text-textSecondary mb-4">Step 2: Enter the 4-digit OTP from the customer.</Text>
                 
                 <TextInput
                   value={otp}
@@ -214,15 +159,6 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
           </View>
         </View>
       </View>
-      
-      {showScanner && (
-        <QRScanner 
-          visible={showScanner} 
-          actionType="Bundle Scan"
-          onScan={handleScan} 
-          onClose={() => setShowScanner(false)} 
-        />
-      )}
     </Modal>
   );
 };

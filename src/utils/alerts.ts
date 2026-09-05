@@ -62,35 +62,77 @@ function playTone(ctx: AudioContext, freq: number, type: OscillatorType, startTi
 
 import { Audio } from 'expo-av';
 
-// Pre-load the sound instance so it plays instantly
 let alarmSound: Audio.Sound | null = null;
+let isInitializingAlarm = false;
+let shouldBePlaying = false;
+let singleLoopTimeout: ReturnType<typeof setTimeout> | null = null;
+
 async function initAlarm() {
+  if (isInitializingAlarm || alarmSound) return;
+  isInitializingAlarm = true;
   try {
     const { sound } = await Audio.Sound.createAsync(require('../../assets/sounds/alarm.mp3'));
     alarmSound = sound;
   } catch (e) {
     console.log('Failed to load alarm sound', e);
+  } finally {
+    isInitializingAlarm = false;
   }
 }
 // Init async in background
 initAlarm();
 
-/** Dramatic order alert — Plays loud emergency MP3 */
-async function dramaticChime() {
+/** Start a looping or single-burst siren using the MP3 file */
+export async function dramaticChime(loop: boolean = true) {
+  shouldBePlaying = true;
+  if (singleLoopTimeout) {
+    clearTimeout(singleLoopTimeout);
+    singleLoopTimeout = null;
+  }
+
+  if (!alarmSound && !isInitializingAlarm) {
+    await initAlarm();
+  }
+  
+  // Await initialization if currently in progress
+  if (isInitializingAlarm) {
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // If stopAlarm() was called while we were awaiting init, abort.
+  if (!shouldBePlaying || !alarmSound) return;
+
   try {
-    if (!alarmSound) {
-      // If it hasn't loaded yet, try loading it on the fly
-      const { sound } = await Audio.Sound.createAsync(require('../../assets/sounds/alarm.mp3'));
-      alarmSound = sound;
+    await alarmSound.setIsLoopingAsync(loop);
+    await alarmSound.playFromPositionAsync(0);
+
+    // If we only want a single loop (e.g. for Supervisor new order),
+    // we manually stop it after 2.5 seconds (roughly one MP3 loop).
+    if (!loop) {
+      singleLoopTimeout = setTimeout(() => {
+        if (!loop && shouldBePlaying) {
+          stopAlarm();
+        }
+      }, 2500);
     }
-    
-    // Web requires user interaction before Audio can play.
-    // Ensure we stop any currently playing instance before playing again.
-    await alarmSound.stopAsync();
-    await alarmSound.playAsync();
   } catch (e) {
-    // Audio might fail if user hasn't interacted with the page yet on Web
     console.log('Failed to play alarm sound', e);
+  }
+}
+
+/** Instantly kill the siren */
+export async function stopAlarm() {
+  shouldBePlaying = false;
+  if (singleLoopTimeout) {
+    clearTimeout(singleLoopTimeout);
+    singleLoopTimeout = null;
+  }
+  try {
+    if (alarmSound) {
+      await alarmSound.stopAsync();
+    }
+  } catch (e) {
+    console.log('Failed to stop alarm sound', e);
   }
 }
 
@@ -103,8 +145,8 @@ function lifecycleChime() {
     const ctx = ac.ctx;
     const now = ctx.currentTime;
     // Two-note gentle chime: G5 → C6
-    playNote(ctx, 783.99, now, 0.15, 0.25);
-    playNote(ctx, 1046.50, now + 0.18, 0.2, 0.25);
+    playTone(ctx, 783.99, 'sine', now, 0.15, 0.25);
+    playTone(ctx, 1046.50, 'sine', now + 0.18, 0.2, 0.25);
   } catch (e) {
     // best-effort
   }
@@ -145,7 +187,7 @@ export function primeAlerts() {
 }
 
 export function announceNewOrder() {
-  dramaticChime();
+  dramaticChime(false);
   speak('New order placed');
 }
 

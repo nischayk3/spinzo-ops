@@ -16,6 +16,7 @@
     "expo-location": "~57.0.8",
     "expo-speech": "~57.0.1",
     "expo-status-bar": "~57.0.1",
+    "expo-updates": "~57.0.21",
     "firebase": "^12.8.0",
     "lucide-react-native": "^1.28.0",
     "nativewind": "^4.2.1",
@@ -39,6 +40,7 @@
     "vitest": "^2.1.9"
   },
   "scripts": {
+    "build": "expo export -p web",
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",

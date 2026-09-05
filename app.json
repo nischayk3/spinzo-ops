@@ -24,6 +24,11 @@
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.INTERNET",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.INTERNET",
         "android.permission.RECORD_AUDIO"
       ]
     },
@@ -60,6 +65,12 @@
         "projectId": "19adb8df-64bc-4ee5-8abf-c24aa1d4f7dc"
       }
     },
-    "owner": "nischayk3"
+    "owner": "nischayk3",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/19adb8df-64bc-4ee5-8abf-c24aa1d4f7dc"
+    }
   }
 }

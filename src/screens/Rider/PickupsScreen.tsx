@@ -1,13 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, FlatList, ActivityIndicator, Modal, TextInput, TouchableOpacity, Alert, Platform, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Bike, Clock, MapPin, ShieldCheck, Phone, Navigation } from 'lucide-react-native';
+import { Bike, Clock, MapPin, ShieldCheck, Phone, Navigation, Edit3 } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { isPending, pickupLabel } from '../../utils/opsTasks';
 import { timeAgo } from '../../utils/orderFeed';
 import { verifyPickupOTP, verifyStoreOTP } from '../../utils/opsPickup';
+import { EditOrderModal } from '../../components/EditOrderModal';
 
 export function PickupsScreen() {
   const user = useAuthStore(state => state.user);
@@ -17,7 +18,11 @@ export function PickupsScreen() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null); // which task's OTP modal is open
   const [activeStoreTaskId, setActiveStoreTaskId] = useState<string | null>(null);
   const [otp, setOtp] = useState('');
+  const [tokenNumber, setTokenNumber] = useState('');
   const [verifying, setVerifying] = useState(false);
+
+  // Edit Order state
+  const [editOrderId, setEditOrderId] = useState<string | null>(null);
 
   useEffect(() => {
     if (user?.id) {
@@ -31,15 +36,20 @@ export function PickupsScreen() {
 
   const handleVerify = async () => {
     if (!activeTaskId || otp.length !== 4 || verifying) return;
+    if (!tokenNumber.trim()) {
+      Alert.alert('Token Required', 'Please assign a token number before verifying.');
+      return;
+    }
     const orderId = activeTaskId;
     setVerifying(true);
     try {
-      const res = await verifyPickupOTP(orderId, otp);
+      const res = await verifyPickupOTP(orderId, otp, tokenNumber.trim());
       if (res.ok) {
         setActiveTaskId(null);
         setOtp('');
+        setTokenNumber('');
         // The task flips to picked_up via the onSnapshot subscription and auto-removes.
-        Alert.alert('Pickup verified', 'Order marked as picked up.');
+        Alert.alert('Pickup verified', `Order marked as picked up. Token #${tokenNumber}`);
       } else {
         const msg =
           res.error === 'invalid_otp' ? 'Incorrect OTP. Please try again.'
@@ -83,6 +93,8 @@ export function PickupsScreen() {
     }
   };
 
+  const editOrder = editOrderId ? orders.find(o => o.id === editOrderId) : null;
+
   if (isLoading && pending.length === 0) {
     return (
       <SafeAreaView className="flex-1 bg-bgDark items-center justify-center">
@@ -114,6 +126,7 @@ export function PickupsScreen() {
         }
         renderItem={({ item }) => {
           const order = orders.find(o => o.id === item.orderId);
+          const canEdit = item.status !== 'picked_up' && item.status !== 'in_transit_to_store';
           
           return (
             <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
@@ -222,6 +235,8 @@ export function PickupsScreen() {
                   <Text className="text-textMuted text-xs font-medium">Token #{item.tokenNumber}</Text>
                 ) : null}
               </View>
+
+              {/* Action Buttons */}
               {item.status === 'in_transit_to_store' ? (
                 <TouchableOpacity
                   onPress={() => { setOtp(''); setActiveStoreTaskId(item.id); }}
@@ -231,19 +246,33 @@ export function PickupsScreen() {
                   <Text className="text-purple-700 font-bold">Handover to Store</Text>
                 </TouchableOpacity>
               ) : (
-                <TouchableOpacity
-                  onPress={() => { setOtp(''); setActiveTaskId(item.id); }}
-                  className="bg-info/15 border border-info/40 rounded-lg h-11 items-center justify-center flex-row"
-                >
-                  <ShieldCheck size={18} color="#3B82F6" className="mr-2" />
-                  <Text className="text-info font-bold">Verify pickup OTP</Text>
-                </TouchableOpacity>
+                <View className="gap-2">
+                  {/* Edit Order Button — only before pickup verified */}
+                  {canEdit && order && order.items && order.items.length > 0 && (
+                    <TouchableOpacity
+                      onPress={() => setEditOrderId(item.orderId)}
+                      className="bg-amber-50 border border-amber-200 rounded-lg h-11 items-center justify-center flex-row"
+                    >
+                      <Edit3 size={16} color="#d97706" />
+                      <Text className="text-amber-700 font-bold ml-2">Edit Order (Weight/Qty)</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  <TouchableOpacity
+                    onPress={() => { setOtp(''); setTokenNumber(''); setActiveTaskId(item.id); }}
+                    className="bg-info/15 border border-info/40 rounded-lg h-11 items-center justify-center flex-row"
+                  >
+                    <ShieldCheck size={18} color="#3B82F6" className="mr-2" />
+                    <Text className="text-info font-bold">Verify pickup OTP</Text>
+                  </TouchableOpacity>
+                </View>
               )}
             </View>
           );
         }}
       />
 
+      {/* Pickup OTP + Token Modal */}
       <Modal
         visible={activeTaskId !== null}
         transparent
@@ -253,8 +282,21 @@ export function PickupsScreen() {
         <View className="flex-1 justify-center items-center bg-black/60 p-6">
           <View className="w-full bg-bgSurface rounded-2xl p-5 border border-bgSurfaceLight">
             <Text className="text-textPrimary text-lg font-bold mb-1">Verify Pickup</Text>
-            <Text className="text-textSecondary text-sm mb-4">Enter the 4-digit OTP the customer shared.</Text>
+            <Text className="text-textSecondary text-sm mb-4">Enter the OTP and assign a token number.</Text>
 
+            {/* Token Number Input */}
+            <Text className="text-textMuted text-xs font-bold uppercase mb-1">Token Number</Text>
+            <TextInput
+              value={tokenNumber}
+              onChangeText={setTokenNumber}
+              placeholder="e.g. 1, 2, 3..."
+              placeholderTextColor="#94A3B8"
+              autoFocus
+              className="bg-bgDark border border-bgSurfaceLight rounded-xl h-12 px-4 text-textPrimary font-bold text-base mb-4"
+            />
+
+            {/* OTP Input */}
+            <Text className="text-textMuted text-xs font-bold uppercase mb-1">Customer OTP</Text>
             <TextInput
               value={otp}
               onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
@@ -262,7 +304,6 @@ export function PickupsScreen() {
               maxLength={4}
               placeholder="••••"
               placeholderTextColor="#64748B"
-              autoFocus
               className="bg-bgDark border border-bgSurfaceLight rounded-xl h-14 text-center text-2xl tracking-[0.5em] text-textPrimary font-bold"
             />
 
@@ -280,8 +321,8 @@ export function PickupsScreen() {
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={handleVerify}
-                  disabled={otp.length !== 4}
-                  className="flex-1 bg-primary rounded-xl h-12 items-center justify-center"
+                  disabled={otp.length !== 4 || !tokenNumber.trim()}
+                  className={`flex-1 rounded-xl h-12 items-center justify-center ${otp.length !== 4 || !tokenNumber.trim() ? 'bg-gray-300' : 'bg-primary'}`}
                 >
                   <Text className="text-white font-bold">Verify</Text>
                 </TouchableOpacity>
@@ -291,6 +332,7 @@ export function PickupsScreen() {
         </View>
       </Modal>
       
+      {/* Store Handover OTP Modal */}
       <Modal
         visible={activeStoreTaskId !== null}
         transparent
@@ -337,6 +379,13 @@ export function PickupsScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Edit Order Modal */}
+      <EditOrderModal
+        visible={editOrderId !== null}
+        onClose={() => setEditOrderId(null)}
+        order={editOrder}
+      />
     </SafeAreaView>
   );
 }

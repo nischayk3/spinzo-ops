@@ -6,8 +6,7 @@ const { pickRider, pickupGuard, normalizePhone, taskTransition, opsStepsForOrder
 // Which steps a role may claim/start. Supervisors bypass; iron people take only
 // ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
 function stageRoleGate(step, role) {
-  if (role === 'supervisor' || role === 'helper') return true;
-  if (role === 'iron') return step === 'getting_ironed';
+  if (role === 'supervisor' || role === 'helper' || role === 'iron') return true;
   return false;
 }
 
@@ -440,14 +439,19 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   const rosterSnap = await db.doc('config/opsStaff').get();
   const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
   const role = rosterPhones[phone];
-  if (role !== 'helper' && role !== 'iron' && role !== 'supervisor') return { ok: false, error: 'unauthorized' };
+  if (role !== 'helper' && role !== 'iron' && role !== 'supervisor' && role !== 'rider') return { ok: false, error: 'unauthorized' };
 
   const data = request.data || {};
   const orderId = data.orderId;
   const action = data.action;
   if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-  if (!['claim', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels'].includes(action)) {
+  if (!['claim', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder'].includes(action)) {
     return { ok: false, error: 'invalid_input' };
+  }
+
+  // Riders may only use editOrder via this endpoint; all other actions are helper/supervisor/iron only.
+  if (role === 'rider' && action !== 'editOrder') {
+    return { ok: false, error: 'unauthorized' };
   }
 
   const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
@@ -460,13 +464,46 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   const processRef = db.doc(`ops_process/${orderId}`);
   const now = admin.firestore.Timestamp.now();
 
+  // ── Edit Order ──────────────────────────────────────────────────────────
+  // Allows riders/supervisors to modify order items (weight, piece count) before processing.
+  if (action === 'editOrder') {
+    const { items, totalAmount, billDetails } = data;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return { ok: false, error: 'invalid_input' };
+    }
+
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) return { ok: false, error: 'not_found' };
+    const order = orderSnap.data();
+
+    // Only allow edits before processing starts (placed, confirmed, in_transit_to_store, pickup_completed)
+    const editableStatuses = ['placed', 'confirmed', 'in_transit_to_store', 'pickup_completed'];
+    if (!editableStatuses.includes(order.status)) {
+      return { ok: false, error: 'order_already_processing' };
+    }
+
+    try {
+      const updateData = {
+        items,
+        totalAmount: totalAmount || order.totalAmount,
+        billDetails: billDetails || order.billDetails,
+        updatedAt: admin.firestore.Timestamp.now(),
+        lastEditedBy: auth.uid,
+      };
+      await orderRef.update(updateData);
+      // Also update the vendor mirror
+      await db.doc(`vendors/${vendorId}/orders/${orderId}`).update(updateData);
+      return { ok: true };
+    } catch (err) {
+      console.error('opsProcessing editOrder failed', err);
+      return { ok: false, error: 'server_error' };
+    }
+  }
+
   if (action === 'claim') {
     // Claim = start the tagging stage. A helper claiming an order begins tagging it.
-    // Token number is mandatory — the physical store token tag for this order.
-    const tokenNumber = data.tokenNumber;
-    if (!tokenNumber || typeof tokenNumber !== 'string' || tokenNumber.trim() === '') {
-      return { ok: false, error: 'token_required' };
-    }
+    // Token number is now assigned by the rider at pickup, so it's optional here.
+    const tokenNumber = data.tokenNumber || '';
 
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
