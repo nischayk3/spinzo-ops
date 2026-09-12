@@ -8,21 +8,46 @@ import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { timeAgo } from '../../utils/orderFeed';
 import { DeliveryVerification } from '../../components/DeliveryVerification';
+import { QRScanner } from '../../components/QRScanner';
 
 export function DeliveriesScreen() {
   const user = useAuthStore(state => state.user);
   const { myDeliveries, isLoading, initialize } = useOpsStaffStore();
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [showPickupScanner, setShowPickupScanner] = useState<string | null>(null);
 
   useEffect(() => {
     if (user?.id) initialize(user.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Only show active delivery tasks (out_for_delivery)
-  const activeDeliveries = myDeliveries.filter(d => d.status === 'out_for_delivery');
+  // Only show active delivery tasks (assigned or out_for_delivery) whose order isn't cancelled
+  const activeDeliveries = myDeliveries.filter(d => {
+    if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
+    // Cross-check: if the corresponding order is cancelled, hide this delivery
+    const order = useOrderFeedStore.getState().orders.find(o => o.id === d.orderId);
+    if (order && order.status === 'cancelled') return false;
+    return true;
+  });
   const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
+
+  const handlePickupScan = async (taskId: string, data: string) => {
+    const task = myDeliveries.find(d => d.id === taskId);
+    if (!task) return;
+    
+    setShowPickupScanner(null);
+    try {
+      const res = await useOpsProcessStore.getState().pickupDelivery(task.orderId);
+      if (res.ok) {
+        Alert.alert('Pickup verified', 'Order is now out for delivery.');
+      } else {
+        Alert.alert('Pickup failed', res.error || 'Could not verify pickup.');
+      }
+    } catch (e) {
+      Alert.alert('Pickup failed', 'Could not verify pickup.');
+    }
+  };
 
   const handleVerifyDelivery = async ({ otp, proofUrl }: { otp: string; proofUrl: string | null }) => {
     if (!activeTaskId || otp.length !== 4) return false;
@@ -172,11 +197,13 @@ export function DeliveriesScreen() {
                   <Text className="text-info font-bold ml-2">Directions</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  onPress={() => setActiveTaskId(item.id)}
+                  onPress={() => item.status === 'assigned' ? setShowPickupScanner(item.id) : setActiveTaskId(item.id)}
                   className="flex-1 bg-green-500/15 border border-green-500/40 rounded-lg h-11 items-center justify-center flex-row"
                 >
-                  <ShieldCheck size={16} color="#22c55e" />
-                  <Text className="text-green-400 font-bold ml-2">Verify OTP</Text>
+                  <Package size={16} color="#22c55e" />
+                  <Text className="text-green-400 font-bold ml-2">
+                    {item.status === 'assigned' ? 'Verify Pickup' : 'Deliver'}
+                  </Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -192,6 +219,15 @@ export function DeliveriesScreen() {
         expectedLabels={activeTask?.bundleLabels || []}
         onVerifyDelivery={handleVerifyDelivery}
       />
+
+      {showPickupScanner && (
+        <QRScanner
+          visible={true}
+          actionType="Bundle Scan"
+          onClose={() => setShowPickupScanner(null)}
+          onScan={(data) => handlePickupScan(showPickupScanner, data)}
+        />
+      )}
     </SafeAreaView>
   );
 }

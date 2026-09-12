@@ -84,7 +84,7 @@ const UrgencyCountdown = ({ createdAt }: { createdAt: any }) => {
   return <Text className="text-orange-500 font-bold text-xs">{diffSecs}s urgency</Text>;
 };
 
-export function ProcessingScreen() {
+function SupervisorFeed() {
   const user = useAuthStore(s => s.user);
   const authRole = useAuthStore(s => s.activeRole) as AppRole;
   
@@ -129,48 +129,82 @@ export function ProcessingScreen() {
     return KNOWN_STAGES.has(cur) ? cur : OTHER_KEY;
   };
 
+  const validProcesses = useMemo(() => {
+    return processes.filter(p => {
+      const o = orderById.get(p.orderId);
+      return o?.status !== 'cancelled';
+    });
+  }, [processes, orderById]);
+
   const counts = useMemo(() => {
-    const c: Record<string, { pending: number; mine: number }> = {};
-    for (const step of STAGE_ORDER) c[step] = { pending: 0, mine: 0 };
-    c[OTHER_KEY] = { pending: 0, mine: 0 };
-    for (const p of processes) {
+    const c: Record<string, { pending: number; mine: number; inProgressOther: number }> = {};
+    for (const step of STAGE_ORDER) c[step] = { pending: 0, mine: 0, inProgressOther: 0 };
+    c[OTHER_KEY] = { pending: 0, mine: 0, inProgressOther: 0 };
+    for (const p of validProcesses) {
       const bucket = bucketOf(p);
       if (!bucket) continue;
-      if (myInProgress(p, user?.id || '')) c[bucket].mine += 1;
-      const cur = currentStep(p);
-      if (cur && stepQueue(p, cur) && !myInProgress(p, user?.id || '') && canStartStage(role, cur)) {
-        c[bucket].pending += 1;
+      if (myInProgress(p, user?.id || '')) {
+        c[bucket].mine += 1;
+      } else {
+        const cur = currentStep(p);
+        if (cur && canStartStage(role, cur)) {
+          const s = p.stages[cur];
+          const isAssigned = !!s?.assignee;
+          if (stepQueue(p, cur) && !isAssigned) {
+            c[bucket].pending += 1;
+          } else if (role !== 'helper' && isAssigned && !s.completedAt) {
+            c[bucket].inProgressOther += 1;
+          }
+        }
       }
     }
     c.tagging.pending += claimableOrders.length;
     return c;
-  }, [processes, claimableOrders, role, user?.id]);
+  }, [validProcesses, claimableOrders, role, user?.id]);
 
   const pendingItems = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
     if (selected === 'tagging') {
       for (const o of claimableOrders) items.push({ key: `o-${o.id}`, orderId: o.id });
     }
-    for (const p of processes) {
+    for (const p of validProcesses) {
       if (bucketOf(p) !== selected) continue;
       const cur = currentStep(p);
       if (!cur) continue;
-      if (!stepQueue(p, cur) || myInProgress(p, user?.id || '') || !canStartStage(role, cur)) continue;
+      const s = p.stages[cur];
+      const isAssigned = !!s?.assignee;
+      if (!stepQueue(p, cur) || isAssigned || myInProgress(p, user?.id || '') || !canStartStage(role, cur)) continue;
       items.push({ key: p.id, orderId: p.orderId, process: p });
     }
     return items;
-  }, [selected, processes, claimableOrders, role, user?.id]);
+  }, [selected, validProcesses, claimableOrders, role, user?.id]);
 
   const myItems = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
-    for (const p of processes) {
+    for (const p of validProcesses) {
       if (bucketOf(p) !== selected) continue;
       if (!myInProgress(p, user?.id || '')) continue;
       items.push({ key: p.id, orderId: p.orderId, process: p });
     }
     return items;
-  }, [selected, processes, user?.id]);
+  }, [selected, validProcesses, user?.id]);
   
+  const inProgressByOthers = useMemo<QueueItem[]>(() => {
+    const items: QueueItem[] = [];
+    if (role === 'helper') return items; // Helpers only see their own tasks
+    for (const p of validProcesses) {
+      if (bucketOf(p) !== selected) continue;
+      const cur = currentStep(p);
+      if (!cur) continue;
+      const s = p.stages[cur];
+      const inProgressBySomeone = !!s && !!s.assignee && !s.completedAt;
+      if (inProgressBySomeone && !myInProgress(p, user?.id || '')) {
+        items.push({ key: p.id, orderId: p.orderId, process: p });
+      }
+    }
+    return items;
+  }, [selected, validProcesses, role, user?.id]);
+
   // Floating task state
   const activeFloatingProcess = useMemo(() => {
     return processes.find(p => {
@@ -183,6 +217,10 @@ export function ProcessingScreen() {
     if (activeFloatingProcess) {
       await completeStep(activeFloatingProcess.orderId);
     }
+  };
+
+  const handleItemPress = (item: QueueItem) => {
+    navigation.navigate('OrderDetail', { orderId: item.orderId, processId: item.process?.id });
   };
 
   const renderCard = (item: QueueItem) => {
@@ -203,24 +241,38 @@ export function ProcessingScreen() {
     const stepArr = p?.steps || [];
     const currentIndex = cur ? stepArr.indexOf(cur) : (done ? stepArr.length : 0);
 
+    const matchingItems = p ? (order?.items?.filter(i => i.serviceType === p.serviceType) || []) : (order?.items || []);
+    const qty = matchingItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
+
     return (
       <TouchableOpacity
         key={item.key}
-        onPress={() => navigation.navigate('OrderDetail', { orderId: item.orderId })}
+        onPress={() => handleItemPress(item)}
         className="bg-white rounded-3xl p-5 mb-4 shadow-sm border border-gray-100"
       >
-        <View className="flex-row items-center justify-between mb-2">
-          <View className="flex-row items-center gap-2">
-            <Text className="text-gray-900 font-bold text-lg">#{item.orderId.toUpperCase()}</Text>
-            {!!p?.tokenNumber && (
-              <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
-                <Text className="text-amber-800 font-bold text-xs">T-{p.tokenNumber}</Text>
-              </View>
-            )}
+        <View className="flex-row justify-between mb-2">
+          <View className="flex-1 mr-2">
+            <View className="flex-row items-center flex-wrap gap-y-1 gap-x-2 mb-1">
+              <Text className="text-gray-900 font-bold text-lg shrink-1" numberOfLines={1}>
+                #{order?.shortId?.toUpperCase() || item.orderId.substring(0,6).toUpperCase()}{p && p.siblingCount && p.siblingCount > 1 ? `-${p.serviceType?.toUpperCase().substring(0,2)}` : ''}
+              </Text>
+              {!!p?.serviceLabel && (
+                <View className="bg-blue-100 px-2 py-0.5 rounded border border-blue-200">
+                  <Text className="text-blue-800 font-bold text-xs">{p.serviceLabel}</Text>
+                </View>
+              )}
+              {!!p?.tokenNumber && (
+                <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
+                  <Text className="text-amber-800 font-bold text-xs">T-{p.tokenNumber}</Text>
+                </View>
+              )}
+            </View>
             {p && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
-          <View className={`px-2 py-1 rounded-md ${done ? 'bg-green-100' : 'bg-[#994bff]/10'}`}>
-            <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-[#994bff]'}`}>{badge}</Text>
+          <View className="items-end justify-start shrink-0">
+            <View className={`px-2 py-1 rounded-md ${done ? 'bg-green-100' : 'bg-[#994bff]/10'}`}>
+              <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-[#994bff]'}`}>{badge}</Text>
+            </View>
           </View>
         </View>
 
@@ -233,9 +285,13 @@ export function ProcessingScreen() {
                 <Text className="text-gray-500 text-xs">{order.phone}</Text>
               </TouchableOpacity>
             )}
+            <View className="flex-row items-center mt-1 flex-wrap">
+              {qty > 0 && <Text className="text-gray-500 text-xs mr-2">{qty} units (kgs/pcs)</Text>}
+              {!!p?.garments?.count && <Text className="text-[#994bff] font-bold text-xs bg-purple-50 px-1.5 py-0.5 rounded mr-2">{p.garments.count} garments</Text>}
+            </View>
           </View>
           <View className="items-end">
-            <Text className="text-gray-900 font-medium">{order ? serviceSummary(order) : '—'}</Text>
+            <Text className="text-gray-900 font-medium">{p ? p.serviceLabel : (order ? serviceSummary(order) : '—')}</Text>
             {order?.totalAmount && <Text className="text-gray-500 text-xs">₹{order.totalAmount}</Text>}
           </View>
         </View>
@@ -308,7 +364,8 @@ export function ProcessingScreen() {
         <ScrollView horizontal showsHorizontalScrollIndicator={false} className="px-6">
           <View className="flex-row">
             {tabs.map(step => {
-              const c = counts[step] || { pending: 0, mine: 0 };
+              const c = counts[step] || { pending: 0, mine: 0, inProgressOther: 0 };
+              const bubbleCount = role === 'helper' ? c.mine : (c.pending + c.mine + c.inProgressOther);
               const isSel = step === selected;
               return (
                 <TouchableOpacity
@@ -319,10 +376,10 @@ export function ProcessingScreen() {
                   <Text className={`text-sm font-bold ${isSel ? 'text-white' : 'text-gray-600'}`}>
                     {tabLabel(step)}
                   </Text>
-                  {(c.pending + c.mine) > 0 && (
+                  {bubbleCount > 0 && (
                     <View className={`ml-2 px-1.5 py-0.5 rounded-md ${isSel ? 'bg-white/20' : 'bg-gray-200'}`}>
                       <Text className={`text-[10px] font-bold ${isSel ? 'text-white' : 'text-gray-500'}`}>
-                        {c.pending + c.mine}
+                        {bubbleCount}
                       </Text>
                     </View>
                   )}
@@ -342,19 +399,26 @@ export function ProcessingScreen() {
           </View>
         )}
 
-        {pendingItems.length > 0 && (
+        {role !== 'helper' && pendingItems.length > 0 && (
           <View className="mb-4">
             <Text className="text-gray-400 font-bold text-xs mb-3 tracking-widest uppercase pl-2">Pending</Text>
             {pendingItems.map(renderCard)}
           </View>
         )}
 
-        {pendingItems.length === 0 && myItems.length === 0 && (
+        {role !== 'helper' && inProgressByOthers.length > 0 && (
+          <View className="mb-4">
+            <Text className="text-orange-400 font-bold text-xs mb-3 tracking-widest uppercase pl-2">In Progress (Floor)</Text>
+            {inProgressByOthers.map(renderCard)}
+          </View>
+        )}
+
+        {(role === 'helper' ? myItems.length === 0 : (pendingItems.length === 0 && myItems.length === 0 && inProgressByOthers.length === 0)) && (
           <View className="items-center justify-center mt-20 px-6 opacity-60">
             <Inbox size={48} color="#94A3B8" />
             <Text className="text-gray-400 text-lg font-bold mt-4">All Caught Up</Text>
             <Text className="text-gray-400 text-center mt-2 text-sm">
-              No orders waiting for {tabLabel(selected)} right now.
+              {role === 'helper' ? 'You have no assigned tasks right now.' : `No orders waiting for ${tabLabel(selected)} right now.`}
             </Text>
           </View>
         )}
@@ -369,5 +433,31 @@ export function ProcessingScreen() {
       {/* Floating Task Card for active washing/drying */}
       <FloatingTaskCard process={activeFloatingProcess || null} onComplete={handleFloatingComplete} />
     </SafeAreaView>
+  );
+}
+
+export function ProcessingScreen() {
+  const authRole = useAuthStore(s => s.activeRole) as AppRole;
+  const { processes, completeStep } = useOpsProcessStore();
+  const user = useAuthStore(s => s.user);
+
+  // Compute floating process at wrapper level so it persists across child view changes
+  const activeFloatingProcess = processes.find(pr => {
+    const cur = currentStep(pr);
+    return (cur === 'getting_washed' || cur === 'getting_dried') && myInProgress(pr, user?.id || '');
+  });
+
+  const handleFloatingComplete = async () => {
+    if (activeFloatingProcess) {
+      await completeStep(activeFloatingProcess.orderId);
+    }
+  };
+
+  return (
+    <View className="flex-1">
+      <SupervisorFeed />
+      {/* Floating Task Card rendered at wrapper level so it always persists */}
+      <FloatingTaskCard process={activeFloatingProcess || null} onComplete={handleFloatingComplete} />
+    </View>
   );
 }

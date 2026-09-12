@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 import { Platform } from 'react-native';
 import { db } from '../config/firebase';
-import { doc, onSnapshot, query, collection, where, setDoc, getDoc } from 'firebase/firestore';
+import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from 'firebase/firestore';
 import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
-import { primeAlerts, announceAssignedPickup } from '../utils/alerts';
+import { primeAlerts, announceAssignedPickup, announceAssignedDelivery } from '../utils/alerts';
 
 // Persist announced task ids so a page reload doesn't re-announce the same pickup.
 const ANNOUNCED_KEY = 'opsAnnouncedTasks';
@@ -37,6 +37,10 @@ export interface StaffDoc {
   storeName?: string;
   geoVerifiedAt?: unknown;
   verifiedAt?: unknown;
+  activeHelperTask?: {
+    orderId: string;
+    step: string;
+  } | null;
 }
 
 export interface StoreInfo {
@@ -76,6 +80,7 @@ interface OpsStaffState {
   goOnShift: (uid: string, role: string, phone: string, name?: string, extra?: Record<string, unknown>) => Promise<void>;
   goOffShift: (uid: string) => Promise<void>;
   fetchStore: (storeId: string) => Promise<StoreInfo | null>;
+  clearActiveHelperTask: () => Promise<void>;
   reset: () => void;
 }
 
@@ -137,7 +142,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         const deliveries: DeliveryTask[] = [];
         snap.forEach((docSnap) => {
           const d = docSnap.data();
-          deliveries.push({
+          const task = {
             id: docSnap.id,
             orderId: d.orderId || docSnap.id,
             userId: d.userId || '',
@@ -153,7 +158,13 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             assignedAt: d.assignedAt,
             acceptedAt: d.acceptedAt,
             createdAt: d.createdAt,
-          });
+          };
+          deliveries.push(task);
+          if (shouldAnnounce(task, announcedTaskIds) && docSnap.id) {
+            announcedTaskIds.add(docSnap.id);
+            saveAnnounced(announcedTaskIds);
+            announceAssignedDelivery(task.orderId, task.deliveryAddress);
+          }
         });
         set({ myDeliveries: deliveries });
       },
@@ -201,8 +212,20 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         enforceGeofence: s.enforceGeofence === true,
       };
     } catch (err) {
-      console.error('[opsStaff] fetchStore failed:', err);
+      console.error('[opsStaff] fetchStore error:', err);
       return null;
+    }
+  },
+
+  clearActiveHelperTask: async () => {
+    const uid = get().staffDoc?.uid;
+    if (!uid) return;
+    try {
+      await updateDoc(doc(db, 'ops_staff', uid), {
+        activeHelperTask: deleteField(),
+      });
+    } catch (e) {
+      console.warn("Failed to clear active task", e);
     }
   },
 

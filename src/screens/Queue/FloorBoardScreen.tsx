@@ -39,6 +39,11 @@ export function FloorBoardScreen() {
   const filteredOrders = useMemo(() => {
     let result = orders;
 
+    // Exclude cancelled and delivered orders from the default view
+    if (!searchQuery.trim()) {
+      result = result.filter(o => o.status !== 'cancelled' && o.status !== 'delivered');
+    }
+
     // Apply Search
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase().trim();

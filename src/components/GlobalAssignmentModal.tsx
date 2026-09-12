@@ -4,7 +4,7 @@ import { BellRing, MapPin } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { acceptTask } from '../utils/opsPickup';
 import { isPending, pickupLabel } from '../utils/opsTasks';
-import { stopAlarm } from '../utils/alerts';
+import { stopAlarm, dramaticChime } from '../utils/alerts';
 
 export function GlobalAssignmentModal() {
   const { myTasks, myDeliveries } = useOpsStaffStore();
@@ -25,11 +25,16 @@ export function GlobalAssignmentModal() {
   const address = activeTask ? (isDelivery ? (activeTask as any).deliveryAddress : (activeTask as any).pickupAddress) : '';
 
   React.useEffect(() => {
-    // If modal goes away (task accepted elsewhere, reassigned, or user clicked accept), stop the alarm.
-    if (!activeTask) {
+    if (activeTask && !acceptingId) {
+      // Ring the alarm when a new task/delivery is detected
+      dramaticChime();
+    } else if (!activeTask) {
       stopAlarm();
     }
-  }, [activeTask]);
+    return () => {
+      stopAlarm();
+    };
+  }, [activeTask?.id]);
 
   const handleAccept = async () => {
     if (!activeTask) return;

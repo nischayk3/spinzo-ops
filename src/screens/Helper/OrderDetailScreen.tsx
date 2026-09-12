@@ -8,6 +8,7 @@ import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
+import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { serviceSummary } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel } from '../../utils/opsProcess';
@@ -48,11 +49,12 @@ const friendlyActionError = (code: string): string => {
 };
 
 export function OrderDetailScreen({ route, navigation }: Props) {
-  const { orderId } = route.params;
+  const { orderId, processId: initialProcessId } = route.params;
   const user = useAuthStore(s => s.user);
   const activeRole = useAuthStore(s => s.activeRole);
   const orders = useOrderFeedStore(s => s.orders);
   const { processes, claim, startStep, completeStep, printLabels, scanGarment, unregisterGarment, submitTagging, cancelOrder, reschedulePickup, scheduleDelivery, markOutForDelivery, verifyDeliveryOTP } = useOpsProcessStore();
+  const { clearActiveHelperTask } = useOpsStaffStore();
 
   const [countText, setCountText] = useState('');
   const [printError, setPrintError] = useState<string | null>(null);
@@ -67,7 +69,22 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [machineStartedLocal, setMachineStartedLocal] = useState(false);
 
   const order = useMemo(() => orders.find(o => o.id === orderId), [orders, orderId]);
-  const process = useMemo(() => processes.find(p => p.orderId === orderId), [processes, orderId]);
+  
+  // Get all processes for this order
+  const orderProcesses = useMemo(() => processes.filter(p => p.orderId === orderId), [processes, orderId]);
+  
+  // Track selected process ID
+  const [selectedProcessId, setSelectedProcessId] = useState<string | null>(null);
+
+  // Initialize selected process on load
+  useEffect(() => {
+    if (orderProcesses.length > 0 && !selectedProcessId) {
+      setSelectedProcessId(initialProcessId || orderProcesses[0].id);
+    }
+  }, [orderProcesses, selectedProcessId, initialProcessId]);
+
+  // The active process
+  const process = useMemo(() => orderProcesses.find(p => p.id === selectedProcessId) || null, [orderProcesses, selectedProcessId]);
 
   const cur = process ? currentStep(process) : null;
   const curStage = cur ? stage(process!, cur) : undefined;
@@ -106,7 +123,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   };
 
   const handleClaim = () => runAction(() => claim(orderId, ''));
-  const handleStart = () => runAction(() => startStep(orderId));
+  const handleStart = () => runAction(() => startStep(orderId, process?.id), () => clearActiveHelperTask());
   const handleComplete = () => {
     // Quality and Packaging verification required for packaging step
 
@@ -114,7 +131,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       setShowPackagingVerification(true);
       return;
     }
-    runAction(() => completeStep(orderId), () => navigation.goBack());
+    runAction(() => completeStep(orderId, process?.id), () => {
+      clearActiveHelperTask();
+      navigation.goBack();
+    });
   };
 
   const handlePrint = async () => {
@@ -127,7 +147,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     setPrintError(null);
     setActionError(null);
     try {
-      const res = await printLabels(orderId, n);
+      const res = await printLabels(orderId, n, process?.id);
       if (res.ok && res.labels) {
         await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
       } else if (!res.ok) {
@@ -153,14 +173,17 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       if (!nextSeq) return;
       const expectedQr = `SPNZ:${orderId}:${nextSeq}`;
       
-      const res = await scanGarment(orderId, expectedQr);
+      const res = await scanGarment(orderId, expectedQr, process?.id);
       if (!res.ok) setScanError(friendlyScanError(res.error));
     } finally {
       setBusy(false);
     }
   };
 
-  const handleSubmitTagging = () => runAction(() => submitTagging(orderId), () => navigation.goBack());
+  const handleSubmitTagging = () => runAction(() => submitTagging(orderId, process?.id), () => {
+    clearActiveHelperTask();
+    navigation.goBack();
+  });
 
   const handleCancelOrder = async (reason: string, note: string) => {
     if (!order) return;
@@ -369,7 +392,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             orderId={orderId}
             totalGarments={garments.count || 0}
             onPrint={async (bundles: number) => {
-              const res = await useOpsProcessStore.getState().printBundleLabels(orderId, bundles);
+              const res = await useOpsProcessStore.getState().printBundleLabels(orderId, bundles, process?.id);
               if (res.ok && res.labels) {
                 try {
                   await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
@@ -382,7 +405,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             }}
             onComplete={async (payload: any) => {
               setShowPackagingVerification(false);
-              const res = await useOpsProcessStore.getState().completePackaging(orderId, payload);
+              const res = await useOpsProcessStore.getState().completePackaging(orderId, payload, process?.id);
               if (res.ok) navigation.goBack();
               else setActionError(friendlyActionError(res.error));
             }}
@@ -514,6 +537,26 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} className="flex-1 bg-gray-50">
       <ScrollView className="flex-1" contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
+        {/* Process Tabs */}
+        {orderProcesses.length > 1 && (
+          <View className="flex-row flex-wrap gap-2 mb-4">
+            {orderProcesses.map(p => {
+              const isSel = p.id === selectedProcessId;
+              return (
+                <TouchableOpacity
+                  key={p.id}
+                  onPress={() => setSelectedProcessId(p.id)}
+                  className={`px-4 py-2 rounded-xl flex-row items-center border ${isSel ? 'bg-[#994bff] border-[#994bff]' : 'bg-white border-gray-200 shadow-sm'}`}
+                >
+                  <Text className={`font-bold ${isSel ? 'text-white' : 'text-gray-600'}`}>
+                    {p.serviceLabel || p.serviceType}
+                  </Text>
+                </TouchableOpacity>
+              )
+            })}
+          </View>
+        )}
+
         {/* Header */}
         <View className="flex-row items-center justify-between mb-4 z-10">
           <TouchableOpacity onPress={() => navigation.goBack()} className="w-10 h-10 rounded-full bg-white items-center justify-center shadow-sm border border-gray-100">

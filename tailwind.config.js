@@ -5,13 +5,13 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        bgDark: '#0F172A',
-        bgSurface: '#1E293B',
-        bgSurfaceLight: '#334155',
-        textPrimary: '#F8FAFC',
-        textSecondary: '#94A3B8',
-        textMuted: '#64748B',
-        primary: '#22C55E',
+        bgDark: '#F8FAFC',
+        bgSurface: '#FFFFFF',
+        bgSurfaceLight: '#F1F5F9',
+        textPrimary: '#0F172A',
+        textSecondary: '#475569',
+        textMuted: '#94A3B8',
+        primary: '#994BFF',
         warning: '#F59E0B',
         error: '#EF4444',
         info: '#3B82F6',

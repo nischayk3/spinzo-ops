@@ -17,6 +17,9 @@ export interface GarmentsRecord {
 export interface OpsProcess {
   id: string;
   orderId: string;
+  parentOrderId?: string;
+  serviceType?: string;
+  serviceLabel?: string;
   userId?: string;
   vendorId?: string;
   steps: string[];
@@ -26,6 +29,7 @@ export interface OpsProcess {
   garments: GarmentsRecord;
   claimedAt?: unknown;
   tokenNumber?: string;
+  siblingCount?: number;
 }
 
 const LABELS: Record<string, string> = {
@@ -76,6 +80,9 @@ export function parseOpsProcess(id: string, snapData: Record<string, any> | null
     garments: d.garments ?? { labels: [], registered: [] },
     claimedAt: d.claimedAt ?? undefined,
     tokenNumber: d.tokenNumber ?? undefined,
+    serviceType: d.serviceType ?? undefined,
+    serviceLabel: d.serviceLabel ?? undefined,
+    siblingCount: d.siblingCount ?? undefined,
   };
 }
 

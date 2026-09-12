@@ -6,7 +6,7 @@ import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
-import { currentStep, isDone } from '../../utils/opsProcess';
+import { currentStep, isDone, OpsProcess } from '../../utils/opsProcess';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
@@ -36,15 +36,27 @@ export function SupervisorDashboardScreen() {
     let readyForDelivery = 0;
     let outForDelivery = 0;
     let SLA_Breaches = 0;
-    let readyToTag = orders.filter(o => o.status === 'pickup_completed' && !processes.find(p => p.orderId === o.id)).length;
-    let totalInPipeline = processes.filter(p => !isDone(p)).length;
+    
+    let readyToTag = orders.filter(o => o.status === 'pickup_completed' && !processes.find((p: OpsProcess) => p.orderId === o.id)).length;
+    
+    let totalInPipeline = processes.filter((p: OpsProcess) => {
+      if (isDone(p)) return false;
+      const order = orders.find(o => o.id === p.orderId);
+      if (order && order.status === 'cancelled') return false;
+      return true;
+    }).length;
 
     orders.forEach(o => {
+      if (o.status === 'cancelled') return; // skip cancelled orders
       if (o.status === 'ready') readyForDelivery++;
       if (o.status === 'out_for_delivery') outForDelivery++;
     });
 
-    processes.forEach(p => {
+    processes.forEach((p: OpsProcess) => {
+      // Skip processes belonging to cancelled orders
+      const order = orders.find(o => o.id === p.orderId);
+      if (order && order.status === 'cancelled') return;
+
       const cur = currentStep(p);
       if (cur === 'getting_washed') activeWashing++;
       if (cur === 'getting_dried') activeDrying++;
@@ -65,7 +77,7 @@ export function SupervisorDashboardScreen() {
   // New incoming orders that haven't reached the processing floor yet
   const incomingOrders = useMemo(() => {
     return orders.filter(o =>
-      o.status === 'placed' || o.status === 'confirmed' || o.status === 'in_transit_to_store'
+      (o.status === 'placed' || o.status === 'confirmed' || o.status === 'in_transit_to_store')
     ).sort((a, b) => {
       const aMs = (a.createdAt as any)?.toMillis ? (a.createdAt as any).toMillis() : new Date((a.createdAt as any) || Date.now()).getTime();
       const bMs = (b.createdAt as any)?.toMillis ? (b.createdAt as any).toMillis() : new Date((b.createdAt as any) || Date.now()).getTime();
@@ -76,12 +88,29 @@ export function SupervisorDashboardScreen() {
   const searchResults = useMemo(() => {
     if (!searchQuery.trim()) return [];
     const q = searchQuery.toLowerCase().trim();
+
+    if (q === 'sla:breaches') {
+      const breachedOrderIds = new Set<string>();
+      processes.forEach((p: OpsProcess) => {
+        const order = orders.find(o => o.id === p.orderId);
+        if (order && order.status === 'cancelled') return;
+        const cur = currentStep(p);
+        const curStage = cur ? p.stages?.[cur] : null;
+        if (curStage?.startedAt && !curStage?.completedAt) {
+          const startMs = typeof (curStage.startedAt as any).toMillis === 'function' ? (curStage.startedAt as any).toMillis() : new Date((curStage.startedAt as any) || Date.now()).getTime();
+          const diffMins = (Date.now() - startMs) / 60000;
+          if (diffMins > 60) breachedOrderIds.add(p.orderId);
+        }
+      });
+      return orders.filter(o => breachedOrderIds.has(o.id));
+    }
+
     return orders.filter(o => 
       o.id.toLowerCase().includes(q) || 
       (o.customerPhone && o.customerPhone.includes(q)) ||
       (o.customerName && o.customerName.toLowerCase().includes(q))
     ).slice(0, 10); // cap at 10 for performance
-  }, [searchQuery, orders]);
+  }, [searchQuery, orders, processes]);
 
   if (isLoading && processes.length === 0) {
     return (
@@ -119,7 +148,9 @@ export function SupervisorDashboardScreen() {
 
         {searchQuery.trim().length > 0 ? (
           <View className="flex-1">
-            <Text className="text-gray-900 font-bold mb-4">Search Results ({searchResults.length})</Text>
+            <Text className="text-gray-900 font-bold mb-4">
+              {searchQuery.trim() === 'sla:breaches' ? 'SLA Breaches' : `Search Results (${searchResults.length})`}
+            </Text>
             {searchResults.length === 0 ? (
               <View className="items-center py-10">
                 <Text className="text-gray-400 font-medium">No orders found matching "{searchQuery}"</Text>
@@ -256,7 +287,9 @@ export function SupervisorDashboardScreen() {
                     <Text className="text-red-600 text-xs mt-1">{stats.SLA_Breaches} orders have exceeded SLA</Text>
                   </View>
                 </View>
-                <TouchableOpacity className="bg-white px-3 py-1.5 rounded-full border border-red-200">
+                <TouchableOpacity 
+                  onPress={() => setSearchQuery('sla:breaches')}
+                  className="bg-white px-3 py-1.5 rounded-full border border-red-200">
                   <Text className="text-red-600 font-bold text-xs">View</Text>
                 </TouchableOpacity>
               </View>

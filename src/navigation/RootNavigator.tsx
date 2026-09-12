@@ -3,6 +3,9 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuthStore } from '../store/authStore';
 import { useOpsStaffStore } from '../store/opsStaffStore';
+import { useOpsProcessStore } from '../store/opsProcessStore';
+import { useOrderFeedStore } from '../store/orderFeedStore';
+import { useStoreResourcesStore } from '../store/storeResourcesStore';
 import { LoginScreen } from '../screens/Auth/LoginScreen';
 import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { IntakeScreen } from '../screens/Queue/IntakeScreen';
@@ -16,6 +19,7 @@ import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
 import { useLifecycleNotifications } from '../utils/lifecycleNotifications';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
+import { HelperAssignmentModal } from '../components/HelperAssignmentModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
 import { View, ActivityIndicator, Text } from 'react-native';
 
@@ -24,7 +28,7 @@ export type RootStackParamList = {
   Login: undefined;
   NotInRoster: undefined;
   Main: undefined;
-  OrderDetail: { orderId: string };
+  OrderDetail: { orderId: string, processId?: string };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -121,6 +125,13 @@ export function RootNavigator() {
   useEffect(() => {
     if (uid && activeRole) {
       useOpsStaffStore.getState().initialize(uid);
+      useStoreResourcesStore.getState().initialize();
+      if (activeRole === 'helper' || activeRole === 'iron' || activeRole === 'rider') {
+        useOrderFeedStore.getState().initialize();
+      }
+      if (activeRole === 'helper' || activeRole === 'iron') {
+        useOpsProcessStore.getState().initialize(uid);
+      }
     }
   }, [uid, activeRole]);
 
@@ -148,7 +159,8 @@ export function RootNavigator() {
           options={{ presentation: 'modal' }}
         />
       </Stack.Navigator>
-      {isLoggedIn && (activeRole === 'rider' || activeRole === 'helper') && <GlobalAssignmentModal />}
+      {isLoggedIn && activeRole === 'rider' && <GlobalAssignmentModal />}
+      {isLoggedIn && (activeRole === 'helper' || activeRole === 'iron') && <HelperAssignmentModal />}
     </>
   );
 }

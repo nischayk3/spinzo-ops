@@ -176,9 +176,9 @@ function confirmBeep() {
 function speak(text: string) {
   try {
     // expo-speech has no availability check; speak() is best-effort and guarded below.
-    Speech.speak(text, { language: 'en-IN', rate: 1.1 });
-  } catch (e) {
-    // no-op
+    // Speech.speak(text, { language: 'en-IN', rate: 1.1 });
+  } catch (err) {
+    console.warn('Speech error', err);
   }
 }
 

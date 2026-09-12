@@ -18,7 +18,7 @@ export function PickupsScreen() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null); // which task's OTP modal is open
   const [activeStoreTaskId, setActiveStoreTaskId] = useState<string | null>(null);
   const [otp, setOtp] = useState('');
-  const [tokenNumber, setTokenNumber] = useState('');
+  const [tokens, setTokens] = useState<Record<string, string>>({});
   const [verifying, setVerifying] = useState(false);
 
   // Edit Order state
@@ -32,24 +32,37 @@ export function PickupsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const pending = myTasks.filter(isPending);
+  const pending = myTasks.filter(t => {
+    if (!isPending(t)) return false;
+    // Cross-check: if the corresponding order is cancelled, hide this task
+    const order = orders.find(o => o.id === t.orderId);
+    if (order && order.status === 'cancelled') return false;
+    return true;
+  });
 
   const handleVerify = async () => {
     if (!activeTaskId || otp.length !== 4 || verifying) return;
-    if (!tokenNumber.trim()) {
-      Alert.alert('Token Required', 'Please assign a token number before verifying.');
+    
+    // Check if all distinct services have a token assigned
+    const order = orders.find(o => o.id === activeTaskId);
+    const services = Array.from(new Set(order?.items?.map(it => it.serviceType).filter(Boolean))) as string[];
+    const requiredServiceCount = services.length > 0 ? services.length : 1;
+    
+    if (Object.keys(tokens).length < requiredServiceCount || Object.values(tokens).some(t => !t.trim())) {
+      Alert.alert('Token Required', 'Please assign a token number for all services before verifying.');
       return;
     }
+
     const orderId = activeTaskId;
     setVerifying(true);
     try {
-      const res = await verifyPickupOTP(orderId, otp, tokenNumber.trim());
+      const res = await verifyPickupOTP(orderId, otp, undefined, tokens);
       if (res.ok) {
         setActiveTaskId(null);
         setOtp('');
-        setTokenNumber('');
+        setTokens({});
         // The task flips to picked_up via the onSnapshot subscription and auto-removes.
-        Alert.alert('Pickup verified', `Order marked as picked up. Token #${tokenNumber}`);
+        Alert.alert('Pickup verified', `Order marked as picked up.`);
       } else {
         const msg =
           res.error === 'invalid_otp' ? 'Incorrect OTP. Please try again.'
@@ -259,7 +272,7 @@ export function PickupsScreen() {
                   )}
 
                   <TouchableOpacity
-                    onPress={() => { setOtp(''); setTokenNumber(''); setActiveTaskId(item.id); }}
+                    onPress={() => { setOtp(''); setTokens({}); setActiveTaskId(item.id); }}
                     className="bg-info/15 border border-info/40 rounded-lg h-11 items-center justify-center flex-row"
                   >
                     <ShieldCheck size={18} color="#3B82F6" className="mr-2" />
@@ -284,16 +297,51 @@ export function PickupsScreen() {
             <Text className="text-textPrimary text-lg font-bold mb-1">Verify Pickup</Text>
             <Text className="text-textSecondary text-sm mb-4">Enter the OTP and assign a token number.</Text>
 
-            {/* Token Number Input */}
-            <Text className="text-textMuted text-xs font-bold uppercase mb-1">Token Number</Text>
-            <TextInput
-              value={tokenNumber}
-              onChangeText={setTokenNumber}
-              placeholder="e.g. 1, 2, 3..."
-              placeholderTextColor="#94A3B8"
-              autoFocus
-              className="bg-bgDark border border-bgSurfaceLight rounded-xl h-12 px-4 text-textPrimary font-bold text-base mb-4"
-            />
+            {/* Token Inputs */}
+            {(() => {
+              const activeOrder = orders.find(o => o.id === activeTaskId);
+              let services: string[] = [];
+              if (activeOrder?.items) {
+                for (const item of activeOrder.items) {
+                  let key = item.serviceType;
+                  if (key === 'blanket_wash' && item.blanketType) {
+                    key = `blanket_wash_${item.blanketType}`;
+                  }
+                  if (key && !services.includes(key)) {
+                    services.push(key);
+                  }
+                }
+              }
+              
+              if (services.length === 0) {
+                // Fallback for older orders without serviceType
+                return (
+                  <>
+                    <Text className="text-textMuted text-xs font-bold uppercase mb-1">Token Number</Text>
+                    <TextInput
+                      value={tokens['default'] || ''}
+                      onChangeText={(t) => setTokens(prev => ({ ...prev, default: t }))}
+                      placeholder="e.g. 1, 2, 3..."
+                      placeholderTextColor="#94A3B8"
+                      className="bg-bgDark border border-bgSurfaceLight rounded-xl h-12 px-4 text-textPrimary font-bold text-base mb-4"
+                    />
+                  </>
+                );
+              }
+
+              return services.map(service => (
+                <View key={service} className="mb-4">
+                  <Text className="text-textMuted text-xs font-bold uppercase mb-1">Token for {service.replace(/_/g, ' ')}</Text>
+                  <TextInput
+                    value={tokens[service] || ''}
+                    onChangeText={(t) => setTokens(prev => ({ ...prev, [service]: t }))}
+                    placeholder={`e.g. ${service.slice(0, 2).toUpperCase()}-123`}
+                    placeholderTextColor="#94A3B8"
+                    className="bg-bgDark border border-bgSurfaceLight rounded-xl h-12 px-4 text-textPrimary font-bold text-base"
+                  />
+                </View>
+              ));
+            })()}
 
             {/* OTP Input */}
             <Text className="text-textMuted text-xs font-bold uppercase mb-1">Customer OTP</Text>
@@ -321,8 +369,8 @@ export function PickupsScreen() {
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={handleVerify}
-                  disabled={otp.length !== 4 || !tokenNumber.trim()}
-                  className={`flex-1 rounded-xl h-12 items-center justify-center ${otp.length !== 4 || !tokenNumber.trim() ? 'bg-gray-300' : 'bg-primary'}`}
+                  disabled={otp.length !== 4 || Object.keys(tokens).length === 0}
+                  className={`flex-1 rounded-xl h-12 items-center justify-center ${otp.length !== 4 || Object.keys(tokens).length === 0 ? 'bg-gray-300' : 'bg-primary'}`}
                 >
                   <Text className="text-white font-bold">Verify</Text>
                 </TouchableOpacity>

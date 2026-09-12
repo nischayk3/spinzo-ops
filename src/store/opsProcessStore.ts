@@ -25,26 +25,28 @@ interface OpsProcessState {
   isLoading: boolean;
   error: string | null;
   initialize: (uid: string) => void;
-  claim: (orderId: string, tokenNumber: string) => Promise<OpsProcessingResult>;
-  startStep: (orderId: string) => Promise<OpsProcessingResult>;
-  completeStep: (orderId: string) => Promise<OpsProcessingResult>;
-  completePackaging: (orderId: string, qualityMedia?: any) => Promise<OpsProcessingResult>;
-  printLabels: (orderId: string, garmentCount: number) => Promise<OpsProcessingResult>;
-  printBundleLabels: (orderId: string, count: number) => Promise<OpsProcessingResult>;
-  scanGarment: (orderId: string, qr: string) => Promise<OpsProcessingResult>;
-  unregisterGarment: (orderId: string, seq: number) => Promise<OpsProcessingResult>;
-  submitTagging: (orderId: string) => Promise<OpsProcessingResult>;
+  claim: (orderId: string, tokenNumber?: string) => Promise<OpsProcessingResult>;
+  acceptStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  startStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  completeStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  completePackaging: (orderId: string, qualityMedia?: any, processId?: string) => Promise<OpsProcessingResult>;
+  printLabels: (orderId: string, garmentCount: number, processId?: string) => Promise<OpsProcessingResult>;
+  printBundleLabels: (orderId: string, count: number, processId?: string) => Promise<OpsProcessingResult>;
+  scanGarment: (orderId: string, qr: string, processId?: string) => Promise<OpsProcessingResult>;
+  unregisterGarment: (orderId: string, seq: number, processId?: string) => Promise<OpsProcessingResult>;
+  submitTagging: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  markOutForDelivery: (orderId: string) => Promise<OpsProcessingResult>;
+  pickupDelivery: (orderId: string) => Promise<OpsProcessingResult>;
   // Simulation-only: registers all of an order's labels in one call by scanning
   // each generated QR server-side. Only available when SIM_SCAN is set, since the
   // server still validates each label individually.
-  scanAllGarments: (orderId: string) => Promise<ScanAllResult>;
+  scanAllGarments: (orderId: string, processId?: string) => Promise<ScanAllResult>;
   
   // Supervisor overrides
   cancelOrder: (orderId: string, userId: string, reason: string, note?: string) => Promise<SupervisorActionResult>;
   reschedulePickup: (orderId: string, userId: string, date: string, time: string) => Promise<SupervisorActionResult>;
   scheduleDelivery: (orderId: string, userId: string, date: string, time: string) => Promise<SupervisorActionResult>;
-  markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
-  verifyDeliveryOTP: (orderId: string, userId: string, otp: string) => Promise<SupervisorActionResult>;
+  verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
   reset: () => void;
 }
@@ -52,13 +54,16 @@ interface OpsProcessState {
 let unsub: (() => void) | null = null;
 
 const callOps = () =>
-  httpsCallable<{ orderId: string; action: string; garmentCount?: number; qr?: string; seq?: number; qualityMedia?: any }, OpsProcessingResult>(
+  httpsCallable<{ orderId: string; processId?: string; action: string; garmentCount?: number; qr?: string; seq?: number; qualityMedia?: any; count?: number; garments?: any }, OpsProcessingResult>(
     functions,
     'opsProcessing'
   );
 
+const getProcessId = (orderId: string): string => 
+  useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.orderId === orderId)?.id || orderId;
+
 const callSupervisor = () =>
-  httpsCallable<{ action: string; orderId: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; isDelivery?: boolean }, SupervisorActionResult>(
+  httpsCallable<{ action: string; orderId: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; isDelivery?: boolean; proofUrl?: string }, SupervisorActionResult>(
     functions,
     'supervisorActions'
   );
@@ -88,75 +93,102 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
       const res = await callOps()({ orderId, action: 'claim', tokenNumber } as any);
       return res.data;
     } catch (e: any) {
-      return { ok: false, error: e?.message || 'request_failed' };
+      return { ok: false, error: e.message || String(e) };
     }
   },
-  startStep: async (orderId) => {
+
+  acceptStep: async (orderId, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'startStep' });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'acceptStep' } as any);
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e.message || String(e) };
+    }
+  },
+
+  startStep: async (orderId, processId) => {
+    try {
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'startStep' });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  completeStep: async (orderId) => {
+  completeStep: async (orderId, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'completeStep' });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'completeStep' });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  completePackaging: async (orderId, qualityMedia = {}) => {
+  completePackaging: async (orderId, qualityMedia = {}, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'completePackaging', qualityMedia });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'completePackaging', qualityMedia });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  printLabels: async (orderId, garmentCount) => {
+  printLabels: async (orderId, garmentCount, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'printLabels', garmentCount });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'printLabels', garmentCount });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  printBundleLabels: async (orderId, count) => {
+  printBundleLabels: async (orderId, count, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'printBundleLabels', count } as any);
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'printBundleLabels', count } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  scanGarment: async (orderId, qr) => {
+  scanGarment: async (orderId, qr, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'scanGarment', qr });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'scanGarment', qr });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  unregisterGarment: async (orderId, seq) => {
+  unregisterGarment: async (orderId, seq, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'unregisterGarment', seq });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'unregisterGarment', seq });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  submitTagging: async (orderId) => {
+  submitTagging: async (orderId, processId) => {
     try {
-      const res = await callOps()({ orderId, action: 'submitTagging' });
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'submitTagging' });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  scanAllGarments: async (orderId) => {
-    const p = useOpsProcessStore.getState().processes.find((pr) => pr.orderId === orderId);
+  markOutForDelivery: async (orderId) => {
+    try {
+      const res = await callOps()({ orderId, action: 'markOutForDelivery' });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+  pickupDelivery: async (orderId) => {
+    try {
+      const res = await callOps()({ orderId, action: 'pickupDelivery' });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+  scanAllGarments: async (orderId, processId) => {
+    const targetProcessId = processId || getProcessId(orderId);
+    const p = useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.id === targetProcessId);
     const labels = p?.garments?.labels;
     if (!labels || labels.length === 0) {
       return { registered: 0, failed: 0, error: 'no_labels_printed' };
@@ -165,7 +197,7 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
     let failed = 0;
     for (const label of labels) {
       // Each scan goes through the real callable so server validation still applies.
-      const res = await callOps()({ orderId, action: 'scanGarment', qr: label.qr });
+      const res = await callOps()({ orderId, processId: targetProcessId, action: 'scanGarment', qr: label.qr });
       if (res.data.ok) registered += 1;
       else failed += 1;
     }
@@ -193,15 +225,6 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
   scheduleDelivery: async (orderId, userId, date, time) => {
     try {
       const res = await callSupervisor()({ action: 'scheduleDelivery', orderId, userId, date, time });
-      return res.data;
-    } catch (e: any) {
-      return { ok: false, error: e?.message || 'request_failed' };
-    }
-  },
-
-  markOutForDelivery: async (orderId, userId) => {
-    try {
-      const res = await callSupervisor()({ action: 'markOutForDelivery', orderId, userId });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

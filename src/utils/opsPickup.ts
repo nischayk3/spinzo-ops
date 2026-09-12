@@ -9,6 +9,7 @@ interface OpsStatusSyncRequest {
   orderId: string;
   otp: string;
   tokenNumber?: string;
+  tokens?: Record<string, string>;
 }
 
 /**
@@ -18,11 +19,12 @@ interface OpsStatusSyncRequest {
 export async function verifyPickupOTP(
   orderId: string,
   otp: string,
-  tokenNumber?: string
+  tokenNumber?: string,
+  tokens?: Record<string, string>
 ): Promise<VerifyPickupResult> {
   try {
     const callable = httpsCallable<OpsStatusSyncRequest, VerifyPickupResult>(functions, 'opsStatusSync');
-    const res = await callable({ orderId, otp, tokenNumber });
+    const res = await callable({ orderId, otp, tokenNumber, tokens });
     return res.data;
   } catch (err: any) {
     // httpsCallable surfaces {code, message, details} on a thrown error;

@@ -59,6 +59,9 @@ function taskTransition(beforeStatus, afterStatus) {
   if (afterStatus === 'pickup_completed' && beforeStatus !== 'pickup_completed') {
     return { taskStatus: 'picked_up' };
   }
+  if (afterStatus === 'delivered' && beforeStatus !== 'delivered') {
+    return { taskStatus: 'delivered', dropProcess: true };
+  }
   return null;
 }
 
@@ -141,4 +144,76 @@ function generateLabels(orderId, count) {
   return out;
 }
 
-module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels };
+// ─── Multi-Service Order Splitting ─────────────────────────────────────────────
+
+const SERVICE_LABELS = {
+  wash_fold: 'Wash & Fold',
+  wash_iron: 'Wash & Iron',
+  ironing: 'Steam Iron',
+  blanket_wash: 'Blanket Wash',
+  blanket_wash_single: 'Blanket Wash (Single)',
+  blanket_wash_double: 'Blanket Wash (Double)',
+  shoe_clean: 'Shoe Clean',
+  dry_clean: 'Dry Clean',
+  premium_laundry: 'Premium Laundry',
+};
+
+/**
+ * Compute the processing steps for a SINGLE service type.
+ * Each service type has its own independent pipeline.
+ */
+function stepsForServiceType(serviceType) {
+  switch (serviceType) {
+    case 'wash_fold':
+    case 'premium_laundry':
+      return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
+    case 'wash_iron':
+      return ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'];
+    case 'ironing':
+      return ['tagging', 'getting_ironed', 'packaging'];
+    case 'blanket_wash':
+    case 'blanket_wash_single':
+    case 'blanket_wash_double':
+    case 'shoe_clean':
+      return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
+    case 'dry_clean':
+      return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
+    default:
+      return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
+  }
+}
+
+/**
+ * Split an order's items into service groups for internal order splitting.
+ * Each group becomes its own ops_process doc.
+ * 
+ * Special handling:
+ * - blanket_wash with blanketType: 'single' and 'double' → separate groups
+ * - Credit items (isCreditItem) are grouped by their serviceType like normal
+ */
+function splitOrderIntoServices(order) {
+  const items = (order && order.items) || [];
+  if (items.length === 0) {
+    return [{ serviceType: 'wash_fold', label: 'Wash & Fold', items: [] }];
+  }
+
+  const groups = {};
+
+  for (const item of items) {
+    const type = item.serviceType || 'wash_fold';
+
+    // Special: blanket_wash with specific blanketType → split into single/double
+    if (type === 'blanket_wash' && item.blanketType) {
+      const key = `blanket_wash_${item.blanketType}`;
+      if (!groups[key]) groups[key] = { serviceType: key, label: SERVICE_LABELS[key] || `Blanket Wash (${item.blanketType})`, items: [] };
+      groups[key].items.push(item);
+    } else {
+      if (!groups[type]) groups[type] = { serviceType: type, label: SERVICE_LABELS[type] || type, items: [] };
+      groups[type].items.push(item);
+    }
+  }
+
+  return Object.values(groups);
+}
+
+module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS };

@@ -65,20 +65,12 @@ export const useOrderFeedStore = create<OrderFeedState>((set) => ({
         if (unsubscribe !== unsub) return;
         const map = new Map<string, FeedOrder>();
         
-        let found = false;
         snapshot.forEach((d) => {
-          if (d.id === 'XCmY40zo73swLw0WIwXH') {
-            found = true;
-            console.log('[DEBUG] FOUND XCmY... IN SNAPSHOT! Path:', d.ref.path, 'Data:', JSON.stringify(d.data()));
-          }
-          // Ignore vendor mirror documents to prevent them from overwriting user documents
-          if (d.ref.path.includes('/vendors/')) return;
+          // Only process documents from the users collection tree to prevent
+          // ghost orders or vendor mirror documents from overwriting the feed.
+          if (!d.ref.path.startsWith('users/')) return;
           map.set(d.id, orderFromDoc(d));
         });
-        
-        if (!found) {
-          console.log('[DEBUG] XCmY40zo73swLw0WIwXH NOT IN SNAPSHOT! Total docs:', snapshot.size);
-        }
         
         set({ orders: sortNewestFirst(Array.from(map.values())), isLoading: false });
       },

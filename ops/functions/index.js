@@ -1,7 +1,7 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass; iron people take only
 // ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
@@ -374,7 +374,10 @@ exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}',
     try {
       const taskRef = db.doc(`ops_tasks/${orderId}`);
       const snap = await taskRef.get();
-      if (snap.exists && snap.data().status === 'pending') {
+      // Cancel tasks in any non-cancelled state (not just 'pending') so that
+      // orders cancelled from the main admin panel are properly cleaned up
+      // even if the rider has already picked them up.
+      if (snap.exists && snap.data().status !== 'cancelled') {
         await taskRef.update({
           status: trans.taskStatus,
           ...(trans.taskStatus === 'picked_up' ? { pickedUpAt: TS() } : { cancelledAt: TS() }),
@@ -382,6 +385,56 @@ exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}',
       }
     } catch (err) {
       console.error(`syncTaskFromOrder failed for ${orderId}`, err);
+    }
+  }
+
+  // Clean up delivery tasks when an order is cancelled.
+  if (trans.dropQueue) {
+    try {
+      const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
+      const delSnap = await delTaskRef.get();
+      if (delSnap.exists) {
+        await delTaskRef.delete();
+      }
+    } catch (err) {
+      console.error(`syncTaskFromOrder: delivery task delete failed for ${orderId}`, err);
+    }
+
+    // Also clean up any ops_process docs for this order.
+    try {
+      const processDocs = await db.collection('ops_process')
+        .where('parentOrderId', '==', orderId).get();
+      const batch = db.batch();
+      processDocs.forEach((d) => batch.delete(d.ref));
+      if (!processDocs.empty) await batch.commit();
+    } catch (err) {
+      console.error(`syncTaskFromOrder: process cleanup failed for ${orderId}`, err);
+    }
+  }
+
+  if (trans.dropProcess) {
+    try {
+      const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
+      const delSnap = await delTaskRef.get();
+      if (delSnap.exists) {
+        await delTaskRef.update({ status: 'delivered', deliveredAt: TS() });
+      }
+    } catch (err) {
+      console.error(`syncTaskFromOrder: delivery task update failed for ${orderId}`, err);
+    }
+    
+    try {
+      await db.doc(`ops_queue/${orderId}`).delete();
+    } catch (err) {}
+
+    try {
+      const processDocs = await db.collection('ops_process')
+        .where('parentOrderId', '==', orderId).get();
+      const batch = db.batch();
+      processDocs.forEach((d) => batch.delete(d.ref));
+      if (!processDocs.empty) await batch.commit();
+    } catch (err) {
+      console.error(`syncTaskFromOrder: process cleanup failed for ${orderId}`, err);
     }
   }
 });
@@ -445,7 +498,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   const orderId = data.orderId;
   const action = data.action;
   if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-  if (!['claim', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder'].includes(action)) {
+  if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder'].includes(action)) {
     return { ok: false, error: 'invalid_input' };
   }
 
@@ -456,12 +509,25 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
   const task = taskSnap.exists ? taskSnap.data() : null;
-  const userId = task && task.userId;
-  const vendorId = (task && task.vendorId) || 'vendor_1';
+  let userId = task && task.userId;
+  let vendorId = (task && task.vendorId) || 'vendor_1';
+
+  const processId = data.processId || orderId;
+  const processRef = db.doc(`ops_process/${processId}`);
+
+  // Fallback: if the ops_task doesn't carry a userId (e.g. it was deleted during
+  // cancellation), try the ops_process doc which also stores userId/vendorId.
+  if (!userId) {
+    const processSnap = await processRef.get();
+    if (processSnap.exists) {
+      const pd = processSnap.data();
+      userId = pd.userId;
+      vendorId = pd.vendorId || vendorId;
+    }
+  }
   if (!userId) return { ok: false, error: 'not_found' };
 
   const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
-  const processRef = db.doc(`ops_process/${orderId}`);
   const now = admin.firestore.Timestamp.now();
 
   // ── Edit Order ──────────────────────────────────────────────────────────
@@ -502,55 +568,119 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   if (action === 'claim') {
     // Claim = start the tagging stage. A helper claiming an order begins tagging it.
-    // Token number is now assigned by the rider at pickup, so it's optional here.
-    const tokenNumber = data.tokenNumber || '';
-
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
     const order = orderSnap.data();
     if (order.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
 
-    const steps = opsStepsForOrder(order);
-    // Claim assigns the tagging stage to the caller, so stageRoleGate applies here
-    // too — iron-role users must not own tagging (helpers claim, supervisors bypass).
-    if (!stageRoleGate(steps[0], role)) return { ok: false, error: 'unauthorized' };
-    const prodStep = firstProductionStep(steps);
+    // Get tokens assigned at pickup (map: serviceType → tokenNumber)
+    const tokens = order.tokens || {};
+
+    // Split into service groups
+    const serviceGroups = splitOrderIntoServices(order);
+    const prodStep = firstProductionStep(opsStepsForOrder(order)); // For backwards compatibility
 
     try {
       const result = await db.runTransaction(async (tx) => {
-        const processSnap = await tx.get(processRef);
-        if (processSnap.exists) return { ok: false, error: 'already_claimed' };
-
         const orderFresh = (await tx.get(orderRef)).data();
         if (orderFresh.status !== 'pickup_completed') return { ok: false, error: 'invalid_state' };
+
+        // Check none already claimed
+        for (const group of serviceGroups) {
+          const processId = `${orderId}__${group.serviceType}`;
+          const snap = await tx.get(db.doc(`ops_process/${processId}`));
+          if (snap.exists) return { ok: false, error: 'already_claimed' };
+        }
 
         const staffSnap = await tx.get(db.doc(`ops_staff/${auth.uid}`));
         const name = staffSnap.exists ? staffSnap.data().name || '' : '';
 
-        tx.set(processRef, {
-          orderId,
-          userId,
-          vendorId,
-          steps,
-          currentIndex: 0,
-          status: steps[0],
-          tokenNumber: tokenNumber.trim(),
-          stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, startedAt: now } },
-          garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
-          claimedAt: now,
-        });
+        // Create N process docs
+        for (const group of serviceGroups) {
+          const processId = `${orderId}__${group.serviceType}`;
+          const steps = stepsForServiceType(group.serviceType);
+          
+          if (!stageRoleGate(steps[0], role)) {
+             // Rollback/error if helper role is unauthorized for tagging
+             throw new Error('unauthorized');
+          }
 
-        // tagging/prestain are ops-only; only the first production step reaches the
-        // customer-facing processingStep contract.
-        const updateData = { status: 'processing', updatedAt: now, tokenNumber: tokenNumber.trim() };
+          tx.set(db.doc(`ops_process/${processId}`), {
+            id: processId,
+            orderId,
+            parentOrderId: orderId,
+            serviceType: group.serviceType,
+            serviceLabel: group.label,
+            userId,
+            vendorId,
+            steps,
+            currentIndex: 0,
+            status: steps[0],
+            tokenNumber: tokens[group.serviceType] || order.tokenNumber || '',
+            siblingCount: serviceGroups.length,
+            stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, startedAt: now } },
+            garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
+            claimedAt: now,
+          });
+        }
+
+        // Update customer order to 'processing'
+        const updateData = { 
+          status: 'processing', 
+          updatedAt: now, 
+          subProcessCount: serviceGroups.length 
+        };
         if (prodStep) updateData.processingStep = prodStep;
+        
         tx.update(orderRef, updateData);
         tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+        
         return { ok: true };
       });
       return result;
     } catch (err) {
+      if (err.message === 'unauthorized') return { ok: false, error: 'unauthorized' };
       console.error('opsProcessing claim failed', err);
+      return { ok: false, error: 'server_error' };
+    }
+  }
+
+  if (action === 'acceptStep') {
+    const processSnap = await processRef.get();
+    if (!processSnap.exists) return { ok: false, error: 'not_found' };
+    const process = processSnap.data();
+    const step = process.steps[process.currentIndex];
+    if (!step) return { ok: false, error: 'invalid_state' };
+    if (!stageRoleGate(step, role)) return { ok: false, error: 'unauthorized' };
+
+    const stage = process.stages && process.stages[step];
+    if (stage && stage.assignee && stage.assignee !== auth.uid) return { ok: false, error: 'already_claimed' };
+
+    const staffSnap = await db.doc(`ops_staff/${auth.uid}`).get();
+    const name = staffSnap.exists ? staffSnap.data().name || '' : '';
+
+    try {
+      const result = await db.runTransaction(async (tx) => {
+        const freshSnap = await tx.get(processRef);
+        if (!freshSnap.exists) return { ok: false, error: 'not_found' };
+        const fresh = freshSnap.data();
+        const freshStep = fresh.steps[fresh.currentIndex];
+        if (freshStep !== step) return { ok: false, error: 'invalid_state' };
+        const s = fresh.stages && fresh.stages[step];
+        if (s && s.assignee && s.assignee !== auth.uid) return { ok: false, error: 'already_claimed' };
+
+        tx.update(processRef, {
+          stages: {
+            ...(fresh.stages || {}),
+            [step]: { ...(s || {}), assignee: auth.uid, assigneeName: name },
+          },
+        });
+
+        return { ok: true };
+      });
+      return result;
+    } catch (err) {
+      console.error('opsProcessing acceptStep failed', err);
       return { ok: false, error: 'server_error' };
     }
   }
@@ -629,7 +759,10 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (step === 'packaging') return { ok: false, error: 'use_complete_packaging' };
         
         const stage = process.stages && process.stages[step];
-        if (!stage || stage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+        // Allow the assigned helper OR any supervisor/admin to complete the step
+        if (!stage || (stage.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin')) {
+          return { ok: false, error: 'unauthorized' };
+        }
         if (!stage.startedAt) return { ok: false, error: 'invalid_state' };
         if (stage.completedAt) return { ok: false, error: 'already_completed' };
 
@@ -649,10 +782,31 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         // Mirror to production order if needed
         if (nextStatus === 'done') {
-          const deliveryOTP = generateOTP();
-          const updateData = { status: 'ready', readyAt: now, deliveryOTP };
-          tx.update(orderRef, updateData);
-          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          const siblingCount = process.siblingCount || 1;
+          
+          if (siblingCount <= 1) {
+            const deliveryOTP = generateOTP();
+            const updateData = { status: 'ready', readyAt: now, deliveryOTP };
+            tx.update(orderRef, updateData);
+            tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          } else {
+            const parentId = process.parentOrderId || orderId;
+            const allProcesses = await tx.get(
+              db.collection('ops_process').where('parentOrderId', '==', parentId)
+            );
+            
+            const allDone = allProcesses.docs.every(d => {
+              if (d.id === processRef.id) return true;
+              return d.data().status === 'done';
+            });
+            
+            if (allDone) {
+              const deliveryOTP = generateOTP();
+              const updateData = { status: 'ready', readyAt: now, deliveryOTP };
+              tx.update(orderRef, updateData);
+              tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+            }
+          }
         } else if (isProductionStep(nextStatus)) {
           const updateData = { processingStep: nextStatus, updatedAt: now };
           tx.update(orderRef, updateData);
@@ -783,10 +937,31 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         // Mirror to production order if needed
         if (nextStatus === 'done') {
-          const deliveryOTP = generateOTP();
-          const updateData = { status: 'ready', readyAt: now, deliveryOTP };
-          tx.update(orderRef, updateData);
-          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          const siblingCount = p.siblingCount || 1; // note: p is the process in submitTagging
+          
+          if (siblingCount <= 1) {
+            const deliveryOTP = generateOTP();
+            const updateData = { status: 'ready', readyAt: now, deliveryOTP };
+            tx.update(orderRef, updateData);
+            tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          } else {
+            const parentId = p.parentOrderId || orderId;
+            const allProcesses = await tx.get(
+              db.collection('ops_process').where('parentOrderId', '==', parentId)
+            );
+            
+            const allDone = allProcesses.docs.every(d => {
+              if (d.id === processRef.id) return true;
+              return d.data().status === 'done';
+            });
+            
+            if (allDone) {
+              const deliveryOTP = generateOTP();
+              const updateData = { status: 'ready', readyAt: now, deliveryOTP };
+              tx.update(orderRef, updateData);
+              tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+            }
+          }
         } else if (isProductionStep(nextStatus)) {
           const updateData = { processingStep: nextStatus, updatedAt: now };
           tx.update(orderRef, updateData);
@@ -813,7 +988,10 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (step !== 'packaging') return { ok: false, error: 'invalid_state' };
         
         const stage = process.stages && process.stages.packaging;
-        if (!stage || stage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+        // Allow the assigned helper OR any supervisor/admin to complete the step
+        if (!stage || (stage.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin')) {
+          return { ok: false, error: 'unauthorized' };
+        }
         if (!stage.startedAt) return { ok: false, error: 'invalid_state' };
         if (stage.completedAt) return { ok: false, error: 'already_completed' };
 
@@ -823,6 +1001,22 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const nextStatus = nextIndex < process.steps.length ? process.steps[nextIndex] : 'done';
 
         const qualityMedia = data.qualityMedia || {};
+        
+        let allDone = false;
+        if (nextStatus === 'done') {
+          const siblingCount = process.siblingCount || 1;
+          if (siblingCount > 1) {
+            const parentId = process.parentOrderId || orderId;
+            const allProcesses = await tx.get(
+              db.collection('ops_process').where('parentOrderId', '==', parentId)
+            );
+            
+            allDone = allProcesses.docs.every(d => {
+              if (d.id === processRef.id) return true;
+              return d.data().status === 'done';
+            });
+          }
+        }
         
         tx.update(processRef, {
           stages: {
@@ -834,10 +1028,13 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         });
 
         if (nextStatus === 'done') {
-          const deliveryOTP = generateOTP();
-          const updateData = { status: 'ready', readyAt: now, deliveryOTP };
-          tx.update(orderRef, updateData);
-          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          const siblingCount = process.siblingCount || 1;
+          if (siblingCount <= 1 || allDone) {
+            const deliveryOTP = generateOTP();
+            const updateData = { status: 'ready', readyAt: now, deliveryOTP };
+            tx.update(orderRef, updateData);
+            tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          }
         }
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
@@ -845,7 +1042,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       return result;
     } catch (err) {
       console.error('opsProcessing completePackaging failed', err);
-      return { ok: false, error: 'server_error' };
+      return { ok: false, error: `server_error: ${err.message}` };
     }
   }
 
@@ -900,11 +1097,16 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         tx.update(orderRef, updateData);
         tx.set(vendorRef, updateData, { merge: true });
         
-        // Cleanup ops queue and process if needed
+        // Cleanup ops task/queue and delivery task
         if (taskSnap.exists) {
-          tx.update(db.doc(`ops_tasks/${orderId}`), { status: 'cancelled' });
-        } else if (queueSnap.exists) {
+          tx.update(db.doc(`ops_tasks/${orderId}`), { status: 'cancelled', cancelledAt: now });
+        }
+        if (queueSnap.exists) {
           tx.delete(db.doc(`ops_queue/${orderId}`));
+        }
+        // Clean up delivery task if one exists
+        if (delTaskSnap.exists) {
+          tx.delete(delTaskRef);
         }
         
         return { ok: true, status: 'cancelled' };
@@ -971,19 +1173,12 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         const assignee = await selectRider();
         if (!assignee) return { ok: false, error: 'no_rider_available' };
 
-        const updateData = {
-          status: 'out_for_delivery',
-          outForDeliveryAt: now,
-          updatedAt: now,
-        };
-        tx.update(orderRef, updateData);
-        tx.set(vendorRef, updateData, { merge: true });
-
-        // Update delivery task (delTaskSnap/delTaskRef read at top)
+        // Do not change order status yet, keep it 'ready' until pickup
+        // Update delivery task to 'assigned'
         if (delTaskSnap.exists) {
           tx.update(delTaskRef, {
             assignee,
-            status: 'out_for_delivery',
+            status: 'assigned',
             assignedAt: now,
           });
         } else {
@@ -992,7 +1187,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             userId,
             vendorId,
             type: 'delivery',
-            status: 'out_for_delivery',
+            status: 'assigned',
             assignee,
             deliveryAddress: pickupAddressFromOrder(order),
             deliveryDate: order.deliveryDate,
@@ -1005,6 +1200,26 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           });
         }
 
+        return { ok: true, status: 'assigned' };
+      }
+
+      if (action === 'pickupDelivery') {
+        if (order.status !== 'ready') return { ok: false, error: 'invalid_state' };
+        if (role === 'rider' && delTaskSnap.exists && delTaskSnap.data().assignee !== auth.uid) {
+          return { ok: false, error: 'unauthorized' };
+        }
+        
+        const updateData = {
+          status: 'out_for_delivery',
+          outForDeliveryAt: now,
+          updatedAt: now,
+        };
+        tx.update(orderRef, updateData);
+        tx.set(vendorRef, updateData, { merge: true });
+
+        if (delTaskSnap.exists) {
+          tx.update(delTaskRef, { status: 'out_for_delivery', pickedUpAt: now });
+        }
         return { ok: true, status: 'out_for_delivery' };
       }
 
@@ -1086,6 +1301,20 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
       return { ok: false, error: 'invalid_action' };
     });
+    // After a successful cancel, clean up ops_process docs (outside the tx since
+    // it requires a collection query by parentOrderId).
+    if (result.ok && action === 'cancelOrder') {
+      try {
+        const processDocs = await db.collection('ops_process')
+          .where('parentOrderId', '==', orderId).get();
+        const batch = db.batch();
+        processDocs.forEach((d) => batch.delete(d.ref));
+        if (!processDocs.empty) await batch.commit();
+      } catch (err) {
+        console.error(`supervisorActions: process cleanup failed for ${orderId}`, err);
+      }
+    }
+
     return result;
   } catch (err) {
     console.error('supervisorActions failed', err);

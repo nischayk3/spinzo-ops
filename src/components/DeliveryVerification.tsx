@@ -14,7 +14,7 @@ interface DeliveryVerificationProps {
   onVerifyDelivery: (payload: { otp: string; proofUrl: string | null }) => Promise<boolean>;
 }
 
-type DeliveryStep = 'scan' | 'evidence' | 'otp';
+type DeliveryStep = 'evidence' | 'otp';
 
 export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundles, expectedLabels, onVerifyDelivery }: DeliveryVerificationProps) => {
   const [step, setStep] = useState<DeliveryStep>('evidence');
@@ -25,6 +25,8 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
   const [otp, setOtp] = useState('');
   const [verifying, setVerifying] = useState(false);
   const [otpError, setOtpError] = useState<string | null>(null);
+
+
 
 
 
@@ -83,7 +85,7 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
 
             {step === 'evidence' && (
               <View className="flex-1">
-                <Text className="text-textSecondary mb-4">Step 1: Take a photo at the delivery location.</Text>
+                <Text className="text-textSecondary mb-4">Step 2: Take a photo at the delivery location.</Text>
                 
                 <View className="items-center justify-center bg-bgDark rounded-xl border border-bgSurfaceLight mb-6 overflow-hidden h-48">
                   {uploading ? (
@@ -121,7 +123,7 @@ export const DeliveryVerification = ({ visible, onClose, orderId, expectedBundle
 
             {step === 'otp' && (
               <View className="flex-1">
-                <Text className="text-textSecondary mb-4">Step 2: Enter the 4-digit OTP from the customer.</Text>
+                <Text className="text-textSecondary mb-4">Step 3: Enter the 4-digit OTP from the customer.</Text>
                 
                 <TextInput
                   value={otp}

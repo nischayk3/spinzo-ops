@@ -77,9 +77,39 @@ const LunchCountdown = () => {
   );
 };
 
+const ShortBreakCountdown = () => {
+  const { shortBreakRemainingMs, shortBreakOverdue } = useAttendanceStore();
+
+  if (shortBreakOverdue) {
+    const overdueMs = (10 * 60 * 1000) - shortBreakRemainingMs; // using constant inline
+    return (
+      <View className="items-center">
+        <View className="flex-row items-center gap-2 mb-1">
+          <AlertCircle size={14} color="#ef4444" />
+          <Text className="text-red-600 font-bold text-sm uppercase tracking-widest">Break Overdue</Text>
+        </View>
+        <Text className="text-3xl font-bold text-red-600">+{formatDuration(overdueMs)}</Text>
+      </View>
+    );
+  }
+
+  const isWarning = shortBreakRemainingMs < 2 * 60 * 1000; // last 2 mins
+  return (
+    <View className="items-center">
+      <Text className={`text-xs font-bold uppercase tracking-widest mb-1 ${isWarning ? 'text-orange-500' : 'text-blue-500'}`}>
+        Break Remaining
+      </Text>
+      <Text className={`text-3xl font-bold ${isWarning ? 'text-orange-500' : 'text-blue-700'}`}>
+        {formatDuration(shortBreakRemainingMs)}
+      </Text>
+    </View>
+  );
+};
+
 export const DashboardScreen = () => {
   const user = useAuthStore(state => state.user);
-  const { currentShift, status, initializeListener, clockIn, lunchOut, lunchIn, clockOut, isLoading } = useAttendanceStore();
+  const activeRole = useAuthStore(state => state.activeRole);
+  const { currentShift, status, shortBreakCount, initializeListener, clockIn, lunchOut, lunchIn, shortBreakOut, shortBreakIn, clockOut, isLoading } = useAttendanceStore();
   
   const [showQR, setShowQR] = useState(false);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
@@ -130,6 +160,8 @@ export const DashboardScreen = () => {
       case 'clockIn': clockIn(storeId); break;
       case 'lunchOut': lunchOut(); break;
       case 'lunchIn': lunchIn(); break;
+      case 'shortBreakOut': shortBreakOut(); break;
+      case 'shortBreakIn': shortBreakIn(); break;
       case 'clockOut': clockOut(); break;
     }
     setPendingAction(null);
@@ -139,6 +171,7 @@ export const DashboardScreen = () => {
     switch(status) {
       case 'working': return 'bg-green-100 text-green-700 border-green-200';
       case 'lunch': return 'bg-purple-100 text-purple-700 border-purple-200';
+      case 'short_break': return 'bg-blue-100 text-blue-700 border-blue-200';
       default: return 'bg-gray-100 text-gray-700 border-gray-200';
     }
   };
@@ -158,12 +191,12 @@ export const DashboardScreen = () => {
         {/* Status Card */}
         <View className={`border rounded-3xl p-6 mb-6 items-center shadow-sm ${getStatusColor()}`}>
           <View className="flex-row items-center gap-2 mb-2">
-            <View className={`w-3 h-3 rounded-full ${status === 'working' ? 'bg-green-500' : status === 'lunch' ? 'bg-purple-500' : 'bg-gray-400'}`} />
+            <View className={`w-3 h-3 rounded-full ${status === 'working' ? 'bg-green-500' : status === 'lunch' ? 'bg-purple-500' : status === 'short_break' ? 'bg-blue-500' : 'bg-gray-400'}`} />
             <Text className="text-sm font-bold tracking-widest uppercase">
-              {status === 'off' ? 'OFF SHIFT' : status === 'lunch' ? 'LUNCH BREAK' : 'WORKING'}
+              {status === 'off' ? 'OFF SHIFT' : status === 'lunch' ? 'LUNCH BREAK' : status === 'short_break' ? 'SHORT BREAK' : 'WORKING'}
             </Text>
           </View>
-          {status === 'lunch' ? <LunchCountdown /> : <LiveTimer shift={currentShift} />}
+          {status === 'lunch' ? <LunchCountdown /> : status === 'short_break' ? <ShortBreakCountdown /> : <LiveTimer shift={currentShift} />}
           {user?.role && (
             <View className="mt-3 bg-white/50 px-3 py-1 rounded-full">
               <Text className="text-xs font-medium uppercase opacity-80">{user.role}</Text>
@@ -192,27 +225,55 @@ export const DashboardScreen = () => {
           ) : (
             <>
               {/* Lunch Button */}
-              {status === 'lunch' ? (
-                <TouchableOpacity 
-                  onPress={() => handleActionRequest('lunchIn')}
-                  disabled={isLoading}
-                  className="bg-white border-2 border-purple-500 py-5 rounded-2xl flex-row items-center justify-center gap-3 active:bg-purple-50"
-                >
-                  <Utensils color="#a855f7" size={20} />
-                  <Text className="text-purple-600 font-bold text-base">End Lunch</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity 
-                  onPress={() => handleActionRequest('lunchOut')}
-                  disabled={isLoading || status !== 'working' || currentShift?.lunch !== null}
-                  className={`bg-white border-2 py-4 rounded-2xl flex-row items-center justify-center gap-3 ${status !== 'working' || currentShift?.lunch !== null ? 'border-gray-200 opacity-50' : 'border-purple-500 active:bg-purple-50'}`}
-                >
-                  <Utensils color={status !== 'working' || currentShift?.lunch !== null ? "#9ca3af" : "#a855f7"} size={20} />
-                  <View>
-                    <Text className={`font-bold text-base ${status !== 'working' || currentShift?.lunch !== null ? 'text-gray-400' : 'text-purple-600'}`}>Lunch Break</Text>
-                    <Text className="text-xs text-center text-gray-500">{currentShift?.lunch ? 'Completed' : '2 hour limit'}</Text>
-                  </View>
-                </TouchableOpacity>
+              {(
+                status === 'lunch' ? (
+                  <TouchableOpacity 
+                    onPress={() => handleActionRequest('lunchIn')}
+                    disabled={isLoading}
+                    className="bg-white border-2 border-purple-500 py-5 rounded-2xl flex-row items-center justify-center gap-3 active:bg-purple-50"
+                  >
+                    <Utensils color="#a855f7" size={20} />
+                    <Text className="text-purple-600 font-bold text-base">End Lunch</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity 
+                    onPress={() => handleActionRequest('lunchOut')}
+                    disabled={isLoading || status !== 'working' || currentShift?.lunch !== null}
+                    className={`bg-white border-2 py-4 rounded-2xl flex-row items-center justify-center gap-3 ${status !== 'working' || currentShift?.lunch !== null ? 'border-gray-200 opacity-50' : 'border-purple-500 active:bg-purple-50'}`}
+                  >
+                    <Utensils color={status !== 'working' || currentShift?.lunch !== null ? "#9ca3af" : "#a855f7"} size={20} />
+                    <View>
+                      <Text className={`font-bold text-base ${status !== 'working' || currentShift?.lunch !== null ? 'text-gray-400' : 'text-purple-600'}`}>Lunch Break</Text>
+                      <Text className="text-xs text-center text-gray-500">{currentShift?.lunch ? 'Completed' : '2 hour limit'}</Text>
+                    </View>
+                  </TouchableOpacity>
+                )
+              )}
+              
+              {/* Short Break Button - Only for Helper */}
+              {activeRole === 'helper' && (
+                status === 'short_break' ? (
+                  <TouchableOpacity 
+                    onPress={() => handleActionRequest('shortBreakIn')}
+                    disabled={isLoading}
+                    className="bg-white border-2 border-blue-500 py-5 rounded-2xl flex-row items-center justify-center gap-3 active:bg-blue-50"
+                  >
+                    <Utensils color="#3b82f6" size={20} />
+                    <Text className="text-blue-600 font-bold text-base">End Short Break</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity 
+                    onPress={() => handleActionRequest('shortBreakOut')}
+                    disabled={isLoading || status !== 'working' || shortBreakCount >= 3}
+                    className={`bg-white border-2 py-4 rounded-2xl flex-row items-center justify-center gap-3 ${status !== 'working' || shortBreakCount >= 3 ? 'border-gray-200 opacity-50' : 'border-blue-500 active:bg-blue-50'}`}
+                  >
+                    <Utensils color={status !== 'working' || shortBreakCount >= 3 ? "#9ca3af" : "#3b82f6"} size={20} />
+                    <View>
+                      <Text className={`font-bold text-base ${status !== 'working' || shortBreakCount >= 3 ? 'text-gray-400' : 'text-blue-600'}`}>Short Break</Text>
+                      <Text className="text-xs text-center text-gray-500">{shortBreakCount >= 3 ? 'Limit reached' : `${3 - shortBreakCount} left (10m each)`}</Text>
+                    </View>
+                  </TouchableOpacity>
+                )
               )}
 
               {/* Logout Button */}
@@ -244,7 +305,7 @@ export const DashboardScreen = () => {
               <View className="flex-row justify-between items-center pb-1">
                 <Text className="text-gray-500">Lunch</Text>
                 <Text className="text-gray-900 font-medium">
-                  {currentShift.lunch ? (currentShift.lunch.endAt ? 'Completed' : 'In Progress') : 'Not Taken'}
+                  {activeRole === 'rider' ? 'N/A' : (currentShift.lunch ? (currentShift.lunch.endAt ? 'Completed' : 'In Progress') : 'Not Taken')}
                 </Text>
               </View>
             </View>
