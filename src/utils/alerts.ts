@@ -82,6 +82,28 @@ async function initAlarm() {
 // Init async in background
 initAlarm();
 
+/** Unlock Audio Context and prime Expo AV for iOS Safari */
+export async function unlockAudio() {
+  const ac = ensureAudioCtx();
+  if (ac) ac.resume().catch(() => {});
+  
+  if (!alarmSound && !isInitializingAlarm) {
+    await initAlarm();
+  }
+  
+  if (alarmSound) {
+    try {
+      // Play a silent burst to unlock the audio engine on iOS
+      await alarmSound.setVolumeAsync(0);
+      await alarmSound.playAsync();
+      await alarmSound.stopAsync();
+      await alarmSound.setVolumeAsync(1);
+    } catch (e) {
+      console.log('Audio unlock failed:', e);
+    }
+  }
+}
+
 /** Start a looping or single-burst siren using the MP3 file */
 export async function dramaticChime(loop: boolean = true) {
   shouldBePlaying = true;

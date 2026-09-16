@@ -189,6 +189,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   
   logout: async () => {
     try {
+      const uid = get().user?.id;
+      if (uid) {
+        await useOpsStaffStore.getState().goOffShift(uid);
+      }
       await firebaseSignOut(auth);
       // Drop the rider's live staff/task listeners so they don't leak past logout
       // and keep announcing for the previous user.
