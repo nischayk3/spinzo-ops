@@ -6,13 +6,11 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.nischayk3.spinzo-ops"
     },
     "android": {
-      "newArchEnabled": true,
       "package": "com.nischayk3.spinzoops",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
