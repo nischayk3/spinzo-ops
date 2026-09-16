@@ -1,3 +1,4 @@
+import 'react-native-reanimated';
 // @ts-ignore
 import "./global.css";
 import React from 'react';
