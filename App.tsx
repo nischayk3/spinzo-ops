@@ -8,8 +8,14 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import { RootNavigator } from './src/navigation/RootNavigator';
 import { ErrorBoundary } from './ErrorBoundary';
+import * as Sentry from '@sentry/react-native';
 
-export default function App() {
+Sentry.init({
+  dsn: 'https://4823ae2cb52c014cbaa58bda55d5ce78@o4510713966166016.ingest.de.sentry.io/4510714043367504',
+  debug: false,
+});
+
+export default Sentry.wrap(function App() {
   return (
     <ErrorBoundary>
       <SafeAreaProvider>

@@ -24,11 +24,6 @@
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.INTERNET",
-        "android.permission.RECORD_AUDIO",
-        "android.permission.CAMERA",
-        "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.INTERNET",
         "android.permission.RECORD_AUDIO"
       ]
     },
@@ -58,7 +53,8 @@
         {
           "photosPermission": "SpinZo Ops uses your photos for order verification."
         }
-      ]
+      ],
+      "@sentry/react-native"
     ],
     "extra": {
       "eas": {
