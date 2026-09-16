@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { auth, db } from '../config/firebase';
 import { doc, onSnapshot, setDoc, updateDoc, getDoc, Unsubscribe } from 'firebase/firestore';
 import { useAuthStore } from './authStore';
+import { useOpsStaffStore } from './opsStaffStore';
 
 export type AttendanceStatus = 'off' | 'working' | 'lunch' | 'short_break';
 
@@ -152,6 +153,9 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       } else {
         await updateDoc(shiftRef, { status: 'working', logoutAt: null });
       }
+      
+      // Sync with ops_staff for order assignment
+      await useOpsStaffStore.getState().goOnShift(user.id, user.role, user.phone, user.name, { storeId });
     } catch (err) {
       console.error('Failed to clock in:', err);
     } finally {
@@ -287,6 +291,9 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
 
       await updateDoc(shiftRef, updates);
       if (lunchTicker) clearInterval(lunchTicker);
+      
+      // Sync with ops_staff to stop receiving new orders
+      await useOpsStaffStore.getState().goOffShift(user.id);
     } catch (err) {
       console.error('Failed to clock out:', err);
     } finally {
