@@ -60,47 +60,28 @@ function playTone(ctx: AudioContext, freq: number, type: OscillatorType, startTi
   osc.stop(startTime + duration);
 }
 
-import { Audio } from 'expo-av';
+import { createAudioPlayer } from 'expo-audio';
 
-let alarmSound: Audio.Sound | null = null;
-let isInitializingAlarm = false;
+// createAudioPlayer is synchronous and returns an AudioPlayer instance immediately
+const alarmSound = createAudioPlayer(require('../../assets/sounds/alarm.mp3'));
 let shouldBePlaying = false;
 let singleLoopTimeout: ReturnType<typeof setTimeout> | null = null;
-
-async function initAlarm() {
-  if (isInitializingAlarm || alarmSound) return;
-  isInitializingAlarm = true;
-  try {
-    const { sound } = await Audio.Sound.createAsync(require('../../assets/sounds/alarm.mp3'));
-    alarmSound = sound;
-  } catch (e) {
-    console.log('Failed to load alarm sound', e);
-  } finally {
-    isInitializingAlarm = false;
-  }
-}
-// Init async in background
-initAlarm();
 
 /** Unlock Audio Context and prime Expo AV for iOS Safari */
 export async function unlockAudio() {
   const ac = ensureAudioCtx();
   if (ac) ac.resume().catch(() => {});
   
-  if (!alarmSound && !isInitializingAlarm) {
-    await initAlarm();
-  }
-  
-  if (alarmSound) {
-    try {
-      // Play a silent burst to unlock the audio engine on iOS
-      await alarmSound.setVolumeAsync(0);
-      await alarmSound.playAsync();
-      await alarmSound.stopAsync();
-      await alarmSound.setVolumeAsync(1);
-    } catch (e) {
-      console.log('Audio unlock failed:', e);
-    }
+  try {
+    // Play a silent burst to unlock the audio engine on iOS
+    alarmSound.volume = 0;
+    alarmSound.play();
+    setTimeout(() => {
+        alarmSound.pause();
+        alarmSound.volume = 1;
+    }, 100);
+  } catch (e) {
+    console.log('Audio unlock failed:', e);
   }
 }
 
@@ -112,21 +93,14 @@ export async function dramaticChime(loop: boolean = true) {
     singleLoopTimeout = null;
   }
 
-  if (!alarmSound && !isInitializingAlarm) {
-    await initAlarm();
-  }
-  
-  // Await initialization if currently in progress
-  if (isInitializingAlarm) {
-    await new Promise(r => setTimeout(r, 500));
-  }
-
-  // If stopAlarm() was called while we were awaiting init, abort.
-  if (!shouldBePlaying || !alarmSound) return;
-
   try {
-    await alarmSound.setIsLoopingAsync(loop);
-    await alarmSound.playFromPositionAsync(0);
+    alarmSound.loop = loop;
+    if (typeof alarmSound.seekTo === 'function') {
+        alarmSound.seekTo(0);
+    } else if (typeof alarmSound.currentTime !== 'undefined') {
+        alarmSound.currentTime = 0;
+    }
+    alarmSound.play();
 
     // If we only want a single loop (e.g. for Supervisor new order),
     // we manually stop it after 2.5 seconds (roughly one MP3 loop).
@@ -150,9 +124,7 @@ export async function stopAlarm() {
     singleLoopTimeout = null;
   }
   try {
-    if (alarmSound) {
-      await alarmSound.stopAsync();
-    }
+    alarmSound.pause();
   } catch (e) {
     console.log('Failed to stop alarm sound', e);
   }
