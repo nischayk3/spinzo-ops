@@ -54,7 +54,6 @@
           "photosPermission": "SpinZo Ops uses your photos for order verification."
         }
       ],
-      "@sentry/react-native",
       "expo-audio"
     ],
     "extra": {
