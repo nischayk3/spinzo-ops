@@ -26,4 +26,4 @@ export default Sentry.wrap(function App() {
       </SafeAreaProvider>
     </ErrorBoundary>
   );
-}
+});
