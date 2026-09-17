@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot } from '../config/firebase';
 import { db } from '../config/firebase';
 
 /**

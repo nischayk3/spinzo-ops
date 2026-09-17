@@ -13,12 +13,8 @@ export function LoginScreen() {
   const handleSendOTP = async () => {
     if (phone.length < 10) return;
     try {
-      if (Platform.OS === 'web') {
-        await requestOTP(phone);
-        setStep('OTP');
-      } else {
-        Alert.alert("Error", "Phone Auth currently requires Web Environment setup");
-      }
+      await requestOTP(phone);
+      setStep('OTP');
     } catch (err: any) {
       // Error handled in store
     }

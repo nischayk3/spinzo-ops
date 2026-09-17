@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { Platform } from 'react-native';
 import { db } from '../config/firebase';
-import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from 'firebase/firestore';
+import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from '../config/firebase';
 import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
 import { primeAlerts, announceAssignedPickup, announceAssignedDelivery } from '../utils/alerts';
 

@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "597897149776",
+    "project_id": "spin-it-a135a",
+    "storage_bucket": "spin-it-a135a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:597897149776:android:8a859a460e93e9c935c055",
+        "android_client_info": {
+          "package_name": "com.nischayk3.Spinit"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAxNKj4trzRQKhbLmxi8IUFLJqcibjfryc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:597897149776:android:cdd5cdb38e9b629e35c055",
+        "android_client_info": {
+          "package_name": "com.nischayk3.spinzoops"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAxNKj4trzRQKhbLmxi8IUFLJqcibjfryc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

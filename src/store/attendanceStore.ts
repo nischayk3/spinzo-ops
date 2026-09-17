@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { auth, db } from '../config/firebase';
-import { doc, onSnapshot, setDoc, updateDoc, getDoc, Unsubscribe } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, updateDoc, getDoc, Unsubscribe } from '../config/firebase';
 import { useAuthStore } from './authStore';
 import { useOpsStaffStore } from './opsStaffStore';
 

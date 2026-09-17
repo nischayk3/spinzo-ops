@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, ActivityIndicator, FlatList } from 'react-native';
 import { X, UserPlus, CheckCircle2 } from 'lucide-react-native';
 import { db } from '../../config/firebase';
-import { collection, query, where, getDocs } from 'firebase/firestore';
+import { collection, query, where, getDocs } from '../../config/firebase';
 
 interface StaffDoc {
   uid: string;

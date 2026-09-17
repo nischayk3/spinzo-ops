@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { db } from '../config/firebase';
-import { collection, onSnapshot } from 'firebase/firestore';
+import { collection, onSnapshot } from '../config/firebase';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../config/firebase';
 import { parseOpsProcess, OpsProcess, myInProgress, GarmentLabel } from '../utils/opsProcess';

@@ -1,7 +1,37 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
-import { getFirestore, Firestore } from 'firebase/firestore';
-import { getAuth, Auth } from 'firebase/auth';
+import { 
+  getFirestore, 
+  Firestore,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  Timestamp,
+  onSnapshot,
+  addDoc,
+  updateDoc,
+  serverTimestamp,
+  setDoc,
+  deleteDoc,
+  limit,
+  startAfter,
+  writeBatch,
+  runTransaction,
+  deleteField
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  Auth,
+  onAuthStateChanged,
+  signInWithPhoneNumber,
+  signOut,
+  ConfirmationResult
+} from 'firebase/auth';
 import { getFunctions, Functions } from 'firebase/functions';
+import { getStorage, FirebaseStorage } from 'firebase/storage';
 
 export const firebaseConfig = {
   apiKey: 'AIzaSyBnwzJVax1qx2oN3nf7INqpXLF8rVrUWqw',
@@ -12,24 +42,42 @@ export const firebaseConfig = {
   appId: '1:597897149776:web:c9a7d4b5c2291f8b35c055',
 };
 
-import { getStorage, FirebaseStorage } from 'firebase/storage';
-
-let app: FirebaseApp;
-let db: Firestore;
-let auth: Auth;
-let functions: Functions;
-let storage: FirebaseStorage;
-
 // Ensure Firebase is only initialized once
-if (getApps().length === 0) {
-  app = initializeApp(firebaseConfig);
-} else {
-  app = getApp();
-}
+const app: FirebaseApp = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+const db: Firestore = getFirestore(app);
+const auth: Auth = getAuth(app);
+const functions: Functions = getFunctions(app, 'us-central1');
+const storage: FirebaseStorage = getStorage(app);
 
-db = getFirestore(app);
-auth = getAuth(app);
-functions = getFunctions(app, 'us-central1');
-storage = getStorage(app);
-
-export { app, db, auth, functions, storage };
+export { 
+  app, 
+  db, 
+  auth, 
+  functions, 
+  storage,
+  // Auth exports
+  onAuthStateChanged,
+  signInWithPhoneNumber,
+  signOut,
+  type ConfirmationResult,
+  // Firestore exports
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  Timestamp,
+  onSnapshot,
+  addDoc,
+  updateDoc,
+  serverTimestamp,
+  setDoc,
+  deleteDoc,
+  limit,
+  startAfter,
+  writeBatch,
+  runTransaction,
+  deleteField
+};

@@ -4,7 +4,7 @@ import {
   onSnapshot,
   query,
   QueryDocumentSnapshot,
-} from 'firebase/firestore';
+} from '../config/firebase';
 import { db } from '../config/firebase';
 import { FeedOrder, sortNewestFirst } from '../utils/orderFeed';
 

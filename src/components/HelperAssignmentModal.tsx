@@ -9,7 +9,7 @@ import { getTopEligibleTask } from '../utils/helperEligibility';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { stepLabel } from '../utils/opsProcess';
-import { doc, runTransaction } from 'firebase/firestore';
+import { doc, runTransaction } from '../config/firebase';
 import { db } from '../config/firebase';
 
 export function HelperAssignmentModal() {

@@ -9,8 +9,8 @@ import {
   ConfirmationResult,
   onAuthStateChanged,
   signOut as firebaseSignOut
-} from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+} from '../config/firebase';
+import { doc, getDoc } from '../config/firebase';
 
 // Helper to get or create verifier (web only)
 const getVerifier = () => {
