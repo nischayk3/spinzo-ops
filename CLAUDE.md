@@ -6,39 +6,103 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-SpinZo Ops is the internal store-operations app for the Livfresh laundry service. Helpers/riders scan QR codes to clock shifts, then process laundry orders through an in-store pipeline (tagging → washing → drying → ironing → folding → packaging → ready). Built with Expo SDK 57 + Expo Router-free React Navigation, TypeScript (strict), NativeWind v4, Zustand, and the Firebase Web SDK.
+SpinZo Ops is the internal store-operations app for the Livfresh laundry service. Staff (helpers, ironers, riders, supervisors) scan QR codes to clock shifts, then process laundry orders through a tagging → washing → drying → ironing → packaging → ready pipeline.
+
+Built with Expo SDK 57 (Expo Router-free, React Navigation), TypeScript (strict), NativeWind v4, Zustand, and **both** Firebase Web SDK (web target) and `@react-native-firebase/*` (native builds). The web target is the primary dev surface since phone auth works there.
 
 ## Commands
 
 ```sh
-npm start          # start Expo dev server
-npm run web        # run in browser (primary dev target — phone auth works here)
-npm run ios        # run in iOS simulator
-npm run android    # run on Android
-npx tsc --noEmit   # typecheck (tsconfig is strict)
+npm start            # start Expo dev server
+npm run web          # run in browser (primary dev target — phone auth + reCAPTCHA works)
+npm run ios          # run in iOS simulator
+npm run android      # run on Android
+npm run test         # vitest run (all src/**/*.test.ts)
+npm run test:watch   # vitest watch mode
+npx tsc --noEmit     # typecheck (strict mode, jsxImportSource: nativewind)
 ```
-
-There is no test or lint setup. The web target is the only one where the full auth flow (phone OTP + reCAPTCHA) works.
 
 ## Architecture
 
-- **App.tsx / index.ts** — Expo entry; wraps `NavigationContainer` around `RootNavigator`.
-- **`src/navigation/RootNavigator.tsx`** — auth-gated stack. Reads `isLoggedIn` / `activeRole` from the auth store: not logged in → `Login`; logged in but no role → `SelectRole`; otherwise → `Main` (bottom tabs: Home/Queue/Payout/Settings) plus an `OrderDetail` modal. Exports `RootStackParamList`, which screens use to type routes.
-- **`src/store/*`** — all state is Zustand. Screens read/write state via stores; they don't own data fetching.
-  - **authStore** — Firebase phone-auth (OTP). `initializeAuth` wires `onAuthStateChanged`; `requestOTP`/`verifyOTP` handle the flow. Note the web-only reCAPTCHA verifier and the `+91` phone prefix.
-  - **orderStore** — the core domain logic. A realtime `collectionGroup('orders')` listener drives `orders`. `getOrderPipeline(items)` computes the per-order step list from service types (ironing-only skips wash/dry/fold; `wash_*`/`blanket_wash` add washing+drying). Step lifecycle is `startTagging` / `completeTagging` / `startStep` / `completeStep`, each writing timestamps and durations. **Every write is a `dualWrite`** to both `users/{userId}/orders/{orderId}` and `vendors/{vendorId}/orders/{orderId}`.
-  - **attendanceStore** — QR-scan-driven shift clock in/out, breaks, lunch. In-memory only (not persisted or synced).
-- **`src/screens/`** — Auth (Login, SelectRole), Attendance (clock-in + live timer), Queue (tabbed order list + `OrderDetail` modal with the pipeline UI).
-- **`src/components/QRScanner.tsx`** — expo-camera barcode scanner; handles camera permission + web camera.
-- **`src/types/index.ts`** — shared domain types (ShiftRole, UserProfile, ServiceType, OrderStatus).
+### Entry & Navigation
 
-## Data / sync contract
+- **index.ts** — Expo entry; registers with `@expo/metro-runtime`.
+- **App.tsx** — wraps `ErrorBoundary` > `SafeAreaProvider` > `NavigationContainer` > `RootNavigator`.
+- **`src/navigation/RootNavigator.tsx`** — auth-gated stack (Login → NotInRoster → Permissions → Main tabs). `RootStackParamList` is the shared route-type export. The `AppTabs` bottom nav conditionally shows floor/orders/pickups/deliveries tabs based on `activeRole`. On mount, initializes live Firestore listeners for ops_staff, store resources, order feed, and ops_process (all via Zustand stores). Includes an auto-logout heartbeat (11:30 PM cutoff + stale-shift detection).
 
-Order statuses, processing sub-steps, and service types are **production contracts shared with the Livfresh customer app and admin panel** — do not change their string values. The ops app reads orders via `collectionGroup('orders')` filtered to `pickup_completed` / `processing` / `ready`, so a status outside that set will drop an order from the queue.
+### Firebase Architecture
+
+**Dual SDK setup — both are live:**
+
+- **`src/config/firebase.ts`** — Firebase Web SDK (`firebase` v12). Imports used by all stores on **web target**. Exports a unified interface: `app`, `db`, `auth`, `functions`, `storage`, and re-exports all Firestore/Auth functions.
+- **`src/config/firebase.native.ts`** — `@react-native-firebase/*` SDK. Same export shape. Used on **native builds** (iOS/Android) — the module bundler resolves `.native.ts` automatically.
+
+Both files export the same interface: `{ auth, db, functions, storage, app, onAuthStateChanged, signInWithPhoneNumber, signOut, ConfirmationResult }` plus Firestore utilities. Stores import from `../config/firebase` and get the correct SDK per platform.
+
+**Phone auth**: Web uses `RecaptchaVerifier`. Native uses `@react-native-firebase/auth`. Phone numbers are prefixed with `+91` before sending OTP.
+
+### State Management (Zustand stores — all in `src/store/`)
+
+Stores are singletons created with `create()`. They own all data fetching (Firestore `onSnapshot` listeners) and callable invocations — screens and components read/write via store hooks.
+
+| Store | Responsibility |
+|---|---|
+| **authStore** | Firebase phone-auth (OTP flow), roster lookup, user profile. `initializeAuth()` wires `onAuthStateChanged`; fetches role from `config/opsStaff` doc. |
+| **opsStaffStore** | Real-time `ops_staff/{uid}` doc, `ops_tasks` query (rider pickups), `ops_delivery_tasks` query (rider deliveries). Audio alerts on new assignments. `goOnShift`/`goOffShift` sync status. |
+| **orderFeedStore** | `collectionGroup('orders')` realtime snapshot → `FeedOrder[]`. Used by intake screen and supervisor floor board. |
+| **opsProcessStore** | `ops_process` collection listener + all `opsProcessing` callable invocations (claim, acceptStep, startStep, completeStep, scanGarment, printLabels, submitTagging, etc.) and `supervisorActions` callable (cancel, reschedule, assign rider, verify delivery OTP). |
+| **attendanceStore** | Shift lifecycle (clock in/out, lunch, short breaks) with live timers and limits (2h lunch, 10min breaks, max 3 breaks). Writes to `ops_attendance/{uid}/shifts/{date}`. |
+| **storeResourcesStore** | Reads `config/storeResources` doc for washer/dryer/ironing station counts (affects workflow step generation). |
+
+### Cloud Functions
+
+- **`ops/functions/index.js`** (`~1320 lines`) — main backend logic: `opsProcessing` (claim/step/scans/tagging/packaging/labels), `supervisorActions` (cancel/reschedule/assign), dispatch logic, and `fetch_otp`.
+- **`ops/functions/dispatch.js`**, **`ops/functions/fetch_otp.js`**, **`ops/functions/scratch.js`** — supporting tools.
+- Deployed via Firebase CLI. The callables are called directly from `opsProcessStore`.
+
+### Data contracts
+
+**Service types** (`ServiceType`): `'wash_fold' | 'wash_iron' | 'ironing' | 'blanket_wash'` — production contract shared with Livfresh customer app. Do NOT change.
+
+**Order statuses** (`OrderStatus`): `'placed' | 'confirmed' | 'in_transit_to_store' | 'pickup_completed' | 'processing' | 'ready' | 'out_for_delivery' | 'delivered' | 'cancelled'` — also contracted. The ops app reads via `collectionGroup('orders')`.
+
+**Processing steps**: `'getting_washed' | 'getting_ironed' | 'getting_dried'` plus tagging/prestain/packaging/done — defined in `utils/opsProcess.ts` step labels.
+
+### Screens by role
+
+| Role | Tabs / Screens |
+|---|---|
+| **supervisor** | Dashboard (with supervisory controls), Floor Board (order queue with management), Settings |
+| **helper / iron** | Dashboard, Processing (pipeline UI with step-by-step workflow), Settings |
+| **rider** | Dashboard, Pickups, Deliveries, Settings (plus `GlobalAssignmentModal` overlay) |
+
+### Component modals
+
+- `GlobalAssignmentModal` — overlays for riders (new task announcements)
+- `HelperAssignmentModal` — overlays for helpers/ironers (step-task assignments)
+- `AssignRiderModal`, `CancelOrderModal`, `RescheduleModal` — supervisor actions
+- `EditOrderModal`, `DeliveryVerification`, `FaceVerification`, `PackagingVerification`, `QualityVerification` — verification/override modals
+- `FloatingTaskCard` — persistent task indicator
+- `WorkflowSteps` — shared pipeline step component
+- `QRScanner` — expo-camera barcode scanner used for garment tag scanning
+
+### Styling
+
+NativeWind/Tailwind with a custom dark theme in `tailwind.config.js`. Key custom tokens: `bgDark`, `bgSurface`, `bgSurfaceLight`, `textPrimary`, `textSecondary`, `textMuted`, `primary` (green), `warning`, `error`, `info`. Use these classes — not raw hex — in components.
+
+### Metro config
+
+- `metro.config.js` enables `.cjs` extension (Firebase v12 support) and disables `unstable_enablePackageExports` (Zustand v5 ESM compat fix).
+- Reanimated Babel plugin + NativeWind Babel plugin in `babel.config.js`.
+
+## UI / pattern library
+
+- All icons: `lucide-react-native` (consistent with existing usage — check imports before picking alternatives)
+- Fonts: system default (no custom fonts loaded)
 
 ## Gotchas
 
-- **Native Firebase is not installed.** `package.json` has only the `firebase` (web) SDK. `src/services/firebase.ts` and `src/services/firebase.native.ts` (which requires uninstalled `@react-native-firebase/*`) are orphaned — the stores actually import from `src/config/firebase.ts`, which duplicates `firebaseConfig`. Keep edits in `src/config/firebase.ts`.
-- **Phone auth works only on web.** The native path shows an "requires Web Environment" alert, so test auth flows in the browser.
-- **Styling is NativeWind/Tailwind** with a custom dark theme in `tailwind.config.js` (`bgDark`, `bgSurface`, `bgSurfaceLight`, `textPrimary`, `textSecondary`, `textMuted`, `primary` green, `warning`, `error`, `info`). Use these classes rather than raw hex in components.
-- Reanimated's Babel plugin is already configured in `babel.config.js`; don't re-add it.
+- **Both Firebase Web SDK and native `@react-native-firebase/*` are installed.** The `.native.ts` extension resolves for native; stores import from `src/config/firebase`. Don't add another firebase config file.
+- **Phone auth works only on web** (reCAPTCHA). Native path shows an "requires Web Environment" alert. Always test auth flows in browser.
+- **No test runner for components** — vitest only runs `src/**/*.test.ts` (node environment). No lint setup.
+- **Global CSS** (`global.css`) is the NativeWind entry point — don't rename or delete.

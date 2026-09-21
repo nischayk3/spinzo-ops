@@ -3,7 +3,7 @@ const axios = require('axios');
 
 const API_URL = 'http://localhost:8080';
 const API_KEY = 'my-secure-key-123';
-const INSTANCE_NAME = 'spinzo-marketing';
+const INSTANCE_NAME = 'spinzo-marketing-2';
 
 const server = http.createServer(async (req, res) => {
     if (req.url === '/') {

@@ -3,7 +3,7 @@ const fs = require('fs');
 
 const API_URL = 'http://localhost:8080';
 const API_KEY = 'my-secure-key-123';
-const INSTANCE_NAME = 'spinzo-marketing';
+const INSTANCE_NAME = 'spinzo-marketing-2';
 
 async function createInstance() {
     try {

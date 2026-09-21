@@ -4,7 +4,7 @@ const axios = require('axios');
 
 const API_URL = 'http://localhost:8080';
 const API_KEY = 'my-secure-key-123';
-const INSTANCE_NAME = 'spinzo-marketing';
+const INSTANCE_NAME = 'spinzo-marketing-2';
 
 // === PRODUCTION SETTINGS ===
 const CSV_FILE = 'users_data.csv'; 
@@ -20,8 +20,8 @@ if (fs.existsSync(PROGRESS_FILE)) {
     console.log(`Loaded ${Object.keys(progress).length} already messaged users from progress.json`);
 }
 
-const saveProgress = (phone) => {
-    progress[phone] = true;
+const saveProgress = (phone, status = true) => {
+    progress[phone] = status;
     fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2));
 };
 
@@ -50,7 +50,27 @@ You really have to experience the massive SpinZo upgrade for yourself.
 Tap here to book a quick pickup: https://spinzonow.com 🚀`;
 };
 
+async function checkConnection() {
+    try {
+        const res = await axios.get(`${API_URL}/instance/connectionState/${INSTANCE_NAME}`, {
+            headers: { 'apikey': API_KEY },
+            timeout: 5000
+        });
+        return res.data?.instance?.state === 'open';
+    } catch (err) {
+        return false;
+    }
+}
+
 async function processUsers() {
+    console.log(`Checking WhatsApp connection for ${INSTANCE_NAME}...`);
+    const isConnected = await checkConnection();
+    if (!isConnected) {
+        console.error(`🚨 Evolution API instance "${INSTANCE_NAME}" is NOT connected to WhatsApp. Please verify connection and retry.`);
+        process.exit(1);
+    }
+    console.log(`✅ WhatsApp instance "${INSTANCE_NAME}" is connected and ready!`);
+
     const users = [];
 
     fs.createReadStream(CSV_FILE)
@@ -60,7 +80,9 @@ async function processUsers() {
         })
         .on('end', async () => {
             console.log(`Loaded ${users.length} total users from CSV.`);
+            console.log(`Currently messaged: ${Object.values(progress).filter(v => v === true).length} users.`);
             let sentCount = 0;
+            let consecutiveErrors = 0;
             
             for (let i = 0; i < users.length; i++) {
                 const user = users[i];
@@ -73,9 +95,8 @@ async function processUsers() {
                     continue; // Silently skip invalid phones
                 }
 
-                // VERY IMPORTANT: Check if we already messaged this person!
-                if (progress[phone]) {
-                    console.log(`[${i+1}/${users.length}] ⏭️ Already messaged ${phone}, skipping...`);
+                // Check if we already processed this person (either successfully or confirmed invalid/unreachable)
+                if (progress[phone] !== undefined) {
                     continue;
                 }
 
@@ -92,6 +113,7 @@ async function processUsers() {
                         },
                         text: message
                     }, {
+                        timeout: 15000, // 15 seconds timeout
                         headers: {
                             'apikey': API_KEY,
                             'Content-Type': 'application/json'
@@ -99,19 +121,59 @@ async function processUsers() {
                     });
                     
                     console.log(`✅ Success!`);
-                    saveProgress(phone); // Save to file immediately so we don't message them again
+                    saveProgress(phone, true); // Save as true (success)
                     sentCount++;
+                    consecutiveErrors = 0;
+                    
+                    // Random delay between 30 to 60 seconds ONLY on success to avoid bans
+                    const waitTime = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
+                    console.log(`⏳ Waiting ${Math.round(waitTime / 1000)} seconds before next...`);
+                    await delay(waitTime);
                 } catch (error) {
-                    console.error(`❌ Failed to send to ${phone}:`, error.response?.data || error.message);
-                }
+                    const errorData = error.response?.data;
+                    const errorStr = JSON.stringify(errorData || '');
+                    const isRecipientIssue = 
+                        error.response?.status === 400 && 
+                        (errorData?.response?.message?.[0]?.exists === false || 
+                         errorStr.includes('SessionError') || 
+                         errorData?.error === 'Bad Request');
 
-                // Random delay between 30 to 60 seconds for the production blast to avoid bans
-                const waitTime = Math.floor(Math.random() * (60000 - 30000 + 1)) + 30000;
-                console.log(`⏳ Waiting ${Math.round(waitTime / 1000)} seconds before next...`);
-                await delay(waitTime);
+                    if (isRecipientIssue) {
+                        const reason = errorData?.response?.message?.[0]?.exists === false 
+                            ? 'not on WhatsApp' 
+                            : (errorData?.response?.message?.[0] || 'invalid/no session');
+                        console.warn(`⚠️ Recipient ${phone} skipped: ${reason}`);
+                        saveProgress(phone, false);
+                        await delay(2000);
+                    } else {
+                        // Infrastructure / Network / Socket disconnect error
+                        console.error(`🚨 Connection error sending to ${phone}:`, errorData?.error || error.message);
+                        consecutiveErrors++;
+
+                        if (consecutiveErrors >= 3) {
+                            console.error(`🚨 3 consecutive infrastructure errors encountered. Halting campaign safely to prevent list corruption.`);
+                            process.exit(1);
+                        }
+
+                        console.log(`⏳ Pausing 15 seconds to allow connection recovery...`);
+                        await delay(15000);
+                        const healthy = await checkConnection();
+                        if (!healthy) {
+                            console.error(`🚨 WhatsApp connection lost. Halting campaign safely.`);
+                            process.exit(1);
+                        }
+                        // Retry this user
+                        i--;
+                    }
+                }
             }
             console.log(`\n🎉 Campaign completed! Sent ${sentCount} new messages.`);
         });
 }
+
+process.on('SIGINT', () => {
+    console.log('\n🛑 Campaign gracefully paused by user. Progress is saved.');
+    process.exit(0);
+});
 
 processUsers();

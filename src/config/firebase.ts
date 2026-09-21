@@ -1,8 +1,9 @@
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { 
-  getFirestore, 
+  getFirestore,
   Firestore,
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
@@ -62,6 +63,7 @@ export {
   type ConfirmationResult,
   // Firestore exports
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,

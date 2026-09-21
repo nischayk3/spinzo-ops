@@ -2,6 +2,7 @@ import firebase from '@react-native-firebase/app';
 import authInstance, { onAuthStateChanged, signInWithPhoneNumber, signOut, ConfirmationResult } from '@react-native-firebase/auth';
 import firestore, {
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
@@ -41,6 +42,7 @@ export {
   signOut,
   type ConfirmationResult,
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
