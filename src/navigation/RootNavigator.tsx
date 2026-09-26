@@ -185,7 +185,10 @@ export function RootNavigator() {
       const { isLoggedIn, logout } = useAuthStore.getState();
       const { staffDoc } = useOpsStaffStore.getState();
 
-      if (!isLoggedIn || staffDoc === null || staffDoc === undefined) return;
+      // Supervisors don't clock in/out via QR, so their ops_staff.onShift stays
+      // false — never force-logout a supervisor from on-shift state.
+      if (!isLoggedIn || activeRole === 'supervisor') return;
+      if (staffDoc === null || staffDoc === undefined) return;
 
       // Server-enforced logout: the daily scheduler (scheduleForceLogout) set
       // onShift:false on all staff. If our live staff doc explicitly shows off-shift,
