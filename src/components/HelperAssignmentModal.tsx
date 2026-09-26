@@ -22,7 +22,7 @@ export function HelperAssignmentModal() {
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
-  const activeTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources) : null;
+  const activeTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources, staffDoc.onShift === true) : null;
   const order = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
 
   useEffect(() => {

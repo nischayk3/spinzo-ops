@@ -130,8 +130,14 @@ export function getTopEligibleTask(
   uid: string,
   role: string,
   activeTask: ActiveHelperTask | null,
-  resources: StoreResources = { washers: 1, dryers: 1, ironingStations: 1 }
+  resources: StoreResources = { washers: 1, dryers: 1, ironingStations: 1 },
+  onShift = true
 ): OpsProcess | null {
+  // ✅ SHIFT GATE: an off-shift helper (not clocked in via QR) must NOT be shown
+  // — or be able to receive — any task. This is the fix for helpers receiving
+  // orders without clocking in.
+  if (!onShift) return null;
+
   // ── Pre-compute helper's personal machine status ──
   const isBusyWithMachine = processes.some(p => {
     const cur = currentStep(p);
