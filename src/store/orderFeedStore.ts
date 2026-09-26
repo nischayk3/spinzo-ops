@@ -3,7 +3,6 @@ import {
   collectionGroup,
   onSnapshot,
   query,
-  QueryDocumentSnapshot,
 } from '../config/firebase';
 import { db } from '../config/firebase';
 import { FeedOrder, sortNewestFirst } from '../utils/orderFeed';
@@ -16,7 +15,7 @@ interface OrderFeedState {
   reset: () => void;
 }
 
-const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
+const orderFromDoc = (d: any): FeedOrder => {
   const data = d.data() as any;
   // For vendor-mirror docs the path parent is the vendor id, so this fallback is best-effort.
   const userId = data.userId || (d.ref.parent?.parent as any)?.id || '';
@@ -29,13 +28,16 @@ const orderFromDoc = (d: QueryDocumentSnapshot): FeedOrder => {
     customerPhone: data.customerPhone || data.userPhone,
     pickupDetails: data.pickupDetails || data.pickup,
     items: data.items || [],
-    totalAmount: data.totalAmount || data.cartTotal,
+    totalAmount: data.totalAmount || data.billDetails?.total || data.cartTotal,
+    billDetails: data.billDetails,
     paymentStatus: data.paymentStatus || data.paymentMethod,
     notes: data.notes || data.instruction,
     tokenNumber: data.tokenNumber,
     pickupOTP: data.pickupOTP,
     storeOTP: data.storeOTP,
     address: data.address,
+    latitude: data.latitude,
+    longitude: data.longitude,
     processingStep: data.processingStep,
     deliveryDate: data.deliveryDate,
     deliveryTime: data.deliveryTime,

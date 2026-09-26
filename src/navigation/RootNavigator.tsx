@@ -6,6 +6,7 @@ import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
+import { useStaffRosterStore } from '../store/staffRosterStore';
 import { LoginScreen } from '../screens/Auth/LoginScreen';
 import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { PermissionsScreen } from '../screens/Auth/PermissionsScreen';
@@ -14,6 +15,7 @@ import { FloorBoardScreen } from '../screens/Queue/FloorBoardScreen';
 import { PickupsScreen } from '../screens/Rider/PickupsScreen';
 import { DashboardScreen } from '../screens/Home/DashboardScreen';
 import { SupervisorDashboardScreen } from '../screens/Supervisor/SupervisorDashboardScreen';
+import { CustomerDetailScreen } from '../screens/Supervisor/CustomerDetailScreen';
 import { ProcessingScreen } from '../screens/Helper/ProcessingScreen';
 import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
@@ -31,6 +33,7 @@ export type RootStackParamList = {
   Permissions: undefined;
   Main: undefined;
   OrderDetail: { orderId: string, processId?: string };
+  CustomerDetail: { phone: string };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -116,7 +119,41 @@ const AppTabs = () => {
 export function RootNavigator() {
   const { isLoggedIn, activeRole, authInitialized, initializeAuth, user } = useAuthStore();
   const [hasGrantedPermissions, setHasGrantedPermissions] = React.useState(false);
+  const [permissionsLoaded, setPermissionsLoaded] = React.useState(false);
   useLifecycleNotifications();
+
+  // Persist the "App Setup done" decision so a page reload doesn't force the
+  // rider to re-grant camera/location every time. Per-platform storage keeps it across
+  // sessions without re-prompting (the OS permission itself already persists).
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          const v = window.localStorage.getItem('ops_permissions_granted');
+          if (mounted) setHasGrantedPermissions(v === '1');
+        } else {
+          const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+          const v = await AsyncStorage.getItem('ops_permissions_granted');
+          if (mounted) setHasGrantedPermissions(v === '1');
+        }
+      } catch { /* non-fatal */ }
+      if (mounted) setPermissionsLoaded(true);
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const handlePermissionsComplete = () => {
+    setHasGrantedPermissions(true);
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        window.localStorage.setItem('ops_permissions_granted', '1');
+      } else {
+        import('@react-native-async-storage/async-storage').then((m) =>
+          m.default.setItem('ops_permissions_granted', '1'));
+      }
+    } catch { /* non-fatal */ }
+  };
 
   useEffect(() => {
     initializeAuth();
@@ -135,6 +172,10 @@ export function RootNavigator() {
       if (activeRole === 'helper' || activeRole === 'iron') {
         useOpsProcessStore.getState().initialize(uid);
       }
+      if (activeRole === 'supervisor') {
+        useOrderFeedStore.getState().initialize();
+        useStaffRosterStore.getState().initialize();
+      }
     }
   }, [uid, activeRole]);
 
@@ -143,8 +184,17 @@ export function RootNavigator() {
     const checkExpiry = () => {
       const { isLoggedIn, logout } = useAuthStore.getState();
       const { staffDoc } = useOpsStaffStore.getState();
-      
-      if (!isLoggedIn || !staffDoc?.onShift) return;
+
+      if (!isLoggedIn || staffDoc === null || staffDoc === undefined) return;
+
+      // Server-enforced logout: the daily scheduler (scheduleForceLogout) set
+      // onShift:false on all staff. If our live staff doc explicitly shows off-shift,
+      // sign out so the app reflects the forced clock-out even if we missed it locally.
+      if (staffDoc.onShift === false) {
+        logout();
+        return;
+      }
+      if (!staffDoc.onShift) return;
 
       const now = new Date();
       // 1. Check if past 11:30 PM
@@ -193,9 +243,17 @@ export function RootNavigator() {
           <Stack.Screen name="Login" component={LoginScreen} />
         ) : !activeRole ? (
           <Stack.Screen name="NotInRoster" component={NotInRosterScreen} />
+        ) : !permissionsLoaded ? (
+          <Stack.Screen name="Permissions">
+            {() => (
+              <View style={{ flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center' }}>
+                <ActivityIndicator size="large" color="#3B82F6" />
+              </View>
+            )}
+          </Stack.Screen>
         ) : !hasGrantedPermissions ? (
           <Stack.Screen name="Permissions">
-            {() => <PermissionsScreen onComplete={() => setHasGrantedPermissions(true)} />}
+            {() => <PermissionsScreen onComplete={handlePermissionsComplete} />}
           </Stack.Screen>
         ) : (
           <Stack.Screen name="Main" component={AppTabs} />
@@ -204,6 +262,10 @@ export function RootNavigator() {
           name="OrderDetail"
           component={OrderDetailScreen}
           options={{ presentation: 'modal' }}
+        />
+        <Stack.Screen
+          name="CustomerDetail"
+          component={CustomerDetailScreen}
         />
       </Stack.Navigator>
       {isLoggedIn && activeRole === 'rider' && <GlobalAssignmentModal />}

@@ -1,18 +1,31 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, Alert, Linking, Platform } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Package, Clock, MapPin, ShieldCheck, Phone, Navigation } from 'lucide-react-native';
+import { Package } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore, DeliveryTask } from '../../store/opsStaffStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { timeAgo } from '../../utils/orderFeed';
+import { timeAgo, orderTotal, FeedOrder } from '../../utils/orderFeed';
 import { DeliveryVerification } from '../../components/DeliveryVerification';
 import { QRScanner } from '../../components/QRScanner';
+import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
+
+const HIDE_OLDER_THAN_MS = 24 * 60 * 60 * 1000; // deliveries older than 24h are hidden
+const OVERDUE_MS = 4 * 60 * 60 * 1000; // >4h out_for_delivery = overdue
+
+const toMs = (t: any): number => {
+  if (!t) return 0;
+  if (typeof t.toDate === 'function') return t.toDate().getTime();
+  if (typeof t.seconds === 'number') return t.seconds * 1000;
+  if (typeof t.getTime === 'function') return t.getTime();
+  return 0;
+};
 
 export function DeliveriesScreen() {
   const user = useAuthStore(state => state.user);
   const { myDeliveries, isLoading, initialize } = useOpsStaffStore();
+  const orders = useOrderFeedStore(state => state.orders);
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [showPickupScanner, setShowPickupScanner] = useState<string | null>(null);
@@ -22,20 +35,26 @@ export function DeliveriesScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Only show active delivery tasks (assigned or out_for_delivery) whose order isn't cancelled
-  const activeDeliveries = myDeliveries.filter(d => {
-    if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
-    // Cross-check: if the corresponding order is cancelled, hide this delivery
-    const order = useOrderFeedStore.getState().orders.find(o => o.id === d.orderId);
-    if (order && order.status === 'cancelled') return false;
-    return true;
-  });
-  const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
+  const activeDeliveries = myDeliveries
+    .filter(d => {
+      if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
+      const order = orders.find(o => o.id === d.orderId);
+      if (order && order.status === 'cancelled') return false;
+      // Hide dead deliveries older than 24h
+      const created = toMs(d.createdAt);
+      if (created && Date.now() - created > HIDE_OLDER_THAN_MS) return false;
+      return true;
+    })
+    .sort((a, b) => toMs(b.createdAt) - toMs(a.createdAt));
 
-  const handlePickupScan = async (taskId: string, data: string) => {
+  const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
+  const orderFor = (t: DeliveryTask): FeedOrder | undefined => orders.find(o => o.id === t.orderId);
+  const isOverdue = (t: DeliveryTask) =>
+    t.status === 'out_for_delivery' && toMs(t.pickedUpAt || t.assignedAt) && Date.now() - toMs(t.pickedUpAt || t.assignedAt) > OVERDUE_MS;
+
+  const handlePickupScan = async (taskId: string, _data: string) => {
     const task = myDeliveries.find(d => d.id === taskId);
     if (!task) return;
-    
     setShowPickupScanner(null);
     try {
       const res = await useOpsProcessStore.getState().pickupDelivery(task.orderId);
@@ -53,9 +72,8 @@ export function DeliveriesScreen() {
     if (!activeTaskId || otp.length !== 4) return false;
     const task = myDeliveries.find(d => d.id === activeTaskId);
     if (!task) return false;
-
     try {
-      const res = await useOpsProcessStore.getState().verifyDeliveryOTP(task.orderId, task.userId, otp, proofUrl);
+      const res = await useOpsProcessStore.getState().verifyDeliveryOTP(task.orderId, task.userId, otp, proofUrl || undefined);
       if (res.ok) {
         setActiveTaskId(null);
         Alert.alert('Delivery verified', 'Order marked as delivered.');
@@ -75,20 +93,6 @@ export function DeliveriesScreen() {
     }
   };
 
-  const openDirections = (task: DeliveryTask) => {
-    const addr = task.deliveryAddress || '';
-    if (!addr) {
-      Alert.alert('No Address', 'No delivery address available for this order.');
-      return;
-    }
-    const url = Platform.OS === 'ios'
-      ? `maps:0,0?q=${encodeURIComponent(addr)}`
-      : `geo:0,0?q=${encodeURIComponent(addr)}`;
-    Linking.openURL(url).catch(() =>
-      Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`)
-    );
-  };
-
   if (isLoading && activeDeliveries.length === 0) {
     return (
       <SafeAreaView className="flex-1 bg-bgDark items-center justify-center">
@@ -101,14 +105,16 @@ export function DeliveriesScreen() {
   return (
     <SafeAreaView className="flex-1 bg-bgDark">
       <View className="px-4 pt-4 pb-2">
-        <Text className="text-2xl font-bold text-textPrimary">My Deliveries</Text>
+        <Text className="text-2xl font-bold text-textPrimary">Deliveries</Text>
         <Text className="text-textSecondary">
-          {activeDeliveries.length} active deliver{activeDeliveries.length === 1 ? 'y' : 'ies'}
+          {activeDeliveries.length} active delivery{activeDeliveries.length === 1 ? '' : 'ies'}
         </Text>
       </View>
+
       <FlatList
-        data={activeDeliveries}
-        keyExtractor={t => t.id}
+        data={activeDeliveries.length ? [0] : []}
+        keyExtractor={() => 'list'}
+        renderItem={() => null}
         className="flex-1 px-4"
         contentContainerStyle={{ paddingBottom: 24 }}
         ListEmptyComponent={
@@ -118,97 +124,44 @@ export function DeliveriesScreen() {
             <Text className="text-textMuted text-center mt-2">Assigned deliveries appear here instantly.</Text>
           </View>
         }
-        renderItem={({ item }) => {
-          return (
-            <View className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight">
-              <View className="flex-row items-center justify-between mb-2">
-                <View>
-                  <Text className="text-textPrimary font-bold text-lg">
-                    #{item.orderId.slice(-6).toUpperCase()}
-                  </Text>
-                  {item.customerName ? (
-                    <Text className="text-textSecondary text-sm">{item.customerName}</Text>
+        ListHeaderComponent={
+          <>
+            {activeDeliveries.map(t => {
+              const order = orderFor(t);
+              const overdue = isOverdue(t);
+              return (
+                <View key={t.id}>
+                  {overdue ? (
+                    <View className="bg-red-500/15 border border-red-500/40 rounded-lg px-3 py-1.5 mb-2 items-center">
+                      <Text className="text-red-400 text-xs font-bold">OVERDUE — pending delivery</Text>
+                    </View>
                   ) : null}
+                  <RiderTaskCard
+                    type="delivery"
+                    orderNumber={t.orderId.slice(-6).toUpperCase()}
+                    customerName={t.customerName || order?.customerName}
+                    customerPhone={t.customerPhone || order?.customerPhone}
+                    status={t.status}
+                    createdAt={t.createdAt || order?.createdAt}
+                    items={order?.items || t.items}
+                    totalAmount={order ? orderTotal(order) : t.totalAmount}
+                    paymentStatus={order?.paymentStatus}
+                    deliveryAddress={t.deliveryAddress}
+                    deliveryDate={t.deliveryDate}
+                    deliveryTime={t.deliveryTime}
+                    notes={order?.notes}
+                    tokenNumber={order?.tokenNumber}
+                    lat={order?.latitude}
+                    lng={order?.longitude}
+                    bundleCount={t.bundleCount}
+                    onPrimary={() => t.status === 'assigned' ? setShowPickupScanner(t.id) : setActiveTaskId(t.id)}
+                    primaryLabel={t.status === 'assigned' ? 'Verify Pickup' : 'Deliver'}
+                  />
                 </View>
-                {item.createdAt ? (
-                  <View className="flex-row items-center gap-1">
-                    <Clock size={14} color="#94a3b8" />
-                    <Text className="text-textMuted text-xs">{timeAgo(item.createdAt)}</Text>
-                  </View>
-                ) : null}
-              </View>
-
-              {/* Delivery Address */}
-              {item.deliveryAddress ? (
-                <View className="flex-row items-start gap-2 mb-3 bg-bgDark p-3 rounded-lg">
-                  <View className="w-8 h-8 rounded-full bg-bgSurfaceLight items-center justify-center mr-1">
-                    <MapPin size={14} color="#3B82F6" />
-                  </View>
-                  <View className="flex-1">
-                    <Text className="text-textSecondary text-sm leading-tight mb-2">{item.deliveryAddress}</Text>
-                    <TouchableOpacity 
-                      onPress={() => {
-                        // Assuming delivery task uses same lat/long structure if available on order
-                        const order = useOrderFeedStore.getState().orders.find(o => o.id === item.orderId);
-                        let addr = item.deliveryAddress || '';
-                        if (order?.address?.latitude && order?.address?.longitude) {
-                          addr = `${order.address.latitude},${order.address.longitude}`;
-                        }
-                        const url = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(addr)}`;
-                        Linking.openURL(url).catch(() => console.log('Could not open map URL:', url));
-                      }}
-                      className="flex-row items-center"
-                    >
-                      <Navigation size={12} color="#3B82F6" className="mr-1" />
-                      <Text className="text-info text-xs font-bold">Get Directions</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              ) : null}
-
-              {/* Delivery Slot */}
-              {item.deliveryDate && item.deliveryTime ? (
-                <View className="flex-row items-center gap-2 mb-3 bg-green-500/10 p-2 rounded-lg">
-                  <Clock size={14} color="#22c55e" />
-                  <Text className="text-green-400 text-sm font-medium">
-                    Slot: {item.deliveryDate}, {item.deliveryTime}
-                  </Text>
-                </View>
-              ) : null}
-
-              {/* Customer Phone */}
-              {item.customerPhone ? (
-                <TouchableOpacity
-                  onPress={() => Linking.openURL(`tel:${item.customerPhone}`)}
-                  className="flex-row items-center gap-2 mb-3"
-                >
-                  <Phone size={14} color="#94a3b8" />
-                  <Text className="text-info text-sm">{item.customerPhone}</Text>
-                </TouchableOpacity>
-              ) : null}
-
-              {/* Action Buttons */}
-              <View className="flex-row gap-2">
-                <TouchableOpacity
-                  onPress={() => openDirections(item)}
-                  className="flex-1 bg-blue-500/15 border border-blue-500/40 rounded-lg h-11 items-center justify-center flex-row"
-                >
-                  <Navigation size={16} color="#3B82F6" />
-                  <Text className="text-info font-bold ml-2">Directions</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => item.status === 'assigned' ? setShowPickupScanner(item.id) : setActiveTaskId(item.id)}
-                  className="flex-1 bg-green-500/15 border border-green-500/40 rounded-lg h-11 items-center justify-center flex-row"
-                >
-                  <Package size={16} color="#22c55e" />
-                  <Text className="text-green-400 font-bold ml-2">
-                    {item.status === 'assigned' ? 'Verify Pickup' : 'Deliver'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          );
-        }}
+              );
+            })}
+          </>
+        }
       />
 
       <DeliveryVerification

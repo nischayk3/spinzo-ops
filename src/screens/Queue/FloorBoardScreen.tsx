@@ -3,7 +3,7 @@ import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, L
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Search, ChevronRight, Phone, MapPin, PackageOpen } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary } from '../../utils/orderFeed';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal } from '../../utils/orderFeed';
 import { stepLabel } from '../../utils/opsProcess';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -22,7 +22,7 @@ const STATUS_LABEL: Record<string, string> = {
 };
 
 // We include 'all' plus specific categories for the horizontal tabs
-const FILTER_TABS = ['All', 'Action Required', 'Processing', 'Ready', 'Out for Delivery'];
+const FILTER_TABS = ['All', 'Action Required', 'Processing', 'Ready', 'Out for Delivery', 'Delivered', 'Cancelled'];
 
 export function FloorBoardScreen() {
   const { orders, isLoading, initialize } = useOrderFeedStore();
@@ -66,6 +66,10 @@ export function FloorBoardScreen() {
       result = result.filter(o => String(o.status).toLowerCase() === 'ready');
     } else if (activeTab === 'Out for Delivery') {
       result = result.filter(o => String(o.status).toLowerCase() === 'out_for_delivery');
+    } else if (activeTab === 'Delivered') {
+      result = result.filter(o => String(o.status).toLowerCase() === 'delivered');
+    } else if (activeTab === 'Cancelled') {
+      result = result.filter(o => String(o.status).toLowerCase() === 'cancelled');
     }
 
     return result;
@@ -183,7 +187,7 @@ export function FloorBoardScreen() {
 
                 <View className="items-end">
                   <Text className="text-gray-900 font-bold text-lg">
-                    {item.totalAmount ? `₹${item.totalAmount}` : '—'}
+                    {orderTotal(item) > 0 ? `₹${orderTotal(item)}` : '—'}
                   </Text>
                   <Text className="text-gray-400 text-xs font-medium uppercase mt-0.5">
                     {item.paymentStatus || 'Pending'}

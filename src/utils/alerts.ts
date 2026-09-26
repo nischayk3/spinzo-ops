@@ -71,15 +71,16 @@ let singleLoopTimeout: ReturnType<typeof setTimeout> | null = null;
 export async function unlockAudio() {
   const ac = ensureAudioCtx();
   if (ac) ac.resume().catch(() => {});
-  
+
   try {
-    // Play a silent burst to unlock the audio engine on iOS
+    // Play a silent 20ms burst to unlock the audio engine.
+    // DON'T pause() after — let the engine stay warm so a subsequent play()
+    // from dramaticChime isn't racing against a pending pause() timeout.
     alarmSound.volume = 0;
     alarmSound.play();
-    setTimeout(() => {
-        alarmSound.pause();
-        alarmSound.volume = 1;
-    }, 100);
+    // Reset volume in the background without pausing; the zero-volume burst
+    // is imperceptible and keeps the audio session alive.
+    setTimeout(() => { alarmSound.volume = 1; }, 50);
   } catch (e) {
     console.log('Audio unlock failed:', e);
   }
@@ -199,6 +200,18 @@ export function announceAssignedDelivery(orderId: string, address: string) {
 export function announceStageTransition(orderId: string, stageName: string) {
   lifecycleChime();
   speak(`Order ${orderId.slice(-6).toUpperCase()} moved to ${stageName}`);
+}
+
+// Dedupe supervisor "skipped order" alarms so we don't re-ring for the same order.
+const skippedNotified = new Set<string>();
+
+/** Ring the "You skipped an order" alert for an inbound order the floor hasn't claimed. */
+export function announceSkippedOrder(orderId: string) {
+  if (skippedNotified.has(orderId)) return;
+  skippedNotified.add(orderId);
+  // Short one-shot burst (loop:false stops after ~2.5s) — do NOT use a looping siren.
+  dramaticChime(false);
+  speak(`You skipped order ${orderId.slice(-6).toUpperCase()}`);
 }
 
 /** Confirmation sound for successful actions */

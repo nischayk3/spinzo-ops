@@ -7,7 +7,7 @@ import { Inbox, Clock, Phone, MapPin, ChevronDown } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, FeedOrder } from '../../utils/orderFeed';
+import { serviceSummary, FeedOrder, orderTotal } from '../../utils/orderFeed';
 import { currentStep, isDone, myInProgress, stage, stepLabel, stepQueue, OpsProcess } from '../../utils/opsProcess';
 import { slaRemainingMinutes, slaTone, STAGE_SLA_MINUTES, SlaTone } from '../../utils/sla';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
@@ -248,7 +248,7 @@ function SupervisorFeed() {
       <TouchableOpacity
         key={item.key}
         onPress={() => handleItemPress(item)}
-        className="bg-white rounded-3xl p-5 mb-4 shadow-sm border border-gray-100"
+        className="bg-bgSurface rounded-3xl p-5 mb-4 border border-bgSurfaceLight active:opacity-90"
       >
         <View className="flex-row justify-between mb-2">
           <View className="flex-1 mr-2">
@@ -262,48 +262,48 @@ function SupervisorFeed() {
                 </View>
               )}
               {!!p?.tokenNumber && (
-                <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
-                  <Text className="text-amber-800 font-bold text-xs">T-{p.tokenNumber}</Text>
+                <View className="bg-amber-500/15 px-2 py-0.5 rounded border border-amber-500/30">
+                  <Text className="text-warning font-bold text-xs">T-{p.tokenNumber}</Text>
                 </View>
               )}
             </View>
             {p && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
           <View className="items-end justify-start shrink-0">
-            <View className={`px-2 py-1 rounded-md ${done ? 'bg-green-100' : 'bg-[#994bff]/10'}`}>
-              <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-[#994bff]'}`}>{badge}</Text>
+            <View className={`px-2 py-1 rounded-md ${done ? 'bg-green-500/15' : 'bg-primary/10'}`}>
+              <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-primary'}`}>{badge}</Text>
             </View>
           </View>
         </View>
 
-        <View className="flex-row items-center justify-between mb-3 border-b border-gray-100 pb-3">
+        <View className="flex-row items-center justify-between mb-3 border-b border-bgSurfaceLight pb-3">
           <View className="flex-1">
-            <Text className="text-gray-900 font-medium text-base mb-1">{order?.customerName || 'Unknown Customer'}</Text>
-            {!!order?.phone && (
-              <TouchableOpacity onPress={() => Linking.openURL(`tel:${order.phone}`)} className="flex-row items-center">
-                <Phone size={12} color="#64748B" className="mr-1" />
-                <Text className="text-gray-500 text-xs">{order.phone}</Text>
+            <Text className="text-textPrimary font-medium text-base mb-1">{order?.customerName || 'Unknown Customer'}</Text>
+            {!!order?.customerPhone && (
+              <TouchableOpacity onPress={() => Linking.openURL(`tel:${order.customerPhone}`)} className="flex-row items-center">
+                <Phone size={12} color="#94A3B8" className="mr-1" />
+                <Text className="text-textSecondary text-xs">{order.customerPhone}</Text>
               </TouchableOpacity>
             )}
             <View className="flex-row items-center mt-1 flex-wrap">
-              {qty > 0 && <Text className="text-gray-500 text-xs mr-2">{qty} units (kgs/pcs)</Text>}
-              {!!p?.garments?.count && <Text className="text-[#994bff] font-bold text-xs bg-purple-50 px-1.5 py-0.5 rounded mr-2">{p.garments.count} garments</Text>}
+              {qty > 0 && <Text className="text-textSecondary text-xs mr-2">{qty} units (kgs/pcs)</Text>}
+              {!!p?.garments?.count && <Text className="text-primary font-bold text-xs bg-primary/10 px-1.5 py-0.5 rounded mr-2">{p.garments.count} garments</Text>}
             </View>
           </View>
           <View className="items-end">
-            <Text className="text-gray-900 font-medium">{p ? p.serviceLabel : (order ? serviceSummary(order) : '—')}</Text>
-            {order?.totalAmount && <Text className="text-gray-500 text-xs">₹{order.totalAmount}</Text>}
+            <Text className="text-textPrimary font-medium">{p ? p.serviceLabel : (order ? serviceSummary(order) : '—')}</Text>
+            {!!order && orderTotal(order) > 0 && <Text className="text-textSecondary text-xs">₹{orderTotal(order)}</Text>}
           </View>
         </View>
 
         <View className="flex-row items-center justify-between">
           <View>
-            {!!order?.deliverySlot && (
+            {(order?.deliverySlot || order?.deliveryDate) ? (
               <View className="flex-row items-center mb-1">
-                <MapPin size={12} color="#64748B" className="mr-1" />
-                <Text className="text-gray-500 text-xs">Delivery: {order.deliverySlot}</Text>
+                <MapPin size={12} color="#94A3B8" className="mr-1" />
+                <Text className="text-textSecondary text-xs">{order?.deliverySlot || `${order.deliveryDate || ''} ${order.deliveryTime || ''}`.trim()}</Text>
               </View>
-            )}
+            ) : null}
             
             {/* Tagging SLA / Urgency */}
             {!p && order?.createdAt && <UrgencyCountdown createdAt={order.createdAt} />}
@@ -321,13 +321,13 @@ function SupervisorFeed() {
           
           {/* Actions / Timers */}
           {isMine && startTimeMs > 0 && (
-            <View className="bg-purple-50 px-3 py-2 rounded-xl flex-row items-center gap-2">
-              <View className="w-2 h-2 rounded-full bg-red-500" />
+            <View className="bg-primary/10 px-3 py-2 rounded-xl flex-row items-center gap-2">
+              <View className="w-2 h-2 rounded-full bg-error" />
               <LiveTimer startTimeMs={startTimeMs} />
             </View>
           )}
           {!isMine && cur === 'tagging' && (
-             <View className="bg-[#994bff] px-3 py-2 rounded-xl">
+             <View className="bg-primary px-4 py-2.5 rounded-xl">
                <Text className="text-white font-bold text-xs">Start Tagging</Text>
              </View>
           )}
@@ -338,9 +338,9 @@ function SupervisorFeed() {
 
   if (isLoading && processes.length === 0) {
     return (
-      <SafeAreaView className="flex-1 bg-white items-center justify-center">
+      <SafeAreaView className="flex-1 bg-bgDark items-center justify-center">
         <ActivityIndicator size="large" color="#994bff" />
-        <Text className="text-gray-500 mt-4 font-bold">Loading queue…</Text>
+        <Text className="text-textSecondary mt-4 font-bold">Loading queue…</Text>
       </SafeAreaView>
     );
   }

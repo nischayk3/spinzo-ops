@@ -1,4 +1,5 @@
 const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
 const { pickRider, pickupGuard, normalizePhone, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS } = require('./dispatch');
@@ -116,6 +117,31 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const wentOnShift = before && before.onShift !== true && after.onShift === true;
   if (!wentOnShift || after.role !== 'rider') return;
 
+  // Reassign stale pickups: orders placed on a PREVIOUS day (or earlier) that are
+  // still `pending` but whose original assignee is no longer on shift. This brings
+  // scheduled pickups (e.g. placed 3 days ago for today) into the queue of the
+  // rider(s) who are actually on shift now.
+  const newRiderUid = event.params.staffId;
+  const taskQuery = await db.collection('ops_tasks').where('status', 'in', ['pending', 'assigned']).limit(200).get();
+  for (const taskDoc of taskQuery.docs) {
+    const td = taskDoc.data();
+    if (td.assignee === newRiderUid) continue;
+    // If the original assignee is still on shift, leave it — don't steal their task.
+    if (td.assignee) {
+      const orig = await db.doc(`ops_staff/${td.assignee}`).get();
+      if (orig.exists && orig.data().onShift === true) continue;
+    }
+    // Re-point the pending pickup to the newly on-shift rider.
+    try {
+      await db.doc(`ops_tasks/${taskDoc.id}`).update({
+        assignee: newRiderUid,
+        assignedAt: TS(),
+      });
+    } catch (err) {
+      console.error(`onShiftCatchUp: reassign ${taskDoc.id} failed`, err);
+    }
+  }
+
   // Oldest parked orders first (top-level collection, single-field index — no composite index).
   const queue = await db.collection('ops_queue').orderBy('createdAt', 'asc').limit(50).get();
   const pending = queue.docs.filter((d) => d.data().status === 'pending');
@@ -124,6 +150,22 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
     const orderId = entry.id;
     const data = entry.data();
     try {
+      const userId = data.userId;
+      // ⚠️ STATE SYNC: only assign a parked pickup to a rider if the order is
+      // STILL waiting for pickup. A parked order that has already transitioned out of
+      // placed/confirmed (pickup_completed/processing/ready/...) must NOT be offered
+      // as a new pickup. Without this, old orders flood the rider queue on shift start.
+      if (userId) {
+        const orderSnap = await db.doc(`users/${userId}/orders/${orderId}`).get();
+        if (orderSnap.exists) {
+          const st = orderSnap.data().status;
+          if (st && st !== 'placed' && st !== 'confirmed') {
+            // Pickup already done or order progressed — drop the stale parked entry.
+            await db.doc(`ops_queue/${orderId}`).delete();
+            continue;
+          }
+        }
+      }
       const assignee = await selectRider();
       if (!assignee) continue; // still no eligible rider; leave parked
       await db.runTransaction(async (tx) => {
@@ -151,6 +193,25 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
     } catch (err) {
       console.error(`catch-up failed for ${orderId}`, err);
     }
+  }
+});
+
+// ─── Daily 11:30 PM force-logout for all staff ─────────────────────────────
+// Clears onShift so that helpers/riders clock out even if their app is closed
+// or the client-side heartbeat missed. Runs daily at 18:00 UTC = 11:30 PM IST.
+exports.scheduleForceLogout = onSchedule('30 18 * * *', async () => {
+  const batch = db.batch();
+  const snap = await db.collection('ops_staff').where('onShift', '==', true).get();
+  let count = 0;
+  snap.forEach((doc) => {
+    batch.set(doc.ref, { onShift: false, shiftEndAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    count++;
+  });
+  if (count > 0) {
+    await batch.commit();
+    console.log(`scheduleForceLogout: logged out ${count} staff member(s).`);
+  } else {
+    console.log('scheduleForceLogout: no staff currently on shift.');
   }
 });
 

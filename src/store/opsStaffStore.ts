@@ -65,9 +65,16 @@ export interface DeliveryTask {
   deliveryOTP: string | null;
   customerName: string;
   customerPhone: string;
+  bundleCount?: number;
+  bundleLabels?: { seq: number; qr: string }[];
+  items?: any[];
+  totalAmount?: number;
+  createdAt?: unknown;
   assignedAt?: unknown;
   acceptedAt?: unknown;
-  createdAt?: unknown;
+  pickedUpAt?: unknown;
+  deliveredAt?: unknown;
+  proofUrl?: string | null;
 }
 
 interface OpsStaffState {
@@ -153,11 +160,18 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             deliveryDate: d.deliveryDate || null,
             deliveryTime: d.deliveryTime || null,
             deliveryOTP: d.deliveryOTP || null,
-            customerName: d.customerName || '',
-            customerPhone: d.customerPhone || '',
+            customerName: d.customerName || d.userName || '',
+            customerPhone: d.customerPhone || d.userPhone || '',
+            bundleCount: d.bundleCount,
+            bundleLabels: d.bundleLabels || [],
+            items: d.items,
+            totalAmount: d.totalAmount,
             assignedAt: d.assignedAt,
             acceptedAt: d.acceptedAt,
             createdAt: d.createdAt,
+            pickedUpAt: d.pickedUpAt,
+            deliveredAt: d.deliveredAt,
+            proofUrl: d.proofUrl || null,
           };
           deliveries.push(task);
           if (shouldAnnounce(task, announcedTaskIds) && docSnap.id) {
