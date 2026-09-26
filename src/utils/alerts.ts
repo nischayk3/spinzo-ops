@@ -77,7 +77,9 @@ export async function unlockAudio() {
     // DON'T pause() after — let the engine stay warm so a subsequent play()
     // from dramaticChime isn't racing against a pending pause() timeout.
     alarmSound.volume = 0;
-    alarmSound.play();
+    // Attach .catch() so the play() promise's rejection (e.g. AbortError when a
+    // subsequent pause() interrupts it) is handled, not logged as an uncaught ERROR.
+    Promise.resolve().then(() => { try { alarmSound.play(); } catch (e) { /* best-effort */ } });
     // Reset volume in the background without pausing; the zero-volume burst
     // is imperceptible and keeps the audio session alive.
     setTimeout(() => { alarmSound.volume = 1; }, 50);
@@ -101,7 +103,7 @@ export async function dramaticChime(loop: boolean = true) {
     } else if (typeof alarmSound.currentTime !== 'undefined') {
         alarmSound.currentTime = 0;
     }
-    alarmSound.play();
+    try { alarmSound.play(); } catch (e) { /* silence AbortError */ }
 
     // If we only want a single loop (e.g. for Supervisor new order),
     // we manually stop it after 2.5 seconds (roughly one MP3 loop).

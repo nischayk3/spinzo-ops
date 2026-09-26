@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
@@ -10,7 +10,7 @@ import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary } from '../../utils/orderFeed';
+import { serviceSummary, orderTotal } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
@@ -46,6 +46,17 @@ const friendlyActionError = (code: string): string => {
     use_submit: 'Use Submit Tagged Garments to finish tagging.',
   };
   return map[code] || code || 'Request failed.';
+};
+
+const fmtDT = (v: any): string => {
+  if (!v) return '—';
+  let ms: number;
+  if (typeof v === 'number') ms = v;
+  else if (typeof v.toMillis === 'function') ms = v.toMillis();
+  else if (typeof v.seconds === 'number') ms = v.seconds * 1000;
+  else ms = new Date(v).getTime();
+  if (!ms || Number.isNaN(ms)) return '—';
+  return new Date(ms).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 };
 
 export function OrderDetailScreen({ route, navigation }: Props) {
@@ -610,15 +621,59 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
         )}
 
-        {/* Enhanced Customer Info for Supervisor */}
+        {/* Enhanced Customer Info for Supervisor — all relevant order details */}
         <View className="mb-6 bg-white p-5 rounded-xl shadow-sm border border-gray-100 z-0">
           <View className="items-center mb-4">
             <Text className="text-gray-900 text-lg font-bold">{order?.customerName || 'Unknown customer'}</Text>
             <Text className="text-gray-500 text-sm mt-1">{order ? serviceSummary(order) : '—'}</Text>
           </View>
-          
+
           {activeRole === 'supervisor' && order && (
             <View className="border-t border-gray-100 pt-4 mt-2">
+              {/* Order identity */}
+              <View className="flex-row items-center mb-3 justify-between">
+                <View className="flex-1">
+                  <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
+                  <Text className="text-gray-500 text-xs">Order ID: {orderId}</Text>
+                </View>
+                <View className="items-end">
+                  {order.tokenNumber ? <Text className="text-amber-700 font-bold">Token #{order.tokenNumber}</Text> : null}
+                  <View className="bg-gray-100 px-2 py-0.5 rounded-full mt-1">
+                    <Text className="text-xs font-bold text-gray-600 uppercase">{order.status.replace(/_/g, ' ')}</Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Dates / timelines */}
+              <View className="bg-gray-50 rounded-xl p-3 mb-3">
+                <View className="flex-row justify-between mb-1">
+                  <Text className="text-gray-500 text-xs">Placed</Text>
+                  <Text className="text-gray-700 text-xs font-medium">{fmtDT(order.createdAt)}</Text>
+                </View>
+                {order.pickupDetails?.scheduledDate ? (
+                  <View className="flex-row justify-between mb-1">
+                    <Text className="text-gray-500 text-xs">Pickup slot</Text>
+                    <Text className="text-gray-700 text-xs font-medium">
+                      {order.pickupDetails.scheduledDate} {order.pickupDetails.scheduledTime || ''}
+                      {order.pickupDetails.isInstant ? ' (Instant)' : ''}
+                    </Text>
+                  </View>
+                ) : null}
+                {order.deliveryDate ? (
+                  <View className="flex-row justify-between mb-1">
+                    <Text className="text-gray-500 text-xs">Delivery</Text>
+                    <Text className="text-gray-700 text-xs font-medium">{order.deliveryDate} {order.deliveryTime || ''}</Text>
+                  </View>
+                ) : null}
+                {order && (order as any).pickedUpAt ? (
+                  <View className="flex-row justify-between">
+                    <Text className="text-gray-500 text-xs">Picked up</Text>
+                    <Text className="text-gray-700 text-xs font-medium">{fmtDT((order as any).pickedUpAt)}</Text>
+                  </View>
+                ) : null}
+              </View>
+
+              {/* Customer contact */}
               <View className="flex-row items-center mb-3">
                 <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
                   <Phone size={14} color="#994bff" />
@@ -628,19 +683,27 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <Text className="text-gray-500 text-xs">Tap to call</Text>
                 </TouchableOpacity>
               </View>
-              
-              {order.storeOTP ? (
-                <View className="flex-row items-center mb-3">
-                  <View className="w-8 h-8 rounded-full bg-blue-50 items-center justify-center mr-3">
-                    <Text className="text-blue-500 font-bold text-xs">OTP</Text>
+
+              {/* OTPs */}
+              <View className="flex-row flex-wrap gap-2 mb-3">
+                {order.pickupOTP ? (
+                  <View className="bg-blue-50 px-2 py-1 rounded border border-blue-200">
+                    <Text className="text-blue-700 text-xs font-bold">Pickup OTP: {order.pickupOTP}</Text>
                   </View>
-                  <View>
-                    <Text className="text-gray-900 font-bold tracking-widest">{order.storeOTP}</Text>
-                    <Text className="text-gray-500 text-xs">Store Handover OTP (For Rider)</Text>
+                ) : null}
+                {order.storeOTP ? (
+                  <View className="bg-purple-50 px-2 py-1 rounded border border-purple-200">
+                    <Text className="text-purple-700 text-xs font-bold">Store OTP: {order.storeOTP}</Text>
                   </View>
-                </View>
-              ) : null}
-              
+                ) : null}
+                {order.deliveryOTP ? (
+                  <View className="bg-green-50 px-2 py-1 rounded border border-green-200">
+                    <Text className="text-green-700 text-xs font-bold">Delivery OTP: {order.deliveryOTP}</Text>
+                  </View>
+                ) : null}
+              </View>
+
+              {/* Address + directions */}
               <View className="flex-row items-center mb-3">
                 <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
                   <MapPin size={14} color="#994bff" />
@@ -649,17 +712,44 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <Text className="text-gray-900 font-medium leading-tight">
                     {typeof order.address === 'string' ? order.address : (order.address?.formattedAddress || order.address?.line1 || 'No address')}
                   </Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      const dest = order.latitude ? `${order.latitude},${order.longitude}` : (order.address?.formattedAddress || order.address?.line1 || order.address);
+                      Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}`).catch(() => {});
+                    }}
+                    className="flex-row items-center mt-1"
+                  >
+                    <Navigation size={12} color="#3b82f6" />
+                    <Text className="text-info text-xs font-bold ml-1">Get Directions</Text>
+                  </TouchableOpacity>
                 </View>
               </View>
 
+              {/* Item breakdown */}
               <View className="bg-gray-50 rounded-lg p-3 mt-2">
                 <Text className="text-xs font-bold text-gray-500 uppercase mb-2">Item Breakdown</Text>
                 {order.items?.map((item: any, idx: number) => (
                   <View key={idx} className="flex-row justify-between mb-1">
-                    <Text className="text-gray-700 text-sm">{item.quantity}x {item.name || item.serviceType}</Text>
-                    <Text className="text-gray-500 text-sm">₹{item.price}</Text>
+                    <View className="flex-1">
+                      <Text className="text-gray-700 text-sm">{item.quantity}x {item.serviceName || item.serviceType}</Text>
+                      {item.specialInstructions ? <Text className="text-gray-400 text-xs">{item.specialInstructions}</Text> : null}
+                    </View>
+                    <Text className="text-gray-500 text-sm ml-2">
+                      {item.totalPrice ? `₹${item.totalPrice}` : ''}
+                    </Text>
                   </View>
                 ))}
+                <View className="flex-row justify-between pt-2 mt-1 border-t border-gray-200">
+                  <Text className="text-gray-900 font-bold text-sm">Total</Text>
+                  <Text className="text-gray-900 font-bold">₹{orderTotal(order)}</Text>
+                </View>
+                {order.paymentStatus ? (
+                  <View className="mt-2">
+                    <View className="self-start bg-gray-200 px-2 py-0.5 rounded">
+                      <Text className="text-xs font-bold text-gray-700 uppercase">{order.paymentStatus}</Text>
+                    </View>
+                  </View>
+                ) : null}
               </View>
             </View>
           )}
