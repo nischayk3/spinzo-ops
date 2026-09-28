@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, Linking, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Search, ChevronRight, Phone, MapPin, PackageOpen } from 'lucide-react-native';
+import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal } from '../../utils/orderFeed';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens } from '../../utils/orderFeed';
 import { stepLabel } from '../../utils/opsProcess';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -219,6 +219,25 @@ export function FloorBoardScreen() {
                   </View>
                 )}
               </View>
+
+              {(() => {
+                const tokenChips = parseOrderTokens(item.tokens, item.tokenNumber, item.items);
+                if (tokenChips.length === 0) return null;
+                return (
+                  <View className="flex-row flex-wrap items-center gap-1.5 mt-2.5 pt-2 border-t border-gray-100">
+                    <Text className="text-gray-400 text-xs font-bold uppercase mr-1">Tokens:</Text>
+                    {tokenChips.map((c, i) => (
+                      <View key={i} className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded flex-row items-center">
+                        <Tag size={10} color="#b45309" className="mr-1" />
+                        <Text className="text-amber-800 font-bold text-xs">
+                          #{c.token}
+                          {c.serviceLabel ? <Text className="text-amber-600 font-normal"> ({c.serviceLabel})</Text> : null}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })()}
             </TouchableOpacity>
           );
         }}

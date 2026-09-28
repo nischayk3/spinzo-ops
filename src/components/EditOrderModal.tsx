@@ -13,42 +13,47 @@ interface EditOrderModalProps {
 // ── Pricing Logic (mirrors production AdminOrdersScreen) ──────────────
 
 const calculateItemPrice = (item: any): number => {
-  if (item.serviceId === 'wash_fold') {
+  const sid = (item.serviceId || item.serviceType || '').toLowerCase();
+  if (sid === 'wash_fold') {
     const base = (item.weight || 5) * 85;
     const ironing = (item.ironingEnabled && item.ironingCount) ? (item.ironingCount * 18) : 0;
     if (item.isCreditItem) return item.totalPrice;
     return base + ironing;
   }
-  if (item.serviceId === 'wash_iron') {
+  if (sid === 'wash_iron') {
     return (item.weight || 5) * 140;
   }
-  if (item.serviceId === 'ironing_addon' || item.serviceName?.toLowerCase().includes('ironing')) {
-    const count = item.clothesCount || item.ironingCount || 0;
+  if (sid === 'ironing_addon' || sid === 'ironing' || item.serviceName?.toLowerCase().includes('ironing')) {
+    const count = item.clothesCount || item.ironingCount || item.quantity || 0;
     return count * 18;
   }
-  if (item.serviceId === 'blanket_wash') {
+  if (sid === 'blanket_wash') {
     const single = item.singleBlanketCount || 0;
     const double = item.doubleBlanketCount || 0;
     return (single * 299) + (double * 399);
   }
-  if (item.serviceId === 'ironing') {
-    const count = item.ironingCount || item.clothesCount || 0;
-    return count * 18;
-  }
-  return item.totalPrice;
+  return item.totalPrice || 0;
 };
 
 const calculateDeliveryFee = (orderItems: any[]): number => {
   if (!orderItems || orderItems.length === 0) return 0;
-  const hasWashFoldOrWashIron = orderItems.some(
-    (item) => item.serviceId === 'wash_fold' || item.serviceId === 'wash_iron' || item.serviceId === 'premium_laundry'
-  );
-  const hasIroning = orderItems.some((item) => item.serviceId === 'ironing');
-  const hasBlanketWash = orderItems.some((item) => item.serviceId === 'blanket_wash');
+  const hasWashFoldOrWashIron = orderItems.some((item) => {
+    const sid = (item.serviceId || item.serviceType || '').toLowerCase();
+    return sid === 'wash_fold' || sid === 'wash_iron' || sid === 'premium_laundry';
+  });
+  const hasIroning = orderItems.some((item) => {
+    const sid = (item.serviceId || item.serviceType || '').toLowerCase();
+    return sid === 'ironing' || sid === 'ironing_addon';
+  });
+  const hasBlanketWash = orderItems.some((item) => {
+    const sid = (item.serviceId || item.serviceType || '').toLowerCase();
+    return sid === 'blanket_wash';
+  });
   if (hasWashFoldOrWashIron) return 0;
   if (hasIroning) {
     const totalIroningPieces = orderItems.reduce((sum, item) => {
-      if (item.serviceId === 'ironing') return sum + (item.ironingCount || item.clothesCount || 0);
+      const sid = (item.serviceId || item.serviceType || '').toLowerCase();
+      if (sid === 'ironing' || sid === 'ironing_addon') return sum + (item.ironingCount || item.clothesCount || item.quantity || 0);
       return sum;
     }, 0);
     return totalIroningPieces >= 20 ? 50 : 80;
@@ -69,7 +74,22 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
 
   useEffect(() => {
     if (order && order.items) {
-      setItems(JSON.parse(JSON.stringify(order.items)));
+      const initialItems = JSON.parse(JSON.stringify(order.items)).map((it: any) => {
+        const sid = (it.serviceId || it.serviceType || '').toLowerCase();
+        const isWF = sid === 'wash_fold';
+        const isWI = sid === 'wash_iron';
+        const isIroningOnly = sid === 'ironing' || sid === 'ironing_addon' || it.serviceName?.toLowerCase().includes('ironing');
+        return {
+          ...it,
+          serviceId: sid,
+          serviceType: it.serviceType || sid,
+          weight: it.weight || ((isWF || isWI) ? 5 : undefined),
+          ironingEnabled: isWF ? Boolean(it.ironingEnabled) : undefined,
+          ironingCount: isWF && it.ironingEnabled ? (it.ironingCount || 0) : (isIroningOnly ? (it.ironingCount || it.clothesCount || it.quantity || 1) : 0),
+          clothesCount: (isWF || isWI) ? undefined : it.clothesCount,
+        };
+      });
+      setItems(initialItems);
       setDiscount(order.billDetails?.discount || 0);
       const fee = order.billDetails?.deliveryFee || 0;
       setDeliveryFee(fee);
@@ -90,27 +110,38 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
 
   const updateItem = (index: number, updates: any) => {
     const newItems = [...items];
-    const updatedItem = { ...newItems[index], ...updates };
+    const current = newItems[index];
+    const sid = (current.serviceId || current.serviceType || '').toLowerCase();
+    const updatedItem = {
+      ...current,
+      ...updates,
+      serviceId: sid,
+      serviceType: current.serviceType || sid,
+    };
 
     // Update derived fields
-    if (updatedItem.serviceId === 'blanket_wash') {
+    if (sid === 'blanket_wash') {
       updatedItem.blanketQuantity = (updatedItem.singleBlanketCount || 0) + (updatedItem.doubleBlanketCount || 0);
       const parts = [];
       if (updatedItem.singleBlanketCount > 0) parts.push(`${updatedItem.singleBlanketCount} Single`);
       if (updatedItem.doubleBlanketCount > 0) parts.push(`${updatedItem.doubleBlanketCount} Double`);
       updatedItem.description = parts.join(', ');
     }
-    if (updatedItem.serviceId === 'ironing') {
-      updatedItem.ironingPrice = (updatedItem.ironingCount || 0) * 18;
+    if (sid === 'ironing' || sid === 'ironing_addon') {
+      updatedItem.ironingPrice = (updatedItem.ironingCount || updatedItem.clothesCount || 0) * 18;
     }
 
     // Recalculate price
     updatedItem.totalPrice = calculateItemPrice(updatedItem);
 
-    if (updatedItem.serviceId === 'wash_fold' && !updatedItem.isCreditItem) {
+    if (sid === 'wash_fold' && !updatedItem.isCreditItem) {
       updatedItem.quantity = 1;
       const maxPieces = Math.round((updatedItem.weight || 5) * 3.5);
-      if (updatedItem.ironingCount > maxPieces) updatedItem.ironingCount = maxPieces;
+      if (!updatedItem.ironingEnabled) {
+        updatedItem.ironingCount = 0;
+      } else if (updatedItem.ironingCount > maxPieces) {
+        updatedItem.ironingCount = maxPieces;
+      }
     }
 
     newItems[index] = updatedItem;
@@ -193,99 +224,102 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
 
         {/* Items List */}
         <ScrollView className="flex-1 px-4 pt-4" contentContainerStyle={{ paddingBottom: 160 }}>
-          {items.map((item, index) => (
-            <View key={index} className="mb-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
-              {/* Item Header */}
-              <View className="flex-row justify-between mb-3">
-                <Text className="text-base font-bold text-gray-900">{item.serviceName || item.name || item.serviceType}</Text>
-                <Text className="text-base font-bold text-blue-600">₹{item.totalPrice}</Text>
-              </View>
+          {items.map((item, index) => {
+            const sid = (item.serviceId || item.serviceType || '').toLowerCase();
+            return (
+              <View key={index} className="mb-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                {/* Item Header */}
+                <View className="flex-row justify-between mb-3">
+                  <Text className="text-base font-bold text-gray-900">{item.serviceName || item.name || item.serviceType}</Text>
+                  <Text className="text-base font-bold text-blue-600">₹{item.totalPrice}</Text>
+                </View>
 
-              {/* Wash & Fold */}
-              {item.serviceId === 'wash_fold' && !item.isCreditItem && (
-                <View className="gap-3">
-                  <CounterRow
-                    label="Adjust Weight (₹85/kg)"
-                    value={`${item.weight || 5} kg`}
-                    onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
-                    onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
-                    disableDecrement={(item.weight || 5) <= 5}
-                  />
-                  {(item.ironingEnabled || item.ironingCount > 0) && (
+                {/* Wash & Fold */}
+                {sid === 'wash_fold' && !item.isCreditItem && (
+                  <View className="gap-3">
                     <CounterRow
-                      label="Ironing Count (₹18/pc)"
-                      value={item.ironingCount || 0}
-                      onDecrement={() => updateItem(index, { ironingCount: Math.max(0, (item.ironingCount || 0) - 1) })}
-                      onIncrement={() => updateItem(index, { ironingCount: (item.ironingCount || 0) + 1 })}
-                      disableDecrement={(item.ironingCount || 0) <= 0}
+                      label="Adjust Weight (₹85/kg)"
+                      value={`${item.weight || 5} kg`}
+                      onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
+                      onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
+                      disableDecrement={(item.weight || 5) <= 5}
                     />
-                  )}
-                </View>
-              )}
+                    {Boolean(item.ironingEnabled) && (item.ironingCount || 0) > 0 && (
+                      <CounterRow
+                        label="Ironing Count (₹18/pc)"
+                        value={item.ironingCount || 0}
+                        onDecrement={() => updateItem(index, { ironingCount: Math.max(0, (item.ironingCount || 0) - 1) })}
+                        onIncrement={() => updateItem(index, { ironingCount: (item.ironingCount || 0) + 1 })}
+                        disableDecrement={(item.ironingCount || 0) <= 0}
+                      />
+                    )}
+                  </View>
+                )}
 
-              {/* Wash & Fold Credit */}
-              {item.serviceId === 'wash_fold' && item.isCreditItem && (
-                <View className="gap-3">
-                  <Text className="text-xs text-blue-600">Subscription Item (Paid via Credit)</Text>
+                {/* Wash & Fold Credit */}
+                {sid === 'wash_fold' && item.isCreditItem && (
+                  <View className="gap-3">
+                    <Text className="text-xs text-blue-600">Subscription Item (Paid via Credit)</Text>
+                    <CounterRow
+                      label="Adjust Weight"
+                      value={`${item.weight || 5} kg`}
+                      onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
+                      onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
+                      disableDecrement={(item.weight || 5) <= 5}
+                    />
+                  </View>
+                )}
+
+                {/* Wash & Iron */}
+                {sid === 'wash_iron' && (
                   <CounterRow
-                    label="Adjust Weight"
+                    label="Adjust Weight (₹140/kg)"
                     value={`${item.weight || 5} kg`}
                     onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
                     onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
                     disableDecrement={(item.weight || 5) <= 5}
                   />
-                </View>
-              )}
+                )}
 
-              {/* Wash & Iron */}
-              {item.serviceId === 'wash_iron' && (
-                <CounterRow
-                  label="Adjust Weight (₹140/kg)"
-                  value={`${item.weight || 5} kg`}
-                  onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
-                  onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
-                  disableDecrement={(item.weight || 5) <= 5}
-                />
-              )}
-
-              {/* Steam Iron */}
-              {item.serviceId === 'ironing' && (
-                <CounterRow
-                  label="Number of Pieces (₹18/pc)"
-                  value={item.ironingCount || item.clothesCount || 0}
-                  onDecrement={() => updateItem(index, {
-                    ironingCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
-                    clothesCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
-                  })}
-                  onIncrement={() => updateItem(index, {
-                    ironingCount: (item.ironingCount || item.clothesCount || 0) + 1,
-                    clothesCount: (item.ironingCount || item.clothesCount || 0) + 1,
-                  })}
-                  disableDecrement={(item.ironingCount || item.clothesCount || 0) <= 1}
-                />
-              )}
-
-              {/* Blanket Wash */}
-              {item.serviceId === 'blanket_wash' && (
-                <View className="gap-3">
+                {/* Steam Iron */}
+                {(sid === 'ironing' || sid === 'ironing_addon' || item.serviceName?.toLowerCase().includes('ironing')) && (
                   <CounterRow
-                    label="Single Blankets (₹299)"
-                    value={item.singleBlanketCount || 0}
-                    onDecrement={() => updateItem(index, { singleBlanketCount: Math.max(0, (item.singleBlanketCount || 0) - 1) })}
-                    onIncrement={() => updateItem(index, { singleBlanketCount: (item.singleBlanketCount || 0) + 1 })}
-                    disableDecrement={(item.singleBlanketCount || 0) <= 0}
+                    label="Number of Pieces (₹18/pc)"
+                    value={item.ironingCount || item.clothesCount || 0}
+                    onDecrement={() => updateItem(index, {
+                      ironingCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
+                      clothesCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
+                    })}
+                    onIncrement={() => updateItem(index, {
+                      ironingCount: (item.ironingCount || item.clothesCount || 0) + 1,
+                      clothesCount: (item.ironingCount || item.clothesCount || 0) + 1,
+                    })}
+                    disableDecrement={(item.ironingCount || item.clothesCount || 0) <= 1}
                   />
-                  <CounterRow
-                    label="Double Blankets (₹399)"
-                    value={item.doubleBlanketCount || 0}
-                    onDecrement={() => updateItem(index, { doubleBlanketCount: Math.max(0, (item.doubleBlanketCount || 0) - 1) })}
-                    onIncrement={() => updateItem(index, { doubleBlanketCount: (item.doubleBlanketCount || 0) + 1 })}
-                    disableDecrement={(item.doubleBlanketCount || 0) <= 0}
-                  />
-                </View>
-              )}
-            </View>
-          ))}
+                )}
+
+                {/* Blanket Wash */}
+                {sid === 'blanket_wash' && (
+                  <View className="gap-3">
+                    <CounterRow
+                      label="Single Blankets (₹299)"
+                      value={item.singleBlanketCount || 0}
+                      onDecrement={() => updateItem(index, { singleBlanketCount: Math.max(0, (item.singleBlanketCount || 0) - 1) })}
+                      onIncrement={() => updateItem(index, { singleBlanketCount: (item.singleBlanketCount || 0) + 1 })}
+                      disableDecrement={(item.singleBlanketCount || 0) <= 0}
+                    />
+                    <CounterRow
+                      label="Double Blankets (₹399)"
+                      value={item.doubleBlanketCount || 0}
+                      onDecrement={() => updateItem(index, { doubleBlanketCount: Math.max(0, (item.doubleBlanketCount || 0) - 1) })}
+                      onIncrement={() => updateItem(index, { doubleBlanketCount: (item.doubleBlanketCount || 0) + 1 })}
+                      disableDecrement={(item.doubleBlanketCount || 0) <= 0}
+                    />
+                  </View>
+                )}
+              </View>
+            );
+          })}
         </ScrollView>
 
         {/* Bottom Bill Summary + Save */}

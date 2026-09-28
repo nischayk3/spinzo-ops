@@ -37,6 +37,7 @@ const LABELS: Record<string, string> = {
   prestain: 'Pre-stain',
   getting_washed: 'Washing',
   getting_dried: 'Drying',
+  getting_folded: 'Folding',
   getting_ironed: 'Ironing',
   iron_ready: 'Ready for iron',
   packaging: 'Packaging',

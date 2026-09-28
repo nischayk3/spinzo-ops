@@ -67,6 +67,8 @@ export interface DeliveryTask {
   customerPhone: string;
   bundleCount?: number;
   bundleLabels?: { seq: number; qr: string }[];
+  tokenNumber?: string | null;
+  tokens?: Record<string, string> | null;
   items?: any[];
   totalAmount?: number;
   createdAt?: unknown;
@@ -164,6 +166,8 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             customerPhone: d.customerPhone || d.userPhone || '',
             bundleCount: d.bundleCount,
             bundleLabels: d.bundleLabels || [],
+            tokenNumber: d.tokenNumber || null,
+            tokens: d.tokens || null,
             items: d.items,
             totalAmount: d.totalAmount,
             assignedAt: d.assignedAt,

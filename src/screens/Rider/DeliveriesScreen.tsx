@@ -150,7 +150,8 @@ export function DeliveriesScreen() {
                     deliveryDate={t.deliveryDate}
                     deliveryTime={t.deliveryTime}
                     notes={order?.notes}
-                    tokenNumber={order?.tokenNumber}
+                    tokenNumber={t.tokenNumber || order?.tokenNumber}
+                    tokens={t.tokens || order?.tokens}
                     lat={order?.latitude}
                     lng={order?.longitude}
                     bundleCount={t.bundleCount}

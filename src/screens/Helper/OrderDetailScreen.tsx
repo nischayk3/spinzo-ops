@@ -10,7 +10,7 @@ import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, orderTotal } from '../../utils/orderFeed';
+import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
@@ -574,13 +574,19 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             <X size={20} color="#64748b" />
           </TouchableOpacity>
           <View className="items-center">
-            <View className="flex-row items-center gap-2">
+            <View className="flex-row items-center flex-wrap gap-2 justify-center">
               <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
-              {!!process?.tokenNumber && (
-                <View className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
-                  <Text className="text-amber-800 font-bold text-xs">T-{process.tokenNumber}</Text>
-                </View>
-              )}
+              {(() => {
+                const tokenChips = parseOrderTokens(order?.tokens, order?.tokenNumber || process?.tokenNumber, order?.items);
+                if (tokenChips.length === 0) return null;
+                return tokenChips.map((c, i) => (
+                  <View key={i} className="bg-amber-100 px-2 py-0.5 rounded border border-amber-200">
+                    <Text className="text-amber-800 font-bold text-xs">
+                      T-{c.token}{c.serviceLabel ? ` (${c.serviceLabel.replace(/Wash & /g, 'W&')})` : ''}
+                    </Text>
+                  </View>
+                ));
+              })()}
             </View>
             {process && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
@@ -637,7 +643,21 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <Text className="text-gray-500 text-xs">Order ID: {orderId}</Text>
                 </View>
                 <View className="items-end">
-                  {order.tokenNumber ? <Text className="text-amber-700 font-bold">Token #{order.tokenNumber}</Text> : null}
+                  {(() => {
+                    const tokenChips = parseOrderTokens(order.tokens, order.tokenNumber, order.items);
+                    if (tokenChips.length === 0) return null;
+                    return (
+                      <View className="items-end gap-1 mb-1">
+                        {tokenChips.map((c, i) => (
+                          <View key={i} className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                            <Text className="text-amber-800 font-bold text-xs">
+                              Token #{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    );
+                  })()}
                   <View className="bg-gray-100 px-2 py-0.5 rounded-full mt-1">
                     <Text className="text-xs font-bold text-gray-600 uppercase">{order.status.replace(/_/g, ' ')}</Text>
                   </View>
@@ -728,17 +748,34 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               {/* Item breakdown */}
               <View className="bg-gray-50 rounded-lg p-3 mt-2">
                 <Text className="text-xs font-bold text-gray-500 uppercase mb-2">Item Breakdown</Text>
-                {order.items?.map((item: any, idx: number) => (
-                  <View key={idx} className="flex-row justify-between mb-1">
-                    <View className="flex-1">
-                      <Text className="text-gray-700 text-sm">{item.quantity}x {item.serviceName || item.serviceType}</Text>
-                      {item.specialInstructions ? <Text className="text-gray-400 text-xs">{item.specialInstructions}</Text> : null}
+                {order.items?.map((item: any, idx: number) => {
+                  const { title, details } = formatItemSummary(item);
+                  const sid = String(item.serviceType || item.serviceId || '').toLowerCase();
+                  const itemToken = order.tokens?.[item.serviceType] || order.tokens?.[item.serviceId] || order.tokens?.[sid];
+                  return (
+                    <View key={idx} className="flex-row justify-between mb-2 pb-1.5 border-b border-gray-200/60 last:border-b-0">
+                      <View className="flex-1 mr-2">
+                        <View className="flex-row items-center flex-wrap gap-1.5">
+                          <Text className="text-gray-900 font-bold text-sm">{title}</Text>
+                          {details ? (
+                            <View className="bg-gray-200/80 px-1.5 py-0.5 rounded">
+                              <Text className="text-gray-700 text-xs font-medium">{details}</Text>
+                            </View>
+                          ) : null}
+                          {itemToken ? (
+                            <View className="bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded">
+                              <Text className="text-amber-800 text-xs font-bold">Token #{itemToken}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        {item.specialInstructions ? <Text className="text-gray-400 text-xs mt-0.5">{item.specialInstructions}</Text> : null}
+                      </View>
+                      <Text className="text-gray-700 font-bold text-sm">
+                        {item.totalPrice ? `₹${item.totalPrice}` : ''}
+                      </Text>
                     </View>
-                    <Text className="text-gray-500 text-sm ml-2">
-                      {item.totalPrice ? `₹${item.totalPrice}` : ''}
-                    </Text>
-                  </View>
-                ))}
+                  );
+                })}
                 <View className="flex-row justify-between pt-2 mt-1 border-t border-gray-200">
                   <Text className="text-gray-900 font-bold text-sm">Total</Text>
                   <Text className="text-gray-900 font-bold">₹{orderTotal(order)}</Text>

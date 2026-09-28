@@ -34,7 +34,21 @@ export interface FeedOrder {
   items?: Array<{
     serviceName?: string;
     serviceType?: string;
+    serviceId?: string;
+    name?: string;
     quantity?: number;
+    unit?: string;
+    weight?: number;
+    ironingCount?: number;
+    ironingEnabled?: boolean;
+    clothesCount?: number;
+    singleBlanketCount?: number;
+    doubleBlanketCount?: number;
+    blanketQuantity?: number;
+    blanketType?: string;
+    description?: string;
+    specialInstructions?: string;
+    isCreditItem?: boolean;
     totalPrice?: number;
   }>;
   totalAmount?: number;
@@ -42,6 +56,7 @@ export interface FeedOrder {
   paymentStatus?: string;
   notes?: string;
   tokenNumber?: string;
+  tokens?: Record<string, string>;
   pickupOTP?: string;
   storeOTP?: string;
   address?: { formattedAddress?: string; latitude?: number; longitude?: number } | any;
@@ -65,9 +80,134 @@ export type PickupSlot = {
 export const orderTotal = (o: FeedOrder): number =>
   o.billDetails?.total ?? o.totalAmount ?? 0;
 
+export interface TokenChip {
+  serviceKey?: string;
+  serviceLabel?: string;
+  token: string;
+}
+
+const SERVICE_LABEL_MAP: Record<string, string> = {
+  wash_fold: 'Wash & Fold',
+  wash_iron: 'Wash & Iron',
+  ironing: 'Steam Iron',
+  ironing_addon: 'Steam Iron',
+  blanket_wash: 'Blanket Wash',
+  blanket_wash_single: 'Blanket (Single)',
+  blanket_wash_double: 'Blanket (Double)',
+  shoe_clean: 'Shoe Clean',
+  dry_clean: 'Dry Clean',
+  premium_laundry: 'Premium Laundry',
+};
+
+export function parseOrderTokens(
+  tokens?: Record<string, string> | null,
+  tokenNumber?: string | null,
+  items?: Array<{ serviceType?: string; serviceId?: string; serviceName?: string; name?: string }>
+): TokenChip[] {
+  const chips: TokenChip[] = [];
+
+  if (tokens && typeof tokens === 'object' && Object.keys(tokens).length > 0) {
+    for (const [key, val] of Object.entries(tokens)) {
+      const tVal = String(val || '').trim();
+      if (!tVal) continue;
+      const cleanKey = key.toLowerCase();
+      let label = SERVICE_LABEL_MAP[cleanKey];
+      if (!label && items && items.length > 0) {
+        const matchingItem = items.find(i => {
+          const s = (i.serviceType || i.serviceId || i.serviceName || '').toLowerCase();
+          return s.includes(cleanKey) || cleanKey.includes(s);
+        });
+        if (matchingItem) {
+          label = matchingItem.serviceName || matchingItem.name;
+        }
+      }
+      if (!label) {
+        label = cleanKey.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+      chips.push({
+        serviceKey: key,
+        serviceLabel: label,
+        token: tVal,
+      });
+    }
+  }
+
+  // If no tokens map found, but tokenNumber exists (could be single or comma-separated)
+  if (chips.length === 0 && tokenNumber && String(tokenNumber).trim()) {
+    const rawStr = String(tokenNumber).trim();
+    const parts = rawStr.split(/[,/]+/).map(p => p.trim()).filter(Boolean);
+    if (parts.length > 1 && items && items.length > 0) {
+      parts.forEach((tok, idx) => {
+        const item = items[idx];
+        const rawLabel = item ? (item.serviceName || item.name || item.serviceType) : undefined;
+        chips.push({
+          token: tok.replace(/^#/, '').replace(/^Token\s*#?/i, '').trim(),
+          serviceLabel: rawLabel ? String(rawLabel).replace(/\b\w/g, c => c.toUpperCase()) : undefined,
+        });
+      });
+    } else {
+      parts.forEach(tok => {
+        chips.push({
+          token: tok.replace(/^#/, '').replace(/^Token\s*#?/i, '').trim(),
+        });
+      });
+    }
+  }
+
+  return chips;
+}
+
+export function formatItemSummary(it: any): { title: string; details: string; price?: string; notes?: string } {
+  const rawService = it.serviceName || it.name || (it.serviceType ? it.serviceType.replace(/_/g, ' ') : 'Item');
+  const title = String(rawService).replace(/\b\w/g, (c: string) => c.toUpperCase());
+
+  const parts: string[] = [];
+  const sid = (it.serviceId || it.serviceType || it.serviceName || '').toLowerCase();
+
+  if (sid.includes('wash_fold') || sid.includes('wash & fold')) {
+    const weight = it.weight || (it.unit === 'kg' && it.quantity ? it.quantity : 5);
+    parts.push(`${weight} kg`);
+    // Do not show default clothes estimate (18). Only show valid addon ironing count.
+    if (it.ironingEnabled !== false && it.ironingCount > 0 && it.ironingCount !== 18) {
+      parts.push(`+${it.ironingCount} ironed`);
+    }
+    if (it.isCreditItem) parts.push('Plan Credit');
+  } else if (sid.includes('wash_iron') || sid.includes('wash & iron')) {
+    const weight = it.weight || (it.unit === 'kg' && it.quantity ? it.quantity : 5);
+    parts.push(`${weight} kg`);
+    // Wash & Iron is strictly weight-based. Do NOT display default clothesCount (e.g. 18 pcs).
+  } else if (sid.includes('ironing') || sid.includes('iron')) {
+    const count = it.ironingCount || it.clothesCount || it.quantity;
+    if (count) parts.push(`${count} pcs`);
+  } else if (sid.includes('blanket')) {
+    if (it.singleBlanketCount || it.doubleBlanketCount) {
+      const bParts: string[] = [];
+      if (it.singleBlanketCount) bParts.push(`${it.singleBlanketCount} Single`);
+      if (it.doubleBlanketCount) bParts.push(`${it.doubleBlanketCount} Double`);
+      parts.push(bParts.join(', '));
+    } else if (it.blanketQuantity) {
+      parts.push(`${it.blanketQuantity} blankets`);
+    } else if (it.quantity) {
+      parts.push(`${it.quantity} blankets`);
+    }
+  } else {
+    if (it.weight) parts.push(`${it.weight} kg`);
+    else if (it.quantity && it.quantity > 0) parts.push(`×${it.quantity}${it.unit ? ` ${it.unit}` : ''}`);
+  }
+
+  const details = parts.join(' • ');
+  const price = typeof it.totalPrice === 'number' && it.totalPrice > 0 ? `₹${it.totalPrice}` : undefined;
+  const notes = it.specialInstructions || it.notes || undefined;
+
+  return { title, details, price, notes };
+}
+
 export const formatOrderItems = (o: FeedOrder): string =>
   (o.items || [])
-    .map(i => `${i.serviceName || i.serviceType || 'Item'}${i.quantity ? ` ×${i.quantity}` : ''}`)
+    .map(i => {
+      const { title, details } = formatItemSummary(i);
+      return details ? `${title} (${details})` : title;
+    })
     .join('\n');
 
 

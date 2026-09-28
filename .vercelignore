@@ -1,0 +1,7 @@
+.codegraph
+.claude
+.expo
+.git
+node_modules
+scratch
+ops/functions/node_modules

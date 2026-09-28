@@ -383,17 +383,27 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
         storeOTP,
         updatedAt: now,
       };
-      const tokenNumber = data.tokenNumber || current.tokenNumber;
+      const tokenList = data.tokens && typeof data.tokens === 'object'
+        ? Object.values(data.tokens).filter(Boolean)
+        : [];
+      const allTokensString = tokenList.length > 0 ? tokenList.join(', ') : '';
+      const tokenNumber = allTokensString || data.tokenNumber || current.tokenNumber;
       if (tokenNumber) updateData.tokenNumber = tokenNumber;
+      if (data.tokens && typeof data.tokens === 'object') {
+        updateData.tokens = data.tokens;
+      }
 
       tx.update(db.doc(`users/${userId}/orders/${orderId}`), updateData);
       tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
       if (task) {
-        tx.update(db.doc(`ops_tasks/${orderId}`), {
+        const taskUpdate = {
           status: 'in_transit_to_store',
           pickedUpAt: now,
           otpAttempts: admin.firestore.FieldValue.delete(),
-        });
+        };
+        if (tokenNumber) taskUpdate.tokenNumber = tokenNumber;
+        if (data.tokens && typeof data.tokens === 'object') taskUpdate.tokens = data.tokens;
+        tx.update(db.doc(`ops_tasks/${orderId}`), taskUpdate);
       }
       return { ok: true };
     });
@@ -537,6 +547,8 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       customerPhone: after.customerPhone || after.userPhone || '',
       bundleCount,
       bundleLabels,
+      tokenNumber: after.tokenNumber || null,
+      tokens: after.tokens || null,
       createdAt: TS(),
     });
   } catch (err) {

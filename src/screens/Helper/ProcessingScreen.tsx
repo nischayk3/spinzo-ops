@@ -261,11 +261,15 @@ function SupervisorFeed() {
                   <Text className="text-blue-800 font-bold text-xs">{p.serviceLabel}</Text>
                 </View>
               )}
-              {!!p?.tokenNumber && (
-                <View className="bg-amber-500/15 px-2 py-0.5 rounded border border-amber-500/30">
-                  <Text className="text-warning font-bold text-xs">T-{p.tokenNumber}</Text>
-                </View>
-              )}
+              {(() => {
+                const sToken = p?.tokenNumber || (p?.serviceType && order?.tokens?.[p.serviceType]) || order?.tokenNumber;
+                if (!sToken) return null;
+                return (
+                  <View className="bg-amber-500/15 px-2 py-0.5 rounded border border-amber-500/30">
+                    <Text className="text-warning font-bold text-xs">T-{sToken}</Text>
+                  </View>
+                );
+              })()}
             </View>
             {p && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>

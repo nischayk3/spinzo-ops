@@ -8,6 +8,7 @@ export interface OpsTask {
   pickupAddress?: string;
   pickupSlot?: { type?: string; scheduledDate?: string; scheduledTime?: string; isInstant?: boolean } | null;
   tokenNumber?: string;
+  tokens?: Record<string, string>;
   pickupOTP?: string;
   assignedAt?: unknown;
   acceptedAt?: unknown;
@@ -33,6 +34,7 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     // Real snapshots express a missing slot as explicit null; an absent snapshot leaves it undefined.
     pickupSlot: snapData ? (d.pickupSlot ?? null) : undefined,
     tokenNumber: d.tokenNumber ?? undefined,
+    tokens: d.tokens ?? undefined,
     pickupOTP: d.pickupOTP ?? undefined,
     assignedAt: d.assignedAt ?? undefined,
     acceptedAt: d.acceptedAt ?? undefined,

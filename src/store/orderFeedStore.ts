@@ -33,6 +33,7 @@ const orderFromDoc = (d: any): FeedOrder => {
     paymentStatus: data.paymentStatus || data.paymentMethod,
     notes: data.notes || data.instruction,
     tokenNumber: data.tokenNumber,
+    tokens: data.tokens,
     pickupOTP: data.pickupOTP,
     storeOTP: data.storeOTP,
     address: data.address,
