@@ -54,6 +54,11 @@ function getStepPriority(step: string | null): number {
   return step ? (STEP_PRIORITY[step] ?? 99) : 99;
 }
 
+// Order states that mean no helper task should be offered for this order.
+function isOrderTerminal(status?: string): boolean {
+  return status === 'cancelled' || status === 'ready' || status === 'out_for_delivery' || status === 'delivered';
+}
+
 // ─── Eligibility Check ─────────────────────────────────────────────────────────
 
 /**
@@ -171,7 +176,7 @@ export function getTopEligibleTask(
   // ── 2. Filter eligible processes (with global machine capacity check) ──
   const eligible = processes.filter(p => {
     const order = orders.find(o => o.id === p.orderId);
-    if (order?.status === 'cancelled') return false;
+    if (isOrderTerminal(order?.status)) return false;
 
     const cur = currentStep(p);
     const machineAtCapacity = cur ? isMachineAtCapacity(processes, cur, resources) : false;
