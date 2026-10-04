@@ -59,6 +59,12 @@ function taskTransition(beforeStatus, afterStatus) {
   if (afterStatus === 'pickup_completed' && beforeStatus !== 'pickup_completed') {
     return { taskStatus: 'picked_up' };
   }
+  if (afterStatus === 'processing' && beforeStatus !== 'processing') {
+    return { taskStatus: 'picked_up' };
+  }
+  if (afterStatus === 'ready' && beforeStatus !== 'ready') {
+    return { cleanupProcess: true };
+  }
   if (afterStatus === 'delivered' && beforeStatus !== 'delivered') {
     return { taskStatus: 'delivered', dropProcess: true };
   }
