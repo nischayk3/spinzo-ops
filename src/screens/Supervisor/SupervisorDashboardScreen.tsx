@@ -5,7 +5,7 @@ import { Search, ChevronRight, Truck, Users, AlertTriangle, IndianRupee } from '
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useAuthStore } from '../../store/authStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
-import { dayRevenue, orderTotal } from '../../utils/orderFeed';
+import { dayRevenue, orderTotal, parseOrderTokens } from '../../utils/orderFeed';
 import { announceSkippedOrder } from '../../utils/alerts';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -100,6 +100,21 @@ export function SupervisorDashboardScreen() {
                   <View className="flex-1">
                     <Text className="font-bold text-gray-900 text-base">#{o.id.slice(-6).toUpperCase()}</Text>
                     <Text className="text-gray-500 text-sm">{o.customerName || 'Unknown'}</Text>
+                    {(() => {
+                      const chips = parseOrderTokens(o.tokens, o.tokenNumber, o.items);
+                      if (chips.length === 0) return null;
+                      return (
+                        <View className="flex-row flex-wrap gap-1 mt-1">
+                          {chips.map((c, i) => (
+                            <View key={i} className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                              <Text className="text-amber-800 font-bold text-xs">
+                                Token #{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
+                              </Text>
+                            </View>
+                          ))}
+                        </View>
+                      );
+                    })()}
                   </View>
                   <ChevronRight size={18} color="#94a3b8" />
                 </View>
@@ -164,6 +179,21 @@ export function SupervisorDashboardScreen() {
                 </View>
                 <Text className="text-gray-700 font-medium">{o.customerName}</Text>
                 <Text className="text-gray-500 text-xs mt-1">₹{orderTotal(o)}</Text>
+                {(() => {
+                  const chips = parseOrderTokens(o.tokens, o.tokenNumber, o.items);
+                  if (chips.length === 0) return null;
+                  return (
+                    <View className="flex-row flex-wrap gap-1 mt-2">
+                      {chips.map((c, i) => (
+                        <View key={i} className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                          <Text className="text-amber-800 font-bold text-xs">
+                            Token #{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  );
+                })()}
               </TouchableOpacity>
             ))}
           </View>
