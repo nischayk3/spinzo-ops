@@ -1376,10 +1376,39 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             });
             tx.delete(db.doc(`ops_queue/${orderId}`));
           } else {
-             return { ok: false, error: 'task_not_found' };
+            // Manual pickup assignment with no existing task/queue — create one.
+            tx.set(db.doc(`ops_tasks/${orderId}`), {
+              orderId, userId, vendorId, assignee: riderId, status: 'assigned',
+              pickupAddress: pickupAddressFromOrder(order),
+              pickupSlot: order.pickupDetails || null,
+              tokenNumber: order.tokenNumber || null,
+              pickupOTP: order.pickupOTP || null,
+              assignedAt: now, createdAt: now,
+            });
           }
           return { ok: true, status: 'assigned' };
         }
+
+      if (action === 'unassignPickup') {
+        if (order.status !== 'placed' && order.status !== 'confirmed') {
+          return { ok: false, error: 'invalid_state' };
+        }
+        // Move the pickup out of a rider's queue and park it for later assignment.
+        if (taskSnap.exists) {
+          tx.delete(db.doc(`ops_tasks/${orderId}`));
+        }
+        if (!queueSnap.exists) {
+          tx.set(db.doc(`ops_queue/${orderId}`), {
+            orderId, userId, vendorId, status: 'pending',
+            pickupAddress: pickupAddressFromOrder(order),
+            pickupSlot: order.pickupDetails || null,
+            tokenNumber: order.tokenNumber || null,
+            pickupOTP: order.pickupOTP || null,
+            createdAt: now,
+          });
+        }
+        return { ok: true, status: 'parked' };
+      }
       }
 
       return { ok: false, error: 'invalid_action' };
