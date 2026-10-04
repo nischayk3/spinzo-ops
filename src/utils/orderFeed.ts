@@ -315,6 +315,8 @@ export interface CustomerOrder {
   items?: FeedOrder['items'];
   deliveryDate?: string;
   deliveryTime?: string;
+  tokenNumber?: string;
+  tokens?: Record<string, string>;
 }
 
 export interface CustomerSummary {
@@ -344,6 +346,8 @@ export const customerIndex = (orders: FeedOrder[]): Map<string, CustomerSummary>
       items: o.items,
       deliveryDate: o.deliveryDate,
       deliveryTime: o.deliveryTime,
+      tokenNumber: o.tokenNumber,
+      tokens: o.tokens,
     });
     if (o.customerName && o.customerName !== 'Unknown') c.name = o.customerName;
   }

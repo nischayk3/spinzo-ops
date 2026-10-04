@@ -3,7 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Linking } 
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { ArrowLeft, Phone, MessageCircle } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { customerIndex, CustomerSummary } from '../../utils/orderFeed';
+import { customerIndex, CustomerSummary, parseOrderTokens } from '../../utils/orderFeed';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
 
@@ -83,6 +83,21 @@ export function CustomerDetailScreen({ route, navigation }: Props) {
                 <Text className="text-gray-500 text-sm uppercase font-bold">{statusLabel}</Text>
               </View>
               <Text className="text-gray-500 text-sm mb-1">₹{o.total}</Text>
+              {(() => {
+                const chips = parseOrderTokens(o.tokens, o.tokenNumber, o.items);
+                if (chips.length === 0) return null;
+                return (
+                  <View className="flex-row flex-wrap gap-1 mb-1">
+                    {chips.map((c, i) => (
+                      <View key={i} className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                        <Text className="text-amber-800 font-bold text-xs">
+                          Token #{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })()}
               {o.items && o.items.length > 0 && (
                 <Text className="text-gray-400 text-xs" numberOfLines={1}>
                   {o.items.map((i: any) => `${i.serviceName || i.serviceType}`).join(', ')}
