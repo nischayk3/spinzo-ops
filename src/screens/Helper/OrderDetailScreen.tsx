@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2 } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
@@ -248,6 +248,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       else Alert.alert("Success", "Delivery verified successfully.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleUnassignPickup = async () => {
+    setBusy(true);
+    try {
+      const res = await useOpsProcessStore.getState().unassignPickup(orderId, order?.userId || '');
+      setBusy(false);
+      if (!res.ok) setActionError(friendlyActionError(res.error || 'unknown'));
+    } catch (e: any) {
+      setBusy(false);
+      setActionError(friendlyActionError(e?.message || 'request_failed'));
     }
   };
 
@@ -614,6 +626,12 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               <TouchableOpacity onPress={() => { setShowMenu(false); setShowAssignRiderModal(true); }} className="p-4 border-b border-gray-100 flex-row items-center">
                 <UserPlus size={16} color="#3b82f6" className="mr-3" />
                 <Text className="text-blue-700 font-medium">Assign Rider</Text>
+              </TouchableOpacity>
+            )}
+            {(order?.status === 'placed' || order?.status === 'confirmed') && (
+              <TouchableOpacity onPress={() => { setShowMenu(false); handleUnassignPickup(); }} className="p-4 border-b border-gray-100 flex-row items-center">
+                <Undo2 size={16} color="#f59e0b" className="mr-3" />
+                <Text className="text-amber-600 font-medium">Unassign / Return to Queue</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity onPress={() => { setShowMenu(false); handleWhatsApp(); }} className="p-4 border-b border-gray-100 flex-row items-center">

@@ -48,6 +48,7 @@ interface OpsProcessState {
   scheduleDelivery: (orderId: string, userId: string, date: string, time: string) => Promise<SupervisorActionResult>;
   verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
+  unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   reset: () => void;
 }
 
@@ -243,6 +244,15 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
   assignTaskToRider: async (orderId, userId, riderId, isDelivery) => {
     try {
       const res = await callSupervisor()({ action: 'assignTaskToRider', orderId, userId, riderId, isDelivery });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+
+  unassignPickup: async (orderId, userId) => {
+    try {
+      const res = await callSupervisor()({ action: 'unassignPickup', orderId, userId });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
