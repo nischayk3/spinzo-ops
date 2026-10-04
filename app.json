@@ -6,12 +6,20 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#E6F4FE"
+    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.nischayk3.spinzo-ops"
     },
     "android": {
+      "newArchEnabled": true,
       "package": "com.nischayk3.spinzoops",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -37,6 +45,14 @@
     },
     "plugins": [
       "expo-status-bar",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesNonExemptEncryption": false
+          }
+        }
+      ],
       [
         "expo-camera",
         {
