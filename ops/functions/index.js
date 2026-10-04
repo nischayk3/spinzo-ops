@@ -414,6 +414,18 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
   }
 });
 
+async function deleteProcessDocs(orderId) {
+  try {
+    const processDocs = await db.collection('ops_process')
+      .where('parentOrderId', '==', orderId).get();
+    const batch = db.batch();
+    processDocs.forEach((d) => batch.delete(d.ref));
+    if (!processDocs.empty) await batch.commit();
+  } catch (err) {
+    console.error(`deleteProcessDocs(${orderId}) failed`, err);
+  }
+}
+
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
 // (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync).
 exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}', async (event) => {
@@ -472,15 +484,7 @@ exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}',
     }
 
     // Also clean up any ops_process docs for this order.
-    try {
-      const processDocs = await db.collection('ops_process')
-        .where('parentOrderId', '==', orderId).get();
-      const batch = db.batch();
-      processDocs.forEach((d) => batch.delete(d.ref));
-      if (!processDocs.empty) await batch.commit();
-    } catch (err) {
-      console.error(`syncTaskFromOrder: process cleanup failed for ${orderId}`, err);
-    }
+    await deleteProcessDocs(orderId);
   }
 
   if (trans.dropProcess) {
@@ -498,15 +502,14 @@ exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}',
       await db.doc(`ops_queue/${orderId}`).delete();
     } catch (err) {}
 
-    try {
-      const processDocs = await db.collection('ops_process')
-        .where('parentOrderId', '==', orderId).get();
-      const batch = db.batch();
-      processDocs.forEach((d) => batch.delete(d.ref));
-      if (!processDocs.empty) await batch.commit();
-    } catch (err) {
-      console.error(`syncTaskFromOrder: process cleanup failed for ${orderId}`, err);
-    }
+    await deleteProcessDocs(orderId);
+  }
+
+  if (trans.cleanupProcess) {
+    // Order became 'ready': remove any stuck ops_process docs so helpers stop
+    // being offered tagging/processing steps for an already-finished order.
+    // Do NOT touch the delivery task — syncDeliveryTask creates it as 'pending'.
+    await deleteProcessDocs(orderId);
   }
 });
 
