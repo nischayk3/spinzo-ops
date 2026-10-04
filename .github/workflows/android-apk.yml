@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version_code:
-        description: 'Override versionCode (leave empty to auto-increment)'
+        description: "Override versionCode (leave empty to auto-increment)"
         required: false
         type: string
 
@@ -20,12 +20,12 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
           cache: npm
 
       - name: Install dependencies
