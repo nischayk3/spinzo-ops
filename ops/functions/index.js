@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass; iron people take only
 // ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
@@ -131,6 +131,16 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
       const orig = await db.doc(`ops_staff/${td.assignee}`).get();
       if (orig.exists && orig.data().onShift === true) continue;
     }
+    // ⚠️ STATE SYNC: don't re-point a pickup whose order has already progressed
+    // past placed/confirmed (already picked up, processing, ready, …). Without
+    // this, stale tasks are re-assigned to the newly on-shift rider.
+    if (td.userId) {
+      const orderSnap = await db.doc(`users/${td.userId}/orders/${taskDoc.id}`).get();
+      if (orderSnap.exists && !isAwaitingPickup(orderSnap.data().status)) {
+        await db.doc(`ops_tasks/${taskDoc.id}`).delete();
+        continue;
+      }
+    }
     // Re-point the pending pickup to the newly on-shift rider.
     try {
       await db.doc(`ops_tasks/${taskDoc.id}`).update({
@@ -157,13 +167,10 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
       // as a new pickup. Without this, old orders flood the rider queue on shift start.
       if (userId) {
         const orderSnap = await db.doc(`users/${userId}/orders/${orderId}`).get();
-        if (orderSnap.exists) {
-          const st = orderSnap.data().status;
-          if (st && st !== 'placed' && st !== 'confirmed') {
-            // Pickup already done or order progressed — drop the stale parked entry.
-            await db.doc(`ops_queue/${orderId}`).delete();
-            continue;
-          }
+        if (orderSnap.exists && !isAwaitingPickup(orderSnap.data().status)) {
+          // Pickup already done or order progressed — drop the stale parked entry.
+          await db.doc(`ops_queue/${orderId}`).delete();
+          continue;
         }
       }
       const assignee = await selectRider();

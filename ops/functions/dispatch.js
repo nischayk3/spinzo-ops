@@ -47,6 +47,16 @@ function pickupGuard(status) {
 }
 
 /**
+ * True when an order still awaits pickup (placed/confirmed), or the status is
+ * unknown. Used to reject pickups whose order has already progressed.
+ * @param {string|undefined} status
+ * @returns {boolean}
+ */
+function isAwaitingPickup(status) {
+  return !status || status === 'placed' || status === 'confirmed';
+}
+
+/**
  * Map an order status transition to the ops-side task/queue action.
  * @param {string} beforeStatus
  * @param {string} afterStatus
@@ -222,4 +232,4 @@ function splitOrderIntoServices(order) {
   return Object.values(groups);
 }
 
-module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS };
+module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, isAwaitingPickup, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS };
