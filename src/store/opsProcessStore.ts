@@ -25,8 +25,8 @@ interface OpsProcessState {
   isLoading: boolean;
   error: string | null;
   initialize: (uid: string) => void;
-  claim: (orderId: string, tokenNumber?: string) => Promise<OpsProcessingResult>;
-  acceptStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  claim: (orderId: string, tokenNumber?: string, userId?: string, vendorId?: string) => Promise<OpsProcessingResult>;
+  acceptStep: (orderId: string, processId?: string, userId?: string, vendorId?: string) => Promise<OpsProcessingResult>;
   startStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
   completeStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
   completePackaging: (orderId: string, qualityMedia?: any, processId?: string) => Promise<OpsProcessingResult>;
@@ -55,7 +55,7 @@ interface OpsProcessState {
 let unsub: (() => void) | null = null;
 
 const callOps = () =>
-  httpsCallable<{ orderId: string; processId?: string; action: string; garmentCount?: number; qr?: string; seq?: number; qualityMedia?: any; count?: number; garments?: any }, OpsProcessingResult>(
+  httpsCallable<{ orderId: string; processId?: string; action: string; garmentCount?: number; qr?: string; seq?: number; qualityMedia?: any; count?: number; garments?: any; userId?: string; vendorId?: string; tokenNumber?: string }, OpsProcessingResult>(
     functions,
     'opsProcessing'
   );
@@ -89,18 +89,18 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
     );
   },
 
-  claim: async (orderId, tokenNumber) => {
+  claim: async (orderId, tokenNumber, userId, vendorId) => {
     try {
-      const res = await callOps()({ orderId, action: 'claim', tokenNumber } as any);
+      const res = await callOps()({ orderId, action: 'claim', tokenNumber, userId, vendorId } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e.message || String(e) };
     }
   },
 
-  acceptStep: async (orderId, processId) => {
+  acceptStep: async (orderId, processId, userId, vendorId) => {
     try {
-      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'acceptStep' } as any);
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'acceptStep', userId, vendorId } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e.message || String(e) };

@@ -592,14 +592,13 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
   const task = taskSnap.exists ? taskSnap.data() : null;
-  let userId = task && task.userId;
-  let vendorId = (task && task.vendorId) || 'vendor_1';
+  let userId = (data.userId && typeof data.userId === 'string' ? data.userId : null) || (task && task.userId);
+  let vendorId = (data.vendorId && typeof data.vendorId === 'string' ? data.vendorId : null) || (task && task.vendorId) || 'vendor_1';
 
   const processId = data.processId || orderId;
   const processRef = db.doc(`ops_process/${processId}`);
 
-  // Fallback: if the ops_task doesn't carry a userId (e.g. it was deleted during
-  // cancellation), try the ops_process doc which also stores userId/vendorId.
+  // Fallback 1: try ops_process doc which also stores userId/vendorId
   if (!userId) {
     const processSnap = await processRef.get();
     if (processSnap.exists) {
@@ -608,6 +607,35 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       vendorId = pd.vendorId || vendorId;
     }
   }
+
+  // Fallback 2: try ops_queue (parked orders awaiting pickup or helper claim)
+  if (!userId) {
+    const queueSnap = await db.doc(`ops_queue/${orderId}`).get();
+    if (queueSnap.exists) {
+      const qd = queueSnap.data();
+      userId = qd.userId;
+      vendorId = qd.vendorId || vendorId;
+    }
+  }
+
+  // Fallback 3: collectionGroup search across orders if task/process docs were not present
+  if (!userId) {
+    try {
+      const cgSnap = await db.collectionGroup('orders')
+        .where(admin.firestore.FieldPath.documentId(), '==', orderId)
+        .limit(1)
+        .get();
+      if (!cgSnap.empty) {
+        const orderDoc = cgSnap.docs[0];
+        const od = orderDoc.data();
+        userId = od.userId || (orderDoc.ref.parent && orderDoc.ref.parent.parent && orderDoc.ref.parent.parent.id);
+        vendorId = od.vendorId || vendorId;
+      }
+    } catch (e) {
+      console.warn('collectionGroup fallback for orderId failed:', e);
+    }
+  }
+
   if (!userId) return { ok: false, error: 'not_found' };
 
   const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
@@ -699,7 +727,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             steps,
             currentIndex: 0,
             status: steps[0],
-            tokenNumber: tokens[group.serviceType] || order.tokenNumber || '',
+            tokenNumber: tokens[group.serviceType] || data.tokenNumber || order.tokenNumber || '',
             siblingCount: serviceGroups.length,
             stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, startedAt: now } },
             garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },

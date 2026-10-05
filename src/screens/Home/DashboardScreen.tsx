@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, SafeAreaView, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, ScrollView, SafeAreaView, ActivityIndicator, Alert } from 'react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useAttendanceStore, ShiftDoc } from '../../store/attendanceStore';
 import { Clock, Utensils, LogOut, MapPin, AlertCircle, AlertTriangle } from 'lucide-react-native';
@@ -138,25 +138,41 @@ export const DashboardScreen = () => {
   };
 
   const onQRScan = async (data: string) => {
+    const actionToRun = pendingAction;
     setShowQR(false);
+    setPendingAction(null);
     
     if (!data) {
       setLocationError('Invalid QR code.');
-      setPendingAction(null);
       return;
     }
 
+    if (!actionToRun) {
+      return;
+    }
+
+    // Support both SPNZ-STORE:<storeId> format and raw storeId
+    const storeId = data.replace(/^SPNZ-STORE:/i, '').trim();
+
     try {
-      await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      executePendingAction(data);
+      // 5-second race on Android GPS lock with fallback to last-known cached location
+      await Promise.race([
+        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Location timeout')), 5000))
+      ]).catch(async () => {
+        return await Location.getLastKnownPositionAsync();
+      });
+
+      executePendingAction(actionToRun, storeId);
     } catch (e) {
+      console.error('Location error during attendance action:', e);
       setLocationError('Failed to verify location. Please ensure GPS is enabled.');
-      setPendingAction(null);
+      Alert.alert('Location Error', 'Failed to verify location. Please ensure GPS is enabled and try again.');
     }
   };
 
-  const executePendingAction = (storeId: string) => {
-    switch (pendingAction) {
+  const executePendingAction = (action: string, storeId: string) => {
+    switch (action) {
       case 'clockIn': clockIn(storeId); break;
       case 'lunchOut': lunchOut(); break;
       case 'lunchIn': lunchIn(); break;
@@ -164,7 +180,6 @@ export const DashboardScreen = () => {
       case 'shortBreakIn': shortBreakIn(); break;
       case 'clockOut': clockOut(); break;
     }
-    setPendingAction(null);
   };
 
   const getStatusColor = () => {

@@ -34,7 +34,7 @@ export function HelperAssignmentModal() {
     return () => {
       stopAlarm();
     };
-  }, [activeTask?.id]);
+  }, [activeTask?.id, acceptingId]);
 
   // Auto-clear active task if the order was cancelled or completely deleted by someone else
   useEffect(() => {
@@ -60,16 +60,20 @@ export function HelperAssignmentModal() {
 
     try {
       const curStep = activeTask.steps[activeTask.currentIndex] || activeTask.status;
+      const orderTargetId = activeTask.orderId || activeTask.id;
+      const targetUserId = activeTask.userId || order?.userId;
+      const targetVendorId = activeTask.vendorId || order?.vendorId;
+      const token = activeTask.tokenNumber || order?.tokenNumber || '';
 
       if (curStep === 'tagging' && Object.keys(activeTask.stages || {}).length === 0) {
-        const res = await claim(activeTask.id, '');
+        const res = await claim(orderTargetId, token, targetUserId, targetVendorId);
         if (!res.ok) throw new Error(res.error || 'Failed to claim tagging task.');
 
         const staffRef = doc(db, 'ops_staff', staffDoc.uid);
         await runTransaction(db, async (tx) => {
           tx.update(staffRef, {
             activeHelperTask: {
-              orderId: activeTask.id,
+              orderId: orderTargetId,
               step: 'tagging'
             }
           });
@@ -77,14 +81,14 @@ export function HelperAssignmentModal() {
         return;
       }
 
-      const res = await acceptStep(activeTask.id);
+      const res = await acceptStep(orderTargetId, activeTask.id !== orderTargetId ? activeTask.id : undefined, targetUserId, targetVendorId);
       if (!res.ok) throw new Error(res.error || 'Failed to claim task.');
 
       const staffRef = doc(db, 'ops_staff', staffDoc.uid);
       await runTransaction(db, async (tx) => {
         tx.update(staffRef, {
           activeHelperTask: {
-            orderId: activeTask.id,
+            orderId: orderTargetId,
             step: curStep
           }
         });

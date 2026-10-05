@@ -67,22 +67,21 @@ const alarmSound = createAudioPlayer(require('../../assets/sounds/alarm.mp3'));
 let shouldBePlaying = false;
 let singleLoopTimeout: ReturnType<typeof setTimeout> | null = null;
 
-/** Unlock Audio Context and prime Expo AV for iOS Safari */
+/** Unlock Audio Context for web browsers safely */
 export async function unlockAudio() {
   const ac = ensureAudioCtx();
   if (ac) ac.resume().catch(() => {});
 
   try {
-    // Play a silent 20ms burst to unlock the audio engine.
-    // DON'T pause() after — let the engine stay warm so a subsequent play()
-    // from dramaticChime isn't racing against a pending pause() timeout.
-    alarmSound.volume = 0;
-    // Attach .catch() so the play() promise's rejection (e.g. AbortError when a
-    // subsequent pause() interrupts it) is handled, not logged as an uncaught ERROR.
-    Promise.resolve().then(() => { try { alarmSound.play(); } catch (e) { /* best-effort */ } });
-    // Reset volume in the background without pausing; the zero-volume burst
-    // is imperceptible and keeps the audio session alive.
-    setTimeout(() => { alarmSound.volume = 1; }, 50);
+    if (ac?.ctx) {
+      const osc = ac.ctx.createOscillator();
+      const gain = ac.ctx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain);
+      gain.connect(ac.ctx.destination);
+      osc.start();
+      osc.stop(ac.ctx.currentTime + 0.05);
+    }
   } catch (e) {
     console.log('Audio unlock failed:', e);
   }
@@ -128,6 +127,12 @@ export async function stopAlarm() {
   }
   try {
     alarmSound.pause();
+    alarmSound.loop = false;
+    if (typeof alarmSound.seekTo === 'function') {
+      alarmSound.seekTo(0);
+    } else if (typeof alarmSound.currentTime !== 'undefined') {
+      alarmSound.currentTime = 0;
+    }
   } catch (e) {
     console.log('Failed to stop alarm sound', e);
   }

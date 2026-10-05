@@ -133,7 +133,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
-  const handleClaim = () => runAction(() => claim(orderId, ''));
+  const handleClaim = () => runAction(() => claim(orderId, order?.tokenNumber || '', order?.userId, order?.vendorId));
   const handleStart = () => runAction(() => startStep(orderId, process?.id), () => clearActiveHelperTask());
   const handleComplete = () => {
     // Quality and Packaging verification required for packaging step

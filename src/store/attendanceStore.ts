@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { Alert } from 'react-native';
 import { auth, db } from '../config/firebase';
 import { doc, onSnapshot, setDoc, updateDoc, getDoc, Unsubscribe } from '../config/firebase';
 import { useAuthStore } from './authStore';
@@ -130,7 +131,10 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
 
   clockIn: async (storeId) => {
     const user = useAuthStore.getState().user;
-    if (!user) return;
+    if (!user) {
+      Alert.alert('Authentication Error', 'User not found. Please log in again.');
+      return;
+    }
     set({ isLoading: true });
     try {
       const today = getTodayStr();
@@ -152,13 +156,14 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         };
         await setDoc(shiftRef, newShift);
       } else {
-        await updateDoc(shiftRef, { status: 'working', logoutAt: null });
+        await updateDoc(shiftRef, { status: 'working', logoutAt: null, storeId });
       }
       
       // Sync with ops_staff for order assignment
       await useOpsStaffStore.getState().goOnShift(user.id, user.role, user.phone, user.name, { storeId });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to clock in:', err);
+      Alert.alert('Clock In Failed', err?.message || 'Failed to update attendance shift. Please check your network and try again.');
     } finally {
       set({ isLoading: false });
     }
