@@ -266,10 +266,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   };
 
   const handleUnassignHelper = async () => {
-    if (!process) return;
+    if (!process || !order) return;
     setBusy(true);
     try {
-      const res = await useOpsProcessStore.getState().unassignStep(process.id, order?.userId || '');
+      const res = await useOpsProcessStore.getState().unassignStep(order.id, process.id, order.userId || '');
       setBusy(false);
       if (!res.ok) setActionError(friendlyActionError(res.error || 'unknown'));
     } catch (e: any) {
@@ -499,28 +499,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           <Text className="text-gray-900 font-bold mb-4">{stepLabel(cur)}</Text>
           {!started ? (
             <View>
-              {isMachineStep && !machineStartedLocal ? (
-                <TouchableOpacity
-                  onPress={() => setMachineStartedLocal(true)}
-                  disabled={busy}
-                  className="h-14 rounded-xl bg-orange-100 border border-orange-200 items-center justify-center flex-row"
-                >
-                  <Text className="text-orange-700 font-bold text-lg">Start {stepLabel(cur)}</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity
-                  onPress={handleStart}
-                  disabled={busy}
-                  className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
-                >
-                  {busy ? <ActivityIndicator color="#fff" /> : (
-                    <View className="flex-row items-center gap-2">
-                      {isMachineStep && <MachineIcon size={20} color="#fff" />}
-                      <Text className="text-white font-bold text-lg">{isMachineStep ? 'Load Machine & Start' : `Start ${stepLabel(cur)}`}</Text>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              )}
+              <TouchableOpacity
+                onPress={handleStart}
+                disabled={busy}
+                className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
+              >
+                {busy ? <ActivityIndicator color="#fff" /> : (
+                  <View className="flex-row items-center gap-2">
+                    {isMachineStep && <MachineIcon size={20} color="#fff" />}
+                    <Text className="text-white font-bold text-lg">{isMachineStep ? `Start ${stepLabel(cur)}` : `Start ${stepLabel(cur)}`}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
             </View>
           ) : (
             <View>
@@ -941,14 +931,14 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               if (!res.ok) setActionError(friendlyActionError(res.error));
             }}
           />
-          {process && (
+          {process && order && (
             <AssignHelperModal
               visible={showAssignHelperModal}
               onClose={() => setShowAssignHelperModal(false)}
               processId={process.id}
               stepName={cur ? stepLabel(cur) : undefined}
               onAssign={async (helperId) => {
-                const res = await useOpsProcessStore.getState().assignStepToHelper(process.id, order?.userId || '', helperId);
+                const res = await useOpsProcessStore.getState().assignStepToHelper(order.id, process.id, order.userId || '', helperId);
                 if (!res.ok) setActionError(friendlyActionError(res.error));
               }}
             />

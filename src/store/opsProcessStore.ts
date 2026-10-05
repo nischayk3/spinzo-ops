@@ -48,8 +48,8 @@ interface OpsProcessState {
   verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
   unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
-  assignStepToHelper: (processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
-  unassignStep: (processId: string, userId: string) => Promise<SupervisorActionResult>;
+  assignStepToHelper: (orderId: string, processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
+  unassignStep: (orderId: string, processId: string, userId: string) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   reset: () => void;
 }
@@ -261,18 +261,18 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
     }
   },
 
-  assignStepToHelper: async (processId, userId, helperId) => {
+  assignStepToHelper: async (orderId, processId, userId, helperId) => {
     try {
-      const res = await callSupervisor()({ action: 'assignStepToHelper', processId, userId, helperId });
+      const res = await callSupervisor()({ action: 'assignStepToHelper', orderId, processId, userId, helperId });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
 
-  unassignStep: async (processId, userId) => {
+  unassignStep: async (orderId, processId, userId) => {
     try {
-      const res = await callSupervisor()({ action: 'unassignStep', processId, userId });
+      const res = await callSupervisor()({ action: 'unassignStep', orderId, processId, userId });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

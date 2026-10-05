@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { ShiftRole, UserProfile } from '../types';
-import { OpsStaffRoster, resolveRoleFromRoster } from '../utils/opsRole';
+import { OpsStaffRoster, resolveRoleFromRoster, resolveNameFromRoster } from '../utils/opsRole';
 import { Platform } from 'react-native';
 import { auth, db } from '../config/firebase';
 import { useOpsStaffStore } from './opsStaffStore';
@@ -64,18 +64,23 @@ const FALLBACK_ROLE: ShiftRole = 'helper';
 
 // A transient read failure returns null, indistinguishable from "not in the roster";
 // the caller routes null to the NotInRoster gate. Acceptable for Phase 1 (read-only).
-const fetchRosterRole = async (phone: string): Promise<ShiftRole | null> => {
+const fetchRoster = async (): Promise<OpsStaffRoster | null> => {
   try {
     const snap = await getDoc(doc(db, 'config', 'opsStaff'));
     if (!snap.exists()) return null;
-    return resolveRoleFromRoster(phone, snap.data() as OpsStaffRoster);
+    return snap.data() as OpsStaffRoster;
   } catch (err) {
     console.error('[auth] roster lookup failed:', err);
     return null;
   }
 };
 
-const fetchStaffName = async (uid: string): Promise<string> => {
+const fetchStaffName = async (uid: string, phone: string, roster: OpsStaffRoster | null): Promise<string> => {
+  // 1. Check if name is defined in config/opsStaff roster
+  const rosterName = resolveNameFromRoster(phone, roster);
+  if (rosterName) return rosterName;
+
+  // 2. Fallback to reading the ops_staff document
   try {
     const snap = await getDoc(doc(db, 'ops_staff', uid));
     if (snap.exists() && snap.data().name) {
@@ -117,8 +122,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       if (firebaseUser) {
         const phone = firebaseUser.phoneNumber || '';
         set({ authInitialized: true });
-        const role = await fetchRosterRole(phone);
-        const name = await fetchStaffName(firebaseUser.uid);
+        const roster = await fetchRoster();
+        const role = resolveRoleFromRoster(phone, roster);
+        const name = await fetchStaffName(firebaseUser.uid, phone, roster);
         set({
           user: buildUserProfile(firebaseUser.uid, phone, role, name),
           isLoggedIn: true,
@@ -165,8 +171,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     try {
       const result = await confirmationResult.confirm(otp);
       const user = result.user;
-      const role = await fetchRosterRole(user.phoneNumber || '');
-      const name = await fetchStaffName(user.uid);
+      const roster = await fetchRoster();
+      const role = resolveRoleFromRoster(user.phoneNumber || '', roster);
+      const name = await fetchStaffName(user.uid, user.phoneNumber || '', roster);
 
       set({
         user: buildUserProfile(user.uid, user.phoneNumber || '', role, name),

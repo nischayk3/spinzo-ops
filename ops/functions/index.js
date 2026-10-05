@@ -780,10 +780,17 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const s = fresh.stages && fresh.stages[step];
         if (s && s.assignee && s.assignee !== auth.uid) return { ok: false, error: 'already_claimed' };
 
+        const isMachineTask = step === 'getting_washed' || step === 'getting_dried';
         tx.update(processRef, {
           stages: {
             ...(fresh.stages || {}),
-            [step]: { ...(s || {}), assignee: auth.uid, assigneeName: name, acceptedAt: now, startedAt: s?.startedAt || now },
+            [step]: { 
+              ...(s || {}), 
+              assignee: auth.uid, 
+              assigneeName: name, 
+              acceptedAt: now, 
+              ...(isMachineTask ? {} : { startedAt: s?.startedAt || now }) 
+            },
           },
         });
 

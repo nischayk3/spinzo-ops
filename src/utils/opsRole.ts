@@ -2,6 +2,7 @@ import { ShiftRole } from '../types';
 
 export interface OpsStaffRoster {
   phones: Record<string, ShiftRole>;
+  names?: Record<string, string>;
 }
 
 export function normalizePhone(phone: string): string {
@@ -17,4 +18,12 @@ export function resolveRoleFromRoster(
 ): ShiftRole | null {
   if (!phone || !roster?.phones) return null;
   return roster.phones[normalizePhone(phone)] ?? roster.phones[phone] ?? null;
+}
+
+export function resolveNameFromRoster(
+  phone: string | null,
+  roster: OpsStaffRoster | null,
+): string | null {
+  if (!phone || !roster?.names) return null;
+  return roster.names[normalizePhone(phone)] ?? roster.names[phone] ?? null;
 }
