@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version_code:
-        description: "Override versionCode (leave empty to auto-increment)"
+        description: "Override versionCode (default: auto from run number)"
         required: false
         type: string
 
@@ -12,6 +12,7 @@ jobs:
   build:
     name: Build APK
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,43 +26,45 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Setup EAS CLI
-        run: npm install -g eas-cli
-
       - name: Versioning
         run: |
-          if [ -n "${{ inputs.version_code }}" ]; then
-            node -e "
-              const fs = require('fs');
-              const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
-              app.expo.android.versionCode = parseInt('${{ inputs.version_code }}', 10);
-              fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
-            "
-          fi
+          node -e "
+            const fs = require('fs');
+            const app = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+            const vc = '${{ inputs.version_code }}' || String(${{ github.run_number }});
+            app.expo.android.versionCode = parseInt(vc, 10);
+            fs.writeFileSync('app.json', JSON.stringify(app, null, 2) + '\n');
+          "
+
+      - name: Prebuild Android
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Build APK
-        run: eas build --platform android --profile preview --local --non-interactive --output=app-release.apk
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: ./gradlew :app:assembleRelease
+        working-directory: android
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: spinzo-ops-apk
-          path: app-release.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
       - name: Summary
         if: always()
         run: |
           echo "### Android APK Build" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version:** $(node -p "require('./app.json').expo.version" || echo '?')" >> $GITHUB_STEP_SUMMARY
-          echo "- **Package:** $(node -p "require('./app.json').expo.android.package" || echo '?')" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** $(node -p "require('./app.json').expo.version")" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version code:** $(node -p "require('./app.json').expo.android.versionCode")" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package:** $(node -p "require('./app.json').expo.android.package")" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** \`app-release.apk\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
