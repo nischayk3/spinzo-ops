@@ -45,6 +45,7 @@
     },
     "plugins": [
       "expo-status-bar",
+      "./plugins/withGradleJvmArgs",
       [
         "expo-build-properties",
         {
