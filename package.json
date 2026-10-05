@@ -43,7 +43,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "~19.2.2",
     "babel-preset-expo": "^57.0.5",
-    "react-native-css-interop": "^0.2.7",
+    "react-native-css-interop": "0.2.6",
     "tailwindcss": "^3.4.19",
     "typescript": "~5.9.3",
     "vitest": "^2.1.9"
