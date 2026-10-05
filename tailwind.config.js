@@ -15,6 +15,7 @@ module.exports = {
         primary: '#994BFF',
         warning: '#F59E0B',
         error: '#EF4444',
+        danger: '#EF4444',
         info: '#3B82F6',
       }
     },
