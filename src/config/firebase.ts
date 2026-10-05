@@ -21,7 +21,8 @@ import {
   startAfter,
   writeBatch,
   runTransaction,
-  deleteField
+  deleteField,
+  Unsubscribe
 } from 'firebase/firestore';
 import { 
   getAuth, 
@@ -81,5 +82,6 @@ export {
   startAfter,
   writeBatch,
   runTransaction,
-  deleteField
+  deleteField,
+  type Unsubscribe
 };

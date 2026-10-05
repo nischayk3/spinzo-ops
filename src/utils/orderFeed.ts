@@ -20,6 +20,7 @@ export interface FeedOrder {
   customerName?: string;
   customerPhone?: string;
   phone?: string;
+  shortId?: string;
   pickupDetails?: {
     type?: string;
     scheduledDate?: string;
@@ -118,7 +119,7 @@ export function parseOrderTokens(
           return s.includes(cleanKey) || cleanKey.includes(s);
         });
         if (matchingItem) {
-          label = matchingItem.serviceName || matchingItem.name;
+          label = matchingItem.serviceName || matchingItem.name || '';
         }
       }
       if (!label) {

@@ -146,6 +146,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
           logoutAt: null,
           status: 'working',
           lunch: null,
+          shortBreaks: [],
           totalWorkMs: 0,
           totalLunchMs: 0,
         };

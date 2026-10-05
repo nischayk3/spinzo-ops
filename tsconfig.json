@@ -4,5 +4,6 @@
     "strict": true,
     "skipLibCheck": true,
     "jsxImportSource": "nativewind"
-  }
+  },
+  "exclude": ["dist", "android", "ios", "node_modules"]
 }

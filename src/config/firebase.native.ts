@@ -1,6 +1,13 @@
-import firebase from '@react-native-firebase/app';
-import authInstance, { onAuthStateChanged, signInWithPhoneNumber, signOut, ConfirmationResult } from '@react-native-firebase/auth';
-import firestore, {
+import { getApp, getApps } from '@react-native-firebase/app';
+import { 
+  getAuth, 
+  onAuthStateChanged, 
+  signInWithPhoneNumber, 
+  signOut, 
+  type ConfirmationResult 
+} from '@react-native-firebase/auth';
+import {
+  getFirestore,
   collection,
   collectionGroup,
   doc,
@@ -20,19 +27,20 @@ import firestore, {
   startAfter,
   writeBatch,
   runTransaction,
-  deleteField
+  deleteField,
+  type Unsubscribe
 } from '@react-native-firebase/firestore';
-import functionsInstance from '@react-native-firebase/functions';
-import storageInstance from '@react-native-firebase/storage';
+import { getFunctions, httpsCallable } from '@react-native-firebase/functions';
+import { getStorage, ref, uploadBytes, uploadString, getDownloadURL } from '@react-native-firebase/storage';
 
 // Native SDK initializes automatically via google-services.json
-const firebaseApp = firebase.apps.length > 0 ? firebase.app() : firebase.app();
+const firebaseApp = getApps().length > 0 ? getApp() : null;
 
 // Export instances to match web API
-export const auth = authInstance();
-export const db = firestore();
-export const functions = functionsInstance();
-export const storage = storageInstance();
+export const auth: any = getAuth();
+export const db: any = getFirestore();
+export const functions: any = getFunctions(undefined, 'us-central1');
+export const storage: any = getStorage();
 
 // Export modular-style functions from Native SDK
 export {
@@ -60,5 +68,11 @@ export {
   startAfter,
   writeBatch,
   runTransaction,
-  deleteField
+  deleteField,
+  httpsCallable,
+  ref,
+  uploadBytes,
+  uploadString,
+  getDownloadURL,
+  type Unsubscribe
 };

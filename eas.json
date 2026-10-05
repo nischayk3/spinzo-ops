@@ -10,12 +10,20 @@
       "channel": "development"
     },
     "preview": {
+      "autoIncrement": true,
       "android": {
         "buildType": "apk"
       },
       "developmentClient": false,
       "distribution": "internal",
       "channel": "preview"
+    },
+    "production-apk": {
+      "autoIncrement": true,
+      "android": {
+        "buildType": "apk"
+      },
+      "channel": "production"
     },
     "production": {
       "autoIncrement": true,
