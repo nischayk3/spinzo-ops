@@ -35,7 +35,6 @@ interface OpsProcessState {
   scanGarment: (orderId: string, qr: string, processId?: string) => Promise<OpsProcessingResult>;
   unregisterGarment: (orderId: string, seq: number, processId?: string) => Promise<OpsProcessingResult>;
   submitTagging: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
-  markOutForDelivery: (orderId: string) => Promise<OpsProcessingResult>;
   pickupDelivery: (orderId: string) => Promise<OpsProcessingResult>;
   // Simulation-only: registers all of an order's labels in one call by scanning
   // each generated QR server-side. Only available when SIM_SCAN is set, since the
@@ -49,6 +48,7 @@ interface OpsProcessState {
   verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
   unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
+  markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   reset: () => void;
 }
 
@@ -171,9 +171,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
-  markOutForDelivery: async (orderId) => {
+  markOutForDelivery: async (orderId, userId) => {
     try {
-      const res = await callOps()({ orderId, action: 'markOutForDelivery' });
+      const res = await callSupervisor()({ action: 'markOutForDelivery', orderId, userId });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
