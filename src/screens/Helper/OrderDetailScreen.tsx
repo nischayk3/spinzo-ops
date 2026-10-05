@@ -6,6 +6,7 @@ import { QRScanner } from '../../components/QRScanner';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
 import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
+import { AssignHelperModal } from '../../components/Supervisor/AssignHelperModal';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
@@ -111,6 +112,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
   const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
+  const [showAssignHelperModal, setShowAssignHelperModal] = useState(false);
 
 
   const done = process ? isDone(process) : false;
@@ -263,6 +265,19 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  const handleUnassignHelper = async () => {
+    if (!process) return;
+    setBusy(true);
+    try {
+      const res = await useOpsProcessStore.getState().unassignStep(process.id, order?.userId || '');
+      setBusy(false);
+      if (!res.ok) setActionError(friendlyActionError(res.error || 'unknown'));
+    } catch (e: any) {
+      setBusy(false);
+      setActionError(friendlyActionError(e?.message || 'request_failed'));
+    }
+  };
+
   const handleWhatsApp = () => {
     if (!order || !order.customerPhone) return;
     const phone = order.customerPhone.replace(/\D/g, '');
@@ -377,6 +392,38 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       );
     }
 
+    // Supervisor controls for assigning / unassigning
+    const renderSupervisorControls = () => {
+      if (activeRole !== 'supervisor') return null;
+      if (!cur) return null;
+      
+      const hasAssignee = !!curStage?.assignee;
+      
+      return (
+        <View className="mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
+          <Text className="text-gray-500 font-bold mb-2 text-xs uppercase tracking-widest">Supervisor Action</Text>
+          {hasAssignee ? (
+            <View className="flex-row items-center justify-between">
+              <Text className="text-gray-700 font-bold text-sm">Assigned to: {curStage.assigneeName}</Text>
+              <View className="flex-row gap-2">
+                <TouchableOpacity onPress={handleUnassignHelper} className="bg-red-50 border border-red-200 px-3 py-1.5 rounded">
+                  <Text className="text-red-700 font-bold text-xs">Unassign</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowAssignHelperModal(true)} className="bg-purple-50 border border-purple-200 px-3 py-1.5 rounded">
+                  <Text className="text-purple-700 font-bold text-xs">Re-assign</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <TouchableOpacity onPress={() => setShowAssignHelperModal(true)} className="bg-purple-50 border border-purple-200 py-2 rounded items-center flex-row justify-center">
+              <UserPlus size={16} color="#994bff" className="mr-2" />
+              <Text className="text-purple-700 font-bold text-sm">Assign Step to Helper</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      );
+    };
+
     // If someone else has claimed it and we aren't supervisor, show waiting
     if (cur && curStage?.assignee && !isAssignee) {
       return (
@@ -387,21 +434,28 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
 
     if (cur === 'tagging' && (!curStage?.assignee || isAssignee)) {
-      if (activeRole && !canStartStage(activeRole as any, cur)) {
+      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor') {
         return (
           <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
+            {renderSupervisorControls()}
             <Text className="text-gray-500 font-bold">Ready for {stepLabel(cur)}.</Text>
             <Text className="text-gray-400 text-xs mt-1">Please switch to the appropriate role to process.</Text>
           </View>
         );
       }
-      return renderTagging();
+      return (
+        <View>
+          {renderSupervisorControls()}
+          {renderTagging()}
+        </View>
+      );
     }
 
     if (cur && (!curStage?.assignee || isAssignee)) {
-      if (activeRole && !canStartStage(activeRole as any, cur)) {
+      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor') {
         return (
           <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
+            {renderSupervisorControls()}
             <Text className="text-gray-500 font-bold">Ready for {stepLabel(cur)}.</Text>
             <Text className="text-gray-400 text-xs mt-1">Please switch to the appropriate role to process.</Text>
           </View>
@@ -441,6 +495,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
+          {renderSupervisorControls()}
           <Text className="text-gray-900 font-bold mb-4">{stepLabel(cur)}</Text>
           {!started ? (
             <View>
@@ -886,6 +941,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               if (!res.ok) setActionError(friendlyActionError(res.error));
             }}
           />
+          {process && (
+            <AssignHelperModal
+              visible={showAssignHelperModal}
+              onClose={() => setShowAssignHelperModal(false)}
+              processId={process.id}
+              stepName={cur ? stepLabel(cur) : undefined}
+              onAssign={async (helperId) => {
+                const res = await useOpsProcessStore.getState().assignStepToHelper(process.id, order?.userId || '', helperId);
+                if (!res.ok) setActionError(friendlyActionError(res.error));
+              }}
+            />
+          )}
         </>
       )}
 

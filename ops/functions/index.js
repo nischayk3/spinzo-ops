@@ -783,7 +783,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         tx.update(processRef, {
           stages: {
             ...(fresh.stages || {}),
-            [step]: { ...(s || {}), assignee: auth.uid, assigneeName: name },
+            [step]: { ...(s || {}), assignee: auth.uid, assigneeName: name, acceptedAt: now, startedAt: s?.startedAt || now },
           },
         });
 
@@ -819,6 +819,8 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (freshStep !== step) return { ok: false, error: 'invalid_state' };
         const s = fresh.stages && fresh.stages[step];
         if (s && s.startedAt) return { ok: false, error: 'already_started' };
+        // A stage owned by another helper (e.g. supervisor reassigned it) can't be started by me.
+        if (s && s.assignee && s.assignee !== auth.uid && role !== 'supervisor') return { ok: false, error: 'already_claimed' };
 
         // Validate the order status BEFORE issuing any write. In Firestore,
         // returning an error from a tx callback still commits writes already
@@ -830,10 +832,17 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           if (orderFresh.status !== 'processing') return { ok: false, error: 'invalid_state' };
         }
 
+        // Keep the existing owner (a supervisor pressing Start for a helper must not steal it).
         tx.update(processRef, {
           stages: {
             ...(fresh.stages || {}),
-            [step]: { assignee: auth.uid, assigneeName: name, startedAt: now },
+            [step]: {
+              ...(s || {}),
+              assignee: (s && s.assignee) || auth.uid,
+              assigneeName: (s && s.assignee) ? (s.assigneeName || '') : name,
+              acceptedAt: (s && s.acceptedAt) || now,
+              startedAt: now,
+            },
           },
         });
 
@@ -1416,6 +1425,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           }
           return { ok: true, status: 'assigned' };
         }
+      }
 
       if (action === 'unassignPickup') {
         if (order.status !== 'placed' && order.status !== 'confirmed') {
@@ -1437,6 +1447,41 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         }
         return { ok: true, status: 'parked' };
       }
+
+      // ── Helper step assignment (mirror of rider assign/unassign, per process step) ──
+      // Only the CURRENT step's owner changes; progress (startedAt, garments, …) is kept
+      // so a half-done stage can be handed over. Unassigning returns it to the open pool
+      // where the global HelperAssignmentModal offers it to the next free helper.
+      if (action === 'assignStepToHelper' || action === 'unassignStep') {
+        const { processId, helperId } = data;
+        if (!processId || typeof processId !== 'string') return { ok: false, error: 'invalid_input' };
+        const pRef = db.doc(`ops_process/${processId}`);
+        const pSnap = await tx.get(pRef);
+        if (!pSnap.exists) return { ok: false, error: 'not_found' };
+        const p = pSnap.data();
+        const step = p.steps[p.currentIndex];
+        const s = (p.stages && p.stages[step]) || {};
+        if (!step || p.status === 'done' || s.completedAt) return { ok: false, error: 'invalid_state' };
+
+        // eslint-disable-next-line no-unused-vars
+        const { assignee, assigneeName, assignedBy, assignedAt, acceptedAt, ...progress } = s;
+
+        if (action === 'unassignStep') {
+          if (!assignee) return { ok: true, status: 'unassigned' };
+          tx.update(pRef, { [`stages.${step}`]: progress });
+          return { ok: true, status: 'unassigned' };
+        }
+
+        if (!helperId || typeof helperId !== 'string') return { ok: false, error: 'invalid_input' };
+        const hSnap = await tx.get(db.doc(`ops_staff/${helperId}`));
+        const h = hSnap.exists ? hSnap.data() : null;
+        if (!h || h.onShift !== true || h.role === 'rider') return { ok: false, error: 'helper_unavailable' };
+
+        // acceptedAt is cleared so the new helper gets the popup and must acknowledge.
+        tx.update(pRef, {
+          [`stages.${step}`]: { ...progress, assignee: helperId, assigneeName: h.name || '', assignedBy: auth.uid, assignedAt: now },
+        });
+        return { ok: true, status: 'assigned' };
       }
 
       return { ok: false, error: 'invalid_action' };

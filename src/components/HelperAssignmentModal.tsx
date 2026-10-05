@@ -121,6 +121,13 @@ export function HelperAssignmentModal() {
               <BellRing size={30} color="#994BFF" />
             </View>
             <Text className="text-2xl font-black text-textPrimary text-center">New Task Available</Text>
+            
+            {activeTask.isPushedToMe && (
+              <View className="mt-2 bg-purple-500 rounded-full px-3 py-1">
+                <Text className="text-white font-bold text-xs uppercase tracking-widest">Assigned by Supervisor</Text>
+              </View>
+            )}
+
             <View className="mt-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20">
               <Text className="text-primary font-black uppercase tracking-widest text-sm">{stepLabel(curStep)}</Text>
             </View>

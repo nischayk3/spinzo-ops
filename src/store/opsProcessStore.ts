@@ -48,6 +48,8 @@ interface OpsProcessState {
   verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
   unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
+  assignStepToHelper: (processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
+  unassignStep: (processId: string, userId: string) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   reset: () => void;
 }
@@ -64,7 +66,7 @@ const getProcessId = (orderId: string): string =>
   useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.orderId === orderId)?.id || orderId;
 
 const callSupervisor = () =>
-  httpsCallable<{ action: string; orderId: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; isDelivery?: boolean; proofUrl?: string }, SupervisorActionResult>(
+  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string }, SupervisorActionResult>(
     functions,
     'supervisorActions'
   );
@@ -253,6 +255,24 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
   unassignPickup: async (orderId, userId) => {
     try {
       const res = await callSupervisor()({ action: 'unassignPickup', orderId, userId });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+
+  assignStepToHelper: async (processId, userId, helperId) => {
+    try {
+      const res = await callSupervisor()({ action: 'assignStepToHelper', processId, userId, helperId });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+
+  unassignStep: async (processId, userId) => {
+    try {
+      const res = await callSupervisor()({ action: 'unassignStep', processId, userId });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

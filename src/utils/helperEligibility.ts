@@ -1,4 +1,4 @@
-import { OpsProcess, currentStep, isDone, myInProgress } from './opsProcess';
+import { OpsProcess, currentStep, isDone, isHelperBusy } from './opsProcess';
 import { StoreResources } from '../store/storeResourcesStore';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -59,73 +59,65 @@ function isOrderTerminal(status?: string): boolean {
   return status === 'cancelled' || status === 'ready' || status === 'out_for_delivery' || status === 'delivered';
 }
 
+// ─── Busy / Push Helpers ───────────────────────────────────────────────────────
+
+/** A supervisor pushed this stage to me and I haven't acknowledged it yet. */
+export function isPushedToMe(p: OpsProcess, uid: string): boolean {
+  const cur = currentStep(p);
+  const s = cur ? p.stages[cur] : undefined;
+  return !!s && s.assignee === uid && !!s.assignedBy && !s.acceptedAt && !s.completedAt;
+}
+
+/**
+ * `ops_staff.activeHelperTask` is only trusted while the claim/accept write hasn't
+ * reached our snapshot yet. Once the process reflects reality (or a supervisor
+ * reassigned it) the field is stale and must not keep the helper busy.
+ */
+function isAcceptInFlight(processes: OpsProcess[], orders: any[], task: ActiveHelperTask | null): boolean {
+  if (!task) return false;
+  const forOrder = processes.filter(p => p.orderId === task.orderId);
+  if (forOrder.length === 0) {
+    return orders.some(o => o.id === task.orderId && o.status === 'pickup_completed'); // claim in flight
+  }
+  return forOrder.some(p => currentStep(p) === task.step && !p.stages[task.step]?.assignee);
+}
+
 // ─── Eligibility Check ─────────────────────────────────────────────────────────
 
 /**
- * Check if a specific helper is eligible to receive a popup for a given process.
- * This function is pure — no side effects, no Firestore calls.
+ * Can a FREE helper be offered this process? Pure — no side effects.
+ * (The busy gate lives in getTopEligibleTask.)
  */
 export function isHelperEligible(
   process: OpsProcess,
-  uid: string,
   role: string,
-  activeTask: ActiveHelperTask | null,
-  isBusyWithMachine: boolean,
   machineAtCapacity: boolean
 ): boolean {
   if (isDone(process) || process.status === 'cancelled') return false;
 
   const cur = currentStep(process);
-  if (!cur) return false;
+  if (!cur || !(cur in STEP_PRIORITY)) return false; // unknown step / iron_ready
 
-  const stage = process.stages[cur];
+  // Already owned by someone (incl. me) → not an open offer
+  if (process.stages[cur]?.assignee) return false;
 
-  // Already assigned to someone else → not my problem
-  if (stage?.assignee && stage.assignee !== uid) return false;
-  // Already assigned to me → no need to popup again
-  if (stage?.assignee === uid) return false;
-
-  // If I have a machine running (wash/dry started but not completed), suppress ALL popups
-  if (isBusyWithMachine) return false;
-
-  // If the MACHINE for this step is at capacity globally, don't show it to anyone
+  // The machine for this step is full store-wide → don't offer to anyone
   if (machineAtCapacity) return false;
 
-  // Role + state constraints
-  switch (cur) {
-    case 'tagging':
-      if (activeTask) return false;
-      return true;
-
-    case 'getting_ironed':
-      // Only iron specialists (or helpers/admins)
-      if (role !== 'admin' && role !== 'iron' && role !== 'helper') return false;
-      if (activeTask) return false;
-      return true;
-
-    case 'packaging':
-      if (activeTask) return false;
-      return true;
-
-    case 'getting_washed':
-    case 'getting_dried':
-    case 'prestain':
-      if (activeTask) return false;
-      return true;
-
-    case 'iron_ready':
-      return false;
-
-    default:
-      return false;
-  }
+  // Only iron specialists (or helpers/admins)
+  if (cur === 'getting_ironed' && role !== 'admin' && role !== 'iron' && role !== 'helper') return false;
+  return true;
 }
 
 // ─── Main Entry Point ──────────────────────────────────────────────────────────
 
 /**
  * Given all processes, all orders, the helper's identity and state, and the store's
- * resource config, returns the single most critical eligible task to show in the popup.
+ * resource config, returns the single most critical task to show in the popup.
+ *
+ * Availability model:
+ *   Accept → BUSY (loading) → Start machine → FREE (machine runs) → later Unload & Complete.
+ *   Hands-on steps (tagging, ironing, packaging) keep the helper busy until completed.
  *
  * Scalable: works correctly whether you have 1 washer or 10, 1 helper or 20.
  */
@@ -143,55 +135,46 @@ export function getTopEligibleTask(
   // orders without clocking in.
   if (!onShift) return null;
 
-  // ── Pre-compute helper's personal machine status ──
-  const isBusyWithMachine = processes.some(p => {
-    const cur = currentStep(p);
-    if (!cur) return false;
-    if (cur !== 'getting_washed' && cur !== 'getting_dried') return false;
-    return myInProgress(p, uid);
-  });
+  // Ignore processes whose order is already finished/cancelled.
+  const live = processes.filter(p => !isOrderTerminal(orders.find(o => o.id === p.orderId)?.status));
+
+  // ── Busy gate: hands-on work in progress (a running machine does NOT count) ──
+  if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
+
+  // ── 0. Supervisor-assigned tasks always surface so the helper acknowledges them ──
+  const pushed = live.find(p => isPushedToMe(p, uid));
+  if (pushed) return pushed;
 
   // ── 1. Check for unclaimed orders that need tagging ──
-  if (!activeTask && !isBusyWithMachine) {
-    const claimedOrderIds = new Set(processes.map(p => p.orderId));
-    const taggingOrders = orders.filter(o =>
-      o.status === 'pickup_completed' && !claimedOrderIds.has(o.id)
-    );
-    if (taggingOrders.length > 0) {
-      const o = taggingOrders[0];
-      return {
-        id: o.id,
-        orderId: o.id,
-        userId: o.userId,
-        vendorId: o.vendorId,
-        steps: ['tagging'],
-        currentIndex: 0,
-        status: 'tagging',
-        stages: {},
-        garments: { labels: [], registered: [] },
-      };
-    }
+  const claimedOrderIds = new Set(processes.map(p => p.orderId));
+  const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
+  if (o) {
+    return {
+      id: o.id,
+      orderId: o.id,
+      userId: o.userId,
+      vendorId: o.vendorId,
+      steps: ['tagging'],
+      currentIndex: 0,
+      status: 'tagging',
+      stages: {},
+      garments: { labels: [], registered: [] },
+    };
   }
 
   // ── 2. Filter eligible processes (with global machine capacity check) ──
-  const eligible = processes.filter(p => {
-    const order = orders.find(o => o.id === p.orderId);
-    if (isOrderTerminal(order?.status)) return false;
-
+  const eligible = live.filter(p => {
     const cur = currentStep(p);
-    const machineAtCapacity = cur ? isMachineAtCapacity(processes, cur, resources) : false;
-
-    return isHelperEligible(p, uid, role, activeTask, isBusyWithMachine, machineAtCapacity);
+    // A started-but-unassigned stage (supervisor unassigned it mid-run) already
+    // occupies its machine — don't count it against itself.
+    const atCapacity = !!cur && !p.stages[cur]?.startedAt && isMachineAtCapacity(live, cur, resources);
+    return isHelperEligible(p, role, atCapacity);
   });
 
   if (eligible.length === 0) return null;
 
   // ── 3. Sort by priority: finish almost-done work first ──
-  eligible.sort((a, b) => {
-    const pa = getStepPriority(currentStep(a));
-    const pb = getStepPriority(currentStep(b));
-    return pa - pb;
-  });
+  eligible.sort((a, b) => getStepPriority(currentStep(a)) - getStepPriority(currentStep(b)));
 
   return eligible[0];
 }

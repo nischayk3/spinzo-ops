@@ -4,6 +4,9 @@ export interface StageRecord {
   startedAt?: unknown;
   completedAt?: unknown;
   durationMs?: number;
+  assignedBy?: string;   // supervisor uid when the stage was pushed to a helper
+  assignedAt?: unknown;
+  acceptedAt?: unknown;  // helper acknowledged (popup Accept or pressed Start)
 }
 export interface GarmentLabel { seq: number; qr: string; }
 export interface GarmentRegistration { seq: number; qr?: string; scannedAt?: unknown; scannedBy?: string; }
@@ -109,6 +112,26 @@ export function myInProgress(p: OpsProcess, uid: string): boolean {
   if (!cur || isDone(p)) return false;
   const s = stage(p, cur);
   return !!s?.assignee && s.assignee === uid && !s.completedAt;
+}
+
+// Wash/dry run unattended once started — the helper is free while the machine runs.
+export function isMachineStep(step: string | null | undefined): boolean {
+  return step === 'getting_washed' || step === 'getting_dried';
+}
+
+/**
+ * The helper's hands are on this stage: accepted but not started yet (e.g. loading
+ * the machine), or a started hands-on step (tagging, ironing, packaging…).
+ * A started machine step does NOT count — the machine is doing the work.
+ */
+export function holdsBusyStage(p: OpsProcess, uid: string): boolean {
+  if (!myInProgress(p, uid)) return false;
+  const cur = currentStep(p)!;
+  return !p.stages[cur]?.startedAt || !isMachineStep(cur);
+}
+
+export function isHelperBusy(processes: OpsProcess[], uid: string): boolean {
+  return processes.some(p => holdsBusyStage(p, uid));
 }
 
 export function currentStepLabel(p: Pick<OpsProcess, 'steps' | 'currentIndex' | 'status'>): string {
