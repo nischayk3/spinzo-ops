@@ -48,9 +48,6 @@
     "typescript": "~5.9.3",
     "vitest": "^2.1.9"
   },
-  "optionalDependencies": {
-    "lightningcss-linux-x64-gnu": "1.27.0"
-  },
   "scripts": {
     "build": "expo export -p web",
     "start": "expo start",
