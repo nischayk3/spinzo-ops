@@ -3,66 +3,13 @@ import { View, Text, Modal, ScrollView, TouchableOpacity, ActivityIndicator, Ale
 import { X, Minus, Plus, AlertTriangle } from 'lucide-react-native';
 import { httpsCallable } from 'firebase/functions';
 import { functions } from '../config/firebase';
+import { SHOE_EDIT_CATEGORIES, calculateItemPrice, calculateDeliveryFee } from '../utils/editPricing';
 
 interface EditOrderModalProps {
   visible: boolean;
   onClose: () => void;
   order: any; // FeedOrder with items
 }
-
-// ── Pricing Logic (mirrors production AdminOrdersScreen) ──────────────
-
-const calculateItemPrice = (item: any): number => {
-  const sid = (item.serviceId || item.serviceType || '').toLowerCase();
-  if (sid === 'wash_fold') {
-    const base = (item.weight || 5) * 85;
-    const ironing = (item.ironingEnabled && item.ironingCount) ? (item.ironingCount * 18) : 0;
-    if (item.isCreditItem) return item.totalPrice;
-    return base + ironing;
-  }
-  if (sid === 'wash_iron') {
-    return (item.weight || 5) * 140;
-  }
-  if (sid === 'ironing_addon' || sid === 'ironing' || item.serviceName?.toLowerCase().includes('ironing')) {
-    const count = item.clothesCount || item.ironingCount || item.quantity || 0;
-    return count * 18;
-  }
-  if (sid === 'blanket_wash') {
-    const single = item.singleBlanketCount || 0;
-    const double = item.doubleBlanketCount || 0;
-    return (single * 299) + (double * 399);
-  }
-  return item.totalPrice || 0;
-};
-
-const calculateDeliveryFee = (orderItems: any[]): number => {
-  if (!orderItems || orderItems.length === 0) return 0;
-  const hasWashFoldOrWashIron = orderItems.some((item) => {
-    const sid = (item.serviceId || item.serviceType || '').toLowerCase();
-    return sid === 'wash_fold' || sid === 'wash_iron' || sid === 'premium_laundry';
-  });
-  const hasIroning = orderItems.some((item) => {
-    const sid = (item.serviceId || item.serviceType || '').toLowerCase();
-    return sid === 'ironing' || sid === 'ironing_addon';
-  });
-  const hasBlanketWash = orderItems.some((item) => {
-    const sid = (item.serviceId || item.serviceType || '').toLowerCase();
-    return sid === 'blanket_wash';
-  });
-  if (hasWashFoldOrWashIron) return 0;
-  if (hasIroning) {
-    const totalIroningPieces = orderItems.reduce((sum, item) => {
-      const sid = (item.serviceId || item.serviceType || '').toLowerCase();
-      if (sid === 'ironing' || sid === 'ironing_addon') return sum + (item.ironingCount || item.clothesCount || item.quantity || 0);
-      return sum;
-    }, 0);
-    return totalIroningPieces >= 20 ? 50 : 80;
-  }
-  if (hasBlanketWash) return 50;
-  return 0;
-};
-
-// ────────────────────────────────────────────────────────────────────────
 
 export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps) {
   const [items, setItems] = useState<any[]>([]);
@@ -127,8 +74,28 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
       if (updatedItem.doubleBlanketCount > 0) parts.push(`${updatedItem.doubleBlanketCount} Double`);
       updatedItem.description = parts.join(', ');
     }
-    if (sid === 'ironing' || sid === 'ironing_addon') {
-      updatedItem.ironingPrice = (updatedItem.ironingCount || updatedItem.clothesCount || 0) * 18;
+    if (sid === 'ironing') {
+      updatedItem.ironingPrice = (updatedItem.ironingCount || updatedItem.clothesCount || 0) * 10;
+    }
+    if (sid === 'premium_laundry') {
+      const weight = updatedItem.weight || 5;
+      const estClothes = Math.round(weight * 3);
+      updatedItem.clothesCount = estClothes;
+      updatedItem.ironingCount = estClothes;
+      updatedItem.ironingEnabled = true;
+      updatedItem.ironingPrice = 0;
+      updatedItem.quantity = 1;
+    }
+    if (sid === 'shoe_clean') {
+      const shoeItems = updatedItem.shoeItems || [];
+      const subtotal = shoeItems.reduce((sum: number, s: any) => sum + (s.quantity || 0) * (s.price || 0), 0);
+      const totalCount = shoeItems.reduce((sum: number, s: any) => sum + (s.quantity || 0), 0);
+      updatedItem.shoeSubtotal = subtotal;
+      updatedItem.shoeCount = totalCount;
+      updatedItem.shoeQuantity = totalCount;
+      updatedItem.quantity = totalCount;
+      updatedItem.deliveryFee = totalCount > 0 ? 50 : 0;
+      updatedItem.description = shoeItems.filter((s: any) => s.quantity > 0).map((s: any) => `${s.name} ×${s.quantity}`).join(', ');
     }
 
     // Recalculate price
@@ -136,7 +103,7 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
 
     if (sid === 'wash_fold' && !updatedItem.isCreditItem) {
       updatedItem.quantity = 1;
-      const maxPieces = Math.round((updatedItem.weight || 5) * 3.5);
+      const maxPieces = Math.round((updatedItem.weight || 5) * 3);
       if (!updatedItem.ironingEnabled) {
         updatedItem.ironingCount = 0;
       } else if (updatedItem.ironingCount > maxPieces) {
@@ -146,6 +113,34 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
 
     newItems[index] = updatedItem;
     setItems(newItems);
+  };
+
+  const updateShoeCount = (itemIndex: number, categoryId: string, delta: number) => {
+    const currentItem = items[itemIndex];
+    const existingItems: any[] = currentItem.shoeItems ? [...currentItem.shoeItems] : [];
+
+    const counts: Record<string, number> = {};
+    SHOE_EDIT_CATEGORIES.forEach((cat) => {
+      const found = existingItems.find((s: any) => s.type === cat.id);
+      counts[cat.id] = found ? (found.quantity || 0) : 0;
+    });
+
+    if (existingItems.length === 0 && (currentItem.shoeQuantity || currentItem.shoeCount || 0) > 0) {
+      counts['canvas_sports'] = currentItem.shoeQuantity || currentItem.shoeCount || 0;
+    }
+
+    counts[categoryId] = Math.max(0, (counts[categoryId] || 0) + delta);
+
+    const updatedShoeItems = SHOE_EDIT_CATEGORIES
+      .filter((cat) => (counts[cat.id] || 0) > 0)
+      .map((cat) => ({
+        type: cat.id,
+        name: cat.name,
+        quantity: counts[cat.id],
+        price: cat.price,
+      }));
+
+    updateItem(itemIndex, { shoeItems: updatedShoeItems });
   };
 
   const handleSave = async () => {
@@ -281,10 +276,10 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
                   />
                 )}
 
-                {/* Steam Iron */}
-                {(sid === 'ironing' || sid === 'ironing_addon' || item.serviceName?.toLowerCase().includes('ironing')) && (
+                {/* Steam Iron (standalone) */}
+                {sid === 'ironing' && (
                   <CounterRow
-                    label="Number of Pieces (₹18/pc)"
+                    label="Number of Pieces (₹10/pc)"
                     value={item.ironingCount || item.clothesCount || 0}
                     onDecrement={() => updateItem(index, {
                       ironingCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
@@ -296,6 +291,68 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
                     })}
                     disableDecrement={(item.ironingCount || item.clothesCount || 0) <= 1}
                   />
+                )}
+
+                {/* Ironing Add-on */}
+                {(sid === 'ironing_addon' || (item.serviceName?.toLowerCase().includes('ironing') && sid !== 'ironing')) && (
+                  <CounterRow
+                    label="Ironing Count (₹18/pc)"
+                    value={item.ironingCount || item.clothesCount || 0}
+                    onDecrement={() => updateItem(index, {
+                      ironingCount: Math.max(0, (item.ironingCount || item.clothesCount || 0) - 1),
+                      clothesCount: Math.max(0, (item.ironingCount || item.clothesCount || 0) - 1),
+                    })}
+                    onIncrement={() => updateItem(index, {
+                      ironingCount: (item.ironingCount || item.clothesCount || 0) + 1,
+                      clothesCount: (item.ironingCount || item.clothesCount || 0) + 1,
+                    })}
+                    disableDecrement={(item.ironingCount || item.clothesCount || 0) <= 0}
+                  />
+                )}
+
+                {/* Premium Laundry */}
+                {sid === 'premium_laundry' && (
+                  <View className="gap-3">
+                    <CounterRow
+                      label="Adjust Weight (₹200/kg)"
+                      value={`${item.weight || 5} kg`}
+                      onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
+                      onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
+                      disableDecrement={(item.weight || 5) <= 5}
+                    />
+                    <View className="flex-row items-center justify-between">
+                      <View className="bg-purple-100 px-2 py-0.5 rounded">
+                        <Text className="text-purple-700 font-bold text-[10px]">STEAM PRESS INCLUDED</Text>
+                      </View>
+                      <Text className="text-gray-500 text-xs">~{Math.round((item.weight || 5) * 3)} clothes · Free delivery</Text>
+                    </View>
+                  </View>
+                )}
+
+                {/* Shoe Clean */}
+                {sid === 'shoe_clean' && (
+                  <View className="gap-3">
+                    <Text className="text-xs text-gray-500 font-medium">Adjust Footwear Quantities</Text>
+                    {SHOE_EDIT_CATEGORIES.map((cat) => {
+                      const currentCount = item.shoeItems?.find((s: any) => s.type === cat.id)?.quantity ||
+                        (cat.id === 'canvas_sports' && (!item.shoeItems || item.shoeItems.length === 0) ? (item.shoeQuantity || item.shoeCount || 0) : 0);
+                      return (
+                        <CounterRow
+                          key={cat.id}
+                          label={`${cat.name} (₹${cat.price}/pair)`}
+                          value={currentCount}
+                          onDecrement={() => updateShoeCount(index, cat.id, -1)}
+                          onIncrement={() => updateShoeCount(index, cat.id, 1)}
+                          disableDecrement={currentCount <= 0}
+                        />
+                      );
+                    })}
+                    <View className="pt-2 border-t border-gray-200">
+                      <Text className="text-gray-500 text-xs">
+                        Footwear Subtotal: ₹{item.shoeSubtotal || 0} + Pickup & Delivery: ₹{(item.shoeSubtotal || 0) > 0 ? (item.deliveryFee ?? 50) : 0}
+                      </Text>
+                    </View>
+                  </View>
                 )}
 
                 {/* Blanket Wash */}

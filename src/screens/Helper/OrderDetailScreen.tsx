@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2 } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
@@ -437,7 +437,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       }
 
       const isMachineStep = cur === 'getting_washed' || cur === 'getting_dried';
-      const machineIcon = cur === 'getting_washed' ? '🫧' : '☀️';
+      const MachineIcon = cur === 'getting_washed' ? Droplets : Sun;
 
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
@@ -458,7 +458,12 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   disabled={busy}
                   className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
                 >
-                  {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">{isMachineStep ? `${machineIcon} Load Machine & Start` : `Start ${stepLabel(cur)}`}</Text>}
+                  {busy ? <ActivityIndicator color="#fff" /> : (
+                    <View className="flex-row items-center gap-2">
+                      {isMachineStep && <MachineIcon size={20} color="#fff" />}
+                      <Text className="text-white font-bold text-lg">{isMachineStep ? 'Load Machine & Start' : `Start ${stepLabel(cur)}`}</Text>
+                    </View>
+                  )}
                 </TouchableOpacity>
               )}
             </View>
@@ -475,7 +480,12 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 disabled={busy}
                 className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-green-500'}`}
               >
-                {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">{isMachineStep ? '✅ Unload & Complete' : `Complete ${stepLabel(cur)}`}</Text>}
+                {busy ? <ActivityIndicator color="#fff" /> : (
+                  <View className="flex-row items-center gap-2">
+                    {isMachineStep && <Check size={20} color="#fff" />}
+                    <Text className="text-white font-bold text-lg">{isMachineStep ? 'Unload & Complete' : `Complete ${stepLabel(cur)}`}</Text>
+                  </View>
+                )}
               </TouchableOpacity>
             </View>
           )}
@@ -582,12 +592,12 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
         {/* Header */}
         <View className="flex-row items-center justify-between mb-4 z-10">
-          <TouchableOpacity onPress={() => navigation.goBack()} className="w-10 h-10 rounded-full bg-white items-center justify-center shadow-sm border border-gray-100">
+          <TouchableOpacity onPress={() => navigation.goBack()} className="w-10 h-10 rounded-full bg-white items-center justify-center shadow-sm border border-gray-100 shrink-0">
             <X size={20} color="#64748b" />
           </TouchableOpacity>
-          <View className="items-center">
+          <View className="flex-1 items-center mx-2">
             <View className="flex-row items-center flex-wrap gap-2 justify-center">
-              <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
+              <Text className="text-gray-900 font-bold text-lg shrink-0">#{orderId.slice(-6).toUpperCase()}</Text>
               {(() => {
                 const tokenChips = parseOrderTokens(order?.tokens, order?.tokenNumber || process?.tokenNumber, order?.items);
                 if (tokenChips.length === 0) return null;
@@ -602,7 +612,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             </View>
             {process && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
-          <View className="flex-row gap-2 items-center">
+          <View className="flex-row gap-2 items-center shrink-0">
             <View className={`rounded-full px-3 py-1 border justify-center h-8 ${done ? 'bg-green-50 border-green-200' : 'bg-purple-50 border-purple-200'}`}>
               <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-purple-700'}`}>{statusLabel}</Text>
             </View>
