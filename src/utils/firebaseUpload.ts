@@ -1,38 +1,35 @@
-import { ref, uploadBytes, uploadString, getDownloadURL } from 'firebase/storage';
-import { storage } from '../config/firebase';
+import { Platform } from 'react-native';
+import { storage, ref, uploadBytes, uploadString, getDownloadURL } from '../config/firebase';
 
 export async function uploadMediaToStorage(uri: string, path: string, isVideo: boolean = false): Promise<string> {
   const timestamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const extension = isVideo ? 'mp4' : 'jpg';
-  const storageRef = ref(storage, `${path}/media_${timestamp}.${extension}`);
+  const mimeType = isVideo ? 'video/mp4' : 'image/jpeg';
+  const fullPath = `${path}/media_${timestamp}.${extension}`;
+  const storageRef = ref(storage, fullPath);
 
   try {
     // Case 1: Base64 data URI
     if (uri.startsWith('data:')) {
       const base64Data = uri.split(',')[1];
-      const mimeType = isVideo ? 'video/mp4' : 'image/jpeg';
       await uploadString(storageRef, base64Data, 'base64', { contentType: mimeType });
       return await getDownloadURL(storageRef);
     }
 
-    // Case 2: file:// or http(s):// URI — try blob upload first (works on web)
-    try {
-      const response = await fetch(uri);
-      const blob = await response.blob();
-      const mimeType = isVideo ? 'video/mp4' : 'image/jpeg';
-      await uploadBytes(storageRef, blob, { contentType: mimeType });
-      return await getDownloadURL(storageRef);
-    } catch (blobError) {
-      // Case 3: Fallback for mobile where fetch(file://) fails
-      console.warn('Blob upload failed, trying FileSystem fallback:', blobError);
-      const { readAsStringAsync } = require('expo-file-system');
-      const base64Data = await readAsStringAsync(uri, { encoding: 'base64' });
-      const mimeType = isVideo ? 'video/mp4' : 'image/jpeg';
-      await uploadString(storageRef, base64Data, 'base64', { contentType: mimeType });
+    // Case 2: Native Android / iOS (APK) using @react-native-firebase/storage native putFile
+    if (Platform.OS !== 'web' && typeof (storageRef as any).putFile === 'function') {
+      await (storageRef as any).putFile(uri, { contentType: mimeType });
       return await getDownloadURL(storageRef);
     }
+
+    // Case 3: Web or fallback using blob upload
+    const response = await fetch(uri);
+    const blob = await response.blob();
+    await uploadBytes(storageRef, blob, { contentType: mimeType });
+    return await getDownloadURL(storageRef);
   } catch (err) {
     console.error('Error uploading media to storage:', err);
     throw err;
   }
 }
+

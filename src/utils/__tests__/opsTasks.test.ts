@@ -56,6 +56,10 @@ describe('pickupLabel', () => {
     const t = { pickupSlot: { type: 'scheduled', scheduledDate: '2026-08-07', scheduledTime: '14:00' } } as any;
     expect(pickupLabel(t)).toBe(slotLabel(t.pickupSlot));
   });
+  it('renders instant slot with time window', () => {
+    const t = { pickupSlot: { isInstant: true, scheduledTime: '11:00 - 11:30' } } as any;
+    expect(pickupLabel(t)).toBe('Instant • 11:00 - 11:30');
+  });
   it('falls back to a dash when no slot', () => {
     expect(pickupLabel({} as any)).toBe('—');
   });

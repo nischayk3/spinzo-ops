@@ -1,16 +1,22 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
-import { announceStageTransition, announceNewOrder } from './alerts';
-import { stepLabel } from './opsProcess';
+import { useAuthStore } from '../store/authStore';
+import { useOpsStaffStore } from '../store/opsStaffStore';
+import { announceStageTransition, announceNewOrder, announceWasherMilestone } from './alerts';
+import { stepLabel, currentStep } from './opsProcess';
 
 const seenStates: Record<string, number> = {};
 const seenOrders = new Set<string>();
+const announcedMilestones = new Set<string>();
 
 export function useLifecycleNotifications() {
   const processes = useOpsProcessStore(s => s.processes);
   const orders = useOrderFeedStore(s => s.orders);
   const isOrdersLoading = useOrderFeedStore(s => s.isLoading);
+  const activeRole = useAuthStore(s => s.activeRole);
+  const staffDoc = useOpsStaffStore(s => s.staffDoc);
+  const myUid = staffDoc?.uid;
 
   // 1. Announce Stage Transitions
   useEffect(() => {
@@ -48,4 +54,58 @@ export function useLifecycleNotifications() {
       }
     });
   }, [orders, isOrdersLoading]);
+
+  // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete)
+  useEffect(() => {
+    const isSupervisorOrAdmin = activeRole === 'supervisor' || activeRole === 'admin';
+
+    const checkWasherMilestones = () => {
+      const now = Date.now();
+      processes.forEach(p => {
+        const cur = currentStep(p);
+        if (cur !== 'getting_washed') return;
+        const stage = p.stages?.getting_washed;
+        if (!stage || !stage.startedAt || stage.completedAt) return;
+
+        // Only alert the assigned helper or supervisors/admins
+        const isMyTask = myUid && stage.assignee === myUid;
+        if (!isMyTask && !isSupervisorOrAdmin) return;
+
+        const startMs = typeof (stage.startedAt as any).toMillis === 'function'
+          ? (stage.startedAt as any).toMillis()
+          : (stage.startedAt as any).seconds
+          ? (stage.startedAt as any).seconds * 1000
+          : new Date(stage.startedAt as any).getTime();
+
+        if (!startMs || isNaN(startMs)) return;
+        const elapsedMinutes = (now - startMs) / (60 * 1000);
+
+        // Milestone 1: Detergent at 13 minutes
+        const detKey = `${p.id}_detergent`;
+        if (elapsedMinutes >= 13 && !stage.detergentAddedAt && !announcedMilestones.has(detKey)) {
+          announcedMilestones.add(detKey);
+          announceWasherMilestone(p.orderId, 'detergent');
+        }
+
+        // Milestone 2: Softener at 21 minutes
+        const softKey = `${p.id}_softener`;
+        if (elapsedMinutes >= 21 && !stage.softenerAddedAt && !announcedMilestones.has(softKey)) {
+          announcedMilestones.add(softKey);
+          announceWasherMilestone(p.orderId, 'softener');
+        }
+
+        // Milestone 3: Cycle Complete at 35 minutes
+        const compKey = `${p.id}_complete`;
+        if (elapsedMinutes >= 35 && !announcedMilestones.has(compKey)) {
+          announcedMilestones.add(compKey);
+          announceWasherMilestone(p.orderId, 'complete');
+        }
+      });
+    };
+
+    // Check immediately on processes change and poll every 5 seconds
+    checkWasherMilestones();
+    const interval = setInterval(checkWasherMilestones, 5000);
+    return () => clearInterval(interval);
+  }, [processes, activeRole, myUid]);
 }

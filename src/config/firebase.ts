@@ -32,8 +32,8 @@ import {
   signOut,
   ConfirmationResult
 } from 'firebase/auth';
-import { getFunctions, Functions } from 'firebase/functions';
-import { getStorage, FirebaseStorage } from 'firebase/storage';
+import { getFunctions, Functions, httpsCallable } from 'firebase/functions';
+import { getStorage, FirebaseStorage, ref, uploadBytes, uploadString, getDownloadURL } from 'firebase/storage';
 
 export const firebaseConfig = {
   apiKey: 'AIzaSyBnwzJVax1qx2oN3nf7INqpXLF8rVrUWqw',
@@ -56,7 +56,12 @@ export {
   db, 
   auth, 
   functions, 
+  httpsCallable,
   storage,
+  ref,
+  uploadBytes,
+  uploadString,
+  getDownloadURL,
   // Auth exports
   onAuthStateChanged,
   signInWithPhoneNumber,
@@ -85,3 +90,4 @@ export {
   deleteField,
   type Unsubscribe
 };
+

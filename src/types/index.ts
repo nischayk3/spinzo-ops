@@ -1,5 +1,5 @@
 // ─── Auth Roles ───
-export type ShiftRole = 'rider' | 'helper' | 'iron' | 'supervisor';
+export type ShiftRole = 'rider' | 'helper' | 'iron' | 'supervisor' | 'admin';
 
 export interface UserProfile {
   id: string; // phone number or UID

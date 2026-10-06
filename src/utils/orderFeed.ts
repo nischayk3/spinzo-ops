@@ -254,15 +254,6 @@ export const timeAgo = (v: any): string => {
 export const serviceSummary = (o: FeedOrder): string =>
   (o.items || []).map(i => i.serviceName || i.serviceType).filter(Boolean).join(', ') || 'Unknown';
 
-// Accept FeedOrder (has pickupDetails) OR PickupSlot / task.pickupSlot directly.
-export const slotLabel = (o: FeedOrder | PickupSlot | null | undefined): string => {
-  if (!o) return '—';
-  const p = (o as FeedOrder).pickupDetails || (o as PickupSlot);
-  if (!p) return '—';
-  if (p.isInstant) return 'Instant pickup';
-  return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || '—';
-};
-
 const tsToMs = (t: any): number => {
   if (!t) return 0;
   if (typeof t === 'number') return t;
@@ -271,6 +262,38 @@ const tsToMs = (t: any): number => {
   if (typeof t.getTime === 'function') return t.getTime();
   const parsed = new Date(t).getTime();
   return isNaN(parsed) ? 0 : parsed;
+};
+
+export const formatInstantTime = (p: PickupSlot | null | undefined, createdAt?: any): string => {
+  if (!p) return '';
+  const explicit = p.scheduledTime || (p as any).time || (p as any).slot;
+  if (explicit && String(explicit).trim() && !String(explicit).toLowerCase().includes('instant')) {
+    return String(explicit).trim();
+  }
+  if (createdAt) {
+    const ms = tsToMs(createdAt);
+    if (ms > 0) {
+      const end = new Date(ms + 45 * 60 * 1000); // 45-min SLA window
+      const fmtTime = (d: Date) => d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', hour12: true });
+      return `Within 30–45 mins (by ${fmtTime(end)})`;
+    }
+  }
+  return 'Within 30–45 mins';
+};
+
+// Accept FeedOrder (has pickupDetails) OR PickupSlot / task.pickupSlot directly.
+export const slotLabel = (o: FeedOrder | PickupSlot | null | undefined): string => {
+  if (!o) return '—';
+  const p = (o as FeedOrder).pickupDetails || (o as PickupSlot);
+  if (!p) return '—';
+
+  if (p.isInstant) {
+    const createdAt = (o as FeedOrder).createdAt;
+    const timeStr = formatInstantTime(p, createdAt);
+    return `Instant • ${timeStr}`;
+  }
+
+  return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || '—';
 };
 
 export const isToday = (t: any): boolean => {

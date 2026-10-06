@@ -58,6 +58,10 @@ export function shouldAnnounce(task: Pick<OpsTask, 'id' | 'status'>, seenIds: Se
   return !seenIds.has(task.id) && isPending(task);
 }
 
-export function pickupLabel(task: Pick<OpsTask, 'pickupSlot'>): string {
-  return task.pickupSlot ? slotLabel(task.pickupSlot as any) : '—';
+export function pickupLabel(task: Pick<OpsTask, 'pickupSlot'> & { createdAt?: any }): string {
+  if (!task.pickupSlot) return '—';
+  if ((task.pickupSlot as any).isInstant) {
+    return slotLabel({ pickupDetails: task.pickupSlot, createdAt: task.createdAt } as any);
+  }
+  return slotLabel(task.pickupSlot as any);
 }

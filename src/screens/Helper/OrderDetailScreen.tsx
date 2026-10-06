@@ -11,7 +11,7 @@ import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary } from '../../utils/orderFeed';
+import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
@@ -60,6 +60,185 @@ const fmtDT = (v: any): string => {
   return new Date(ms).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 };
 
+function WasherCycleMonitor({
+  startedAt,
+  detergentAddedAt,
+  softenerAddedAt,
+  onAddDetergent,
+  onAddSoftener,
+}: {
+  startedAt: any;
+  detergentAddedAt?: any;
+  softenerAddedAt?: any;
+  onAddDetergent: () => Promise<void>;
+  onAddSoftener: () => Promise<void>;
+}) {
+  const [now, setNow] = useState(Date.now());
+  const [addingDetergent, setAddingDetergent] = useState(false);
+  const [addingSoftener, setAddingSoftener] = useState(false);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const startMs = typeof startedAt?.toMillis === 'function'
+    ? startedAt.toMillis()
+    : startedAt?.seconds
+    ? startedAt.seconds * 1000
+    : new Date(startedAt).getTime();
+
+  const elapsedMs = Math.max(0, now - startMs);
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  const totalSec = 35 * 60; // 2100 seconds
+  const progressPercent = Math.min(100, Math.round((elapsedSec / totalSec) * 100));
+
+  const formatMinSec = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const isDetergentDue = elapsedSec >= 780 && !detergentAddedAt;
+  const isSoftenerDue = elapsedSec >= 1260 && !softenerAddedAt;
+  const isWashComplete = elapsedSec >= 2100;
+
+  const handleDetergent = async () => {
+    setAddingDetergent(true);
+    try {
+      await onAddDetergent();
+    } finally {
+      setAddingDetergent(false);
+    }
+  };
+
+  const handleSoftener = async () => {
+    setAddingSoftener(true);
+    try {
+      await onAddSoftener();
+    } finally {
+      setAddingSoftener(false);
+    }
+  };
+
+  return (
+    <View className="mb-4 bg-purple-50/60 rounded-2xl p-4 border border-purple-100 shadow-sm">
+      <View className="flex-row items-center justify-between mb-3">
+        <View className="flex-row items-center gap-2">
+          <Droplets size={18} color="#994bff" />
+          <Text className="text-gray-900 font-bold text-sm">35-Min Wash Cycle</Text>
+        </View>
+        <Text className="text-[#994bff] font-black text-base">{formatMinSec(elapsedSec)} / 35:00</Text>
+      </View>
+
+      {/* Progress Bar */}
+      <View className="h-2.5 bg-gray-200 rounded-full overflow-hidden mb-4">
+        <View
+          className="h-full bg-[#994bff] rounded-full"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </View>
+
+      {/* Milestones Info Grid */}
+      <View className="gap-2.5">
+        {/* Detergent milestone @ 13 min */}
+        <View className={`p-3 rounded-xl border ${isDetergentDue ? 'bg-amber-50 border-amber-300 shadow-sm' : detergentAddedAt ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-gray-100'}`}>
+          <View className="flex-row items-center justify-between">
+            <View className="flex-row items-center gap-2 flex-1 mr-2">
+              <View className={`w-7 h-7 rounded-full items-center justify-center ${detergentAddedAt ? 'bg-emerald-100' : isDetergentDue ? 'bg-amber-100' : 'bg-gray-100'}`}>
+                <Text className="text-xs font-bold text-gray-700">13m</Text>
+              </View>
+              <View className="flex-1">
+                <Text className="text-gray-900 font-bold text-xs">Detergent (13 Min)</Text>
+                <Text className="text-gray-500 text-[11px]">
+                  {detergentAddedAt
+                    ? 'Added to washer'
+                    : isDetergentDue
+                    ? 'Due right now! Add detergent'
+                    : `Due in ${Math.max(1, Math.ceil((780 - elapsedSec) / 60))} min`}
+                </Text>
+              </View>
+            </View>
+
+            {detergentAddedAt ? (
+              <View className="bg-emerald-100 px-2.5 py-1 rounded-full flex-row items-center gap-1">
+                <Check size={12} color="#059669" />
+                <Text className="text-emerald-700 font-bold text-xs">Added</Text>
+              </View>
+            ) : isDetergentDue ? (
+              <TouchableOpacity
+                onPress={handleDetergent}
+                disabled={addingDetergent}
+                className="bg-amber-500 px-3 py-1.5 rounded-lg active:scale-95"
+              >
+                {addingDetergent ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text className="text-white font-bold text-xs">Mark Added ✓</Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <Text className="text-gray-400 text-xs font-medium">Pending</Text>
+            )}
+          </View>
+        </View>
+
+        {/* Softener milestone @ 21 min */}
+        <View className={`p-3 rounded-xl border ${isSoftenerDue ? 'bg-purple-50 border-purple-300 shadow-sm' : softenerAddedAt ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-gray-100'}`}>
+          <View className="flex-row items-center justify-between">
+            <View className="flex-row items-center gap-2 flex-1 mr-2">
+              <View className={`w-7 h-7 rounded-full items-center justify-center ${softenerAddedAt ? 'bg-emerald-100' : isSoftenerDue ? 'bg-purple-100' : 'bg-gray-100'}`}>
+                <Text className="text-xs font-bold text-gray-700">21m</Text>
+              </View>
+              <View className="flex-1">
+                <Text className="text-gray-900 font-bold text-xs">Fabric Softener (21 Min)</Text>
+                <Text className="text-gray-500 text-[11px]">
+                  {softenerAddedAt
+                    ? 'Added to washer'
+                    : isSoftenerDue
+                    ? 'Due right now! Add softener'
+                    : `Due in ${Math.max(1, Math.ceil((1260 - elapsedSec) / 60))} min`}
+                </Text>
+              </View>
+            </View>
+
+            {softenerAddedAt ? (
+              <View className="bg-emerald-100 px-2.5 py-1 rounded-full flex-row items-center gap-1">
+                <Check size={12} color="#059669" />
+                <Text className="text-emerald-700 font-bold text-xs">Added</Text>
+              </View>
+            ) : isSoftenerDue ? (
+              <TouchableOpacity
+                onPress={handleSoftener}
+                disabled={addingSoftener}
+                className="bg-[#994bff] px-3 py-1.5 rounded-lg active:scale-95"
+              >
+                {addingSoftener ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text className="text-white font-bold text-xs">Mark Added ✓</Text>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <Text className="text-gray-400 text-xs font-medium">Pending</Text>
+            )}
+          </View>
+        </View>
+
+        {/* Cycle completion banner @ 35 min */}
+        {isWashComplete && (
+          <View className="bg-emerald-50 border border-emerald-300 p-3 rounded-xl flex-row items-center gap-2">
+            <Check size={16} color="#059669" />
+            <Text className="text-emerald-800 font-bold text-xs flex-1">
+              35-minute wash cycle completed! Ready to unload and move to dryer.
+            </Text>
+          </View>
+        )}
+      </View>
+    </View>
+  );
+}
+
 export function OrderDetailScreen({ route, navigation }: Props) {
   const { orderId, processId: initialProcessId } = route.params;
   const user = useAuthStore(s => s.user);
@@ -100,7 +279,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const cur = process ? currentStep(process) : null;
   const curStage = cur ? stage(process!, cur) : undefined;
-  const isAssignee = activeRole === 'supervisor' || (curStage?.assignee === user?.id);
+  const isAssignee = activeRole === 'supervisor' || activeRole === 'admin' || (curStage?.assignee === user?.id);
 
   // If the stage is changed/completed, reset the local state
   useEffect(() => {
@@ -161,8 +340,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     setActionError(null);
     try {
       const res = await printLabels(orderId, n, process?.id);
-      if (res.ok && res.labels) {
-        await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
+      if (res.ok) {
+        // Physical label printing popup disabled per user request so scanning starts immediately
       } else if (!res.ok) {
         setPrintError(friendlyActionError(res.error));
       } else {
@@ -323,7 +502,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               disabled={busy || !countText.trim()}
               className={`px-6 rounded-xl justify-center ${busy || !countText.trim() ? 'bg-gray-200' : 'bg-[#994bff]'}`}
             >
-              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold">Print Labels</Text>}
+              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold">Save & Start Scan</Text>}
             </TouchableOpacity>
           </View>
           {printError && <Text className="text-red-500 text-sm mt-2 font-medium">{printError}</Text>}
@@ -434,7 +613,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
 
     if (cur === 'tagging' && (!curStage?.assignee || isAssignee)) {
-      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor') {
+      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor' && activeRole !== 'admin') {
         return (
           <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
             {renderSupervisorControls()}
@@ -452,7 +631,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
 
     if (cur && (!curStage?.assignee || isAssignee)) {
-      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor') {
+      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor' && activeRole !== 'admin') {
         return (
           <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
             {renderSupervisorControls()}
@@ -470,12 +649,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             totalGarments={garments.count || 0}
             onPrint={async (bundles: number) => {
               const res = await useOpsProcessStore.getState().printBundleLabels(orderId, bundles, process?.id);
-              if (res.ok && res.labels) {
-                try {
-                  await printGarmentLabels(res.labels, { orderShort: orderId.slice(-6) });
-                } catch (e) {
-                  Alert.alert('Printer Error', 'Could not connect to the printer, but labels are recorded. Please print manually later.');
-                }
+              if (res.ok) {
+                // Physical bundle print popup disabled per user request
                 return true;
               }
               return false;
@@ -514,12 +689,28 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             </View>
           ) : (
             <View>
-              {isMachineStep && (
+              {cur === 'getting_washed' ? (
+                <WasherCycleMonitor
+                  startedAt={curStage?.startedAt}
+                  detergentAddedAt={curStage?.detergentAddedAt}
+                  softenerAddedAt={curStage?.softenerAddedAt}
+                  onAddDetergent={async () => {
+                    if (order && process) {
+                      await useOpsProcessStore.getState().markChemicalAdded(order.id, process.id, 'detergent');
+                    }
+                  }}
+                  onAddSoftener={async () => {
+                    if (order && process) {
+                      await useOpsProcessStore.getState().markChemicalAdded(order.id, process.id, 'softener');
+                    }
+                  }}
+                />
+              ) : isMachineStep ? (
                 <View className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-4 items-center flex-row justify-center">
                   <ActivityIndicator color="#f97316" size="small" className="mr-2" />
                   <Text className="text-orange-700 font-bold">Machine Running</Text>
                 </View>
-              )}
+              ) : null}
               <TouchableOpacity
                 onPress={handleComplete}
                 disabled={busy}
@@ -661,7 +852,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             <View className={`rounded-full px-3 py-1 border justify-center h-8 ${done ? 'bg-green-50 border-green-200' : 'bg-purple-50 border-purple-200'}`}>
               <Text className={`text-xs font-bold ${done ? 'text-green-700' : 'text-purple-700'}`}>{statusLabel}</Text>
             </View>
-            {activeRole === 'supervisor' && (
+            {(activeRole === 'supervisor' || activeRole === 'admin') && (
               <TouchableOpacity onPress={() => setShowMenu(!showMenu)} className="w-10 h-10 rounded-full bg-white items-center justify-center shadow-sm border border-gray-100">
                 <MoreHorizontal size={20} color="#64748b" />
               </TouchableOpacity>
@@ -669,7 +860,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
         </View>
 
-        {showMenu && activeRole === 'supervisor' && (
+        {showMenu && (activeRole === 'supervisor' || activeRole === 'admin') && (
           <View className="absolute top-16 right-5 bg-white rounded-xl shadow-lg border border-gray-100 z-50 overflow-hidden w-48">
             {(order?.status === 'placed' || order?.status === 'confirmed' || order?.status === 'ready') && (
               <TouchableOpacity onPress={() => { setShowMenu(false); setShowRescheduleModal(true); }} className="p-4 border-b border-gray-100 flex-row items-center">
@@ -707,7 +898,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             <Text className="text-gray-500 text-sm mt-1">{order ? serviceSummary(order) : '—'}</Text>
           </View>
 
-          {activeRole === 'supervisor' && order && (
+          {(activeRole === 'supervisor' || activeRole === 'admin') && order && (
             <View className="border-t border-gray-100 pt-4 mt-2">
               {/* Order identity */}
               <View className="flex-row items-center mb-3 justify-between">
@@ -743,12 +934,11 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <Text className="text-gray-500 text-xs">Placed</Text>
                   <Text className="text-gray-700 text-xs font-medium">{fmtDT(order.createdAt)}</Text>
                 </View>
-                {order.pickupDetails?.scheduledDate ? (
+                {order.pickupDetails ? (
                   <View className="flex-row justify-between mb-1">
                     <Text className="text-gray-500 text-xs">Pickup slot</Text>
-                    <Text className="text-gray-700 text-xs font-medium">
-                      {order.pickupDetails.scheduledDate} {order.pickupDetails.scheduledTime || ''}
-                      {order.pickupDetails.isInstant ? ' (Instant)' : ''}
+                    <Text className={`text-xs font-bold ${order.pickupDetails.isInstant ? 'text-amber-600' : 'text-gray-700'}`}>
+                      {slotLabel(order)}
                     </Text>
                   </View>
                 ) : null}
@@ -771,7 +961,15 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
                   <Phone size={14} color="#994bff" />
                 </View>
-                <TouchableOpacity onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}>
+                <TouchableOpacity
+                  onPress={(e) => {
+                    e?.stopPropagation?.();
+                    Linking.openURL(`tel:${order.customerPhone}`);
+                  }}
+                  className="self-start py-0.5"
+                  style={{ alignSelf: 'flex-start' }}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                >
                   <Text className="text-gray-900 font-medium">{order.customerPhone}</Text>
                   <Text className="text-gray-500 text-xs">Tap to call</Text>
                 </TouchableOpacity>

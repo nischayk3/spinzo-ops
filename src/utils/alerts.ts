@@ -177,8 +177,7 @@ function confirmBeep() {
 
 function speak(text: string) {
   try {
-    // expo-speech has no availability check; speak() is best-effort and guarded below.
-    // Speech.speak(text, { language: 'en-IN', rate: 1.1 });
+    Speech.speak(text, { language: 'en-IN', rate: 1.0 });
   } catch (err) {
     console.warn('Speech error', err);
   }
@@ -207,6 +206,21 @@ export function announceAssignedDelivery(orderId: string, address: string) {
 export function announceStageTransition(orderId: string, stageName: string) {
   lifecycleChime();
   speak(`Order ${orderId.slice(-6).toUpperCase()} moved to ${stageName}`);
+}
+
+/** Alert for washing machine chemical additions (13m detergent, 21m softener, 35m complete) */
+export function announceWasherMilestone(orderId: string, milestone: 'detergent' | 'softener' | 'complete') {
+  const shortId = orderId.slice(-6).toUpperCase();
+  if (milestone === 'detergent') {
+    dramaticChime(false);
+    speak(`Order ${shortId}: Please add detergent to the washing machine.`);
+  } else if (milestone === 'softener') {
+    dramaticChime(false);
+    speak(`Order ${shortId}: Please add fabric softener to the washing machine.`);
+  } else if (milestone === 'complete') {
+    lifecycleChime();
+    speak(`Order ${shortId}: Washing cycle finished. Ready to unload.`);
+  }
 }
 
 // Dedupe supervisor "skipped order" alarms so we don't re-ring for the same order.

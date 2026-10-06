@@ -138,12 +138,12 @@ export function getTopEligibleTask(
   // Ignore processes whose order is already finished/cancelled.
   const live = processes.filter(p => !isOrderTerminal(orders.find(o => o.id === p.orderId)?.status));
 
-  // ── Busy gate: hands-on work in progress (a running machine does NOT count) ──
-  if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
-
   // ── 0. Supervisor-assigned tasks always surface so the helper acknowledges them ──
   const pushed = live.find(p => isPushedToMe(p, uid));
-  if (pushed) return pushed;
+  if (pushed) return { ...pushed, isPushedToMe: true };
+
+  // ── Busy gate: hands-on work in progress (a running machine does NOT count) ──
+  if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
 
   // ── 1. Check for unclaimed orders that need tagging ──
   const claimedOrderIds = new Set(processes.map(p => p.orderId));

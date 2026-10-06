@@ -7,7 +7,7 @@ const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition
 // Which steps a role may claim/start. Supervisors bypass; iron people take only
 // ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
 function stageRoleGate(step, role) {
-  if (role === 'supervisor' || role === 'helper' || role === 'iron') return true;
+  if (role === 'supervisor' || role === 'helper' || role === 'iron' || role === 'admin') return true;
   return false;
 }
 
@@ -574,14 +574,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   const rosterSnap = await db.doc('config/opsStaff').get();
   const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
-  const role = rosterPhones[phone];
-  if (role !== 'helper' && role !== 'iron' && role !== 'supervisor' && role !== 'rider') return { ok: false, error: 'unauthorized' };
+  let role = rosterPhones[phone];
+  if (!role) {
+    const staffDoc = await db.doc(`ops_staff/${auth.uid}`).get();
+    if (staffDoc.exists) {
+      role = staffDoc.data().role;
+    }
+  }
+  if (role !== 'helper' && role !== 'iron' && role !== 'supervisor' && role !== 'rider' && role !== 'admin') return { ok: false, error: 'unauthorized' };
 
   const data = request.data || {};
   const orderId = data.orderId;
   const action = data.action;
   if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-  if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder'].includes(action)) {
+  if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded'].includes(action)) {
     return { ok: false, error: 'invalid_input' };
   }
 
@@ -985,7 +991,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     if (!ps.exists) return { ok: false, error: 'not_found' };
     const process = ps.data();
     const stage = process.stages && process.stages.packaging;
-    if (!stage || stage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+    if (!stage || (stage.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin')) return { ok: false, error: 'unauthorized' };
 
     const bundleLabels = [];
     for (let seq = 1; seq <= count; seq++) {
@@ -1173,6 +1179,21 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     }
   }
 
+  if (action === 'markChemicalAdded') {
+    const chemical = data.chemical;
+    if (chemical !== 'detergent' && chemical !== 'softener') return { ok: false, error: 'invalid_input' };
+    const ps = await processRef.get();
+    if (!ps.exists) return { ok: false, error: 'not_found' };
+    const process = ps.data();
+    const cur = process.steps && process.steps[process.currentIndex];
+    if (cur !== 'getting_washed') return { ok: false, error: 'invalid_state' };
+    const field = chemical === 'detergent' ? 'stages.getting_washed.detergentAddedAt' : 'stages.getting_washed.softenerAddedAt';
+    await processRef.update({
+      [field]: now,
+    });
+    return { ok: true, chemical };
+  }
+
   return { ok: false, error: 'invalid_input' };
 });
 
@@ -1184,12 +1205,18 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
   const rosterSnap = await db.doc('config/opsStaff').get();
   const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
-  const role = rosterPhones[phone];
+  let role = rosterPhones[phone];
+  if (!role) {
+    const staffDoc = await db.doc(`ops_staff/${auth.uid}`).get();
+    if (staffDoc.exists) {
+      role = staffDoc.data().role;
+    }
+  }
 
   const data = request.data || {};
   const { action, orderId, userId, vendorId = 'vendor_1' } = data;
   
-  if (role !== 'supervisor' && !(role === 'rider' && action === 'verifyDeliveryOTP')) {
+  if (role !== 'supervisor' && role !== 'admin' && !(role === 'rider' && action === 'verifyDeliveryOTP')) {
     return { ok: false, error: 'unauthorized' };
   }
   
@@ -1395,7 +1422,12 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           tx.set(vendorRef, updateData, { merge: true });
 
           if (delTaskSnap.exists) {
-            tx.update(delTaskRef, { assignee: riderId, status: 'out_for_delivery', assignedAt: now });
+            tx.update(delTaskRef, {
+              assignee: riderId,
+              status: 'out_for_delivery',
+              assignedAt: now,
+              acceptedAt: admin.firestore.FieldValue.delete(),
+            });
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
@@ -1413,7 +1445,12 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           }
           
           if (taskSnap.exists) {
-            tx.update(db.doc(`ops_tasks/${orderId}`), { assignee: riderId, assignedAt: now, status: 'assigned' });
+            tx.update(db.doc(`ops_tasks/${orderId}`), {
+              assignee: riderId,
+              assignedAt: now,
+              status: 'assigned',
+              acceptedAt: admin.firestore.FieldValue.delete(),
+            });
           } else if (queueSnap.exists) {
             tx.set(db.doc(`ops_tasks/${orderId}`), {
               ...queueSnap.data(), assignee: riderId, assignedAt: now, status: 'assigned'

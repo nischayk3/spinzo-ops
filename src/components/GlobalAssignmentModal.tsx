@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert } from 'react-native';
-import { BellRing, MapPin } from 'lucide-react-native';
+import { BellRing, MapPin, Zap, Clock } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { acceptTask } from '../utils/opsPickup';
 import { isPending, pickupLabel } from '../utils/opsTasks';
+import { slotLabel } from '../utils/orderFeed';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 
 export function GlobalAssignmentModal() {
@@ -32,6 +33,14 @@ export function GlobalAssignmentModal() {
   const activeTask = unacceptedPickup || unacceptedDelivery;
 
   const isDelivery = Boolean(activeTask && 'deliveryAddress' in activeTask);
+  const matchedOrder = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
+  const isInstant = !isDelivery && Boolean(
+    (activeTask as any)?.pickupSlot?.isInstant || matchedOrder?.pickupDetails?.isInstant
+  );
+  const slotText = !isDelivery && activeTask
+    ? (matchedOrder ? slotLabel(matchedOrder) : pickupLabel(activeTask as any))
+    : '';
+
   const address = activeTask
     ? (isDelivery ? (activeTask as any).deliveryAddress : (activeTask as any).pickupAddress)
     : '';
@@ -68,13 +77,15 @@ export function GlobalAssignmentModal() {
     <Modal visible={true} animationType="fade" transparent>
       <View className="flex-1 bg-black/80 justify-center p-6">
         <View className="bg-bgSurface rounded-3xl p-6 items-center border border-bgSurfaceLight shadow-lg">
-          <View className="w-20 h-20 rounded-full bg-primary/15 items-center justify-center mb-6">
-            <BellRing size={40} color="#994BFF" />
+          <View className={`w-20 h-20 rounded-full items-center justify-center mb-6 ${isInstant ? 'bg-amber-500/15' : 'bg-primary/15'}`}>
+            {isInstant ? <Zap size={40} color="#f59e0b" /> : <BellRing size={40} color="#994BFF" />}
           </View>
 
-          <Text className="text-3xl font-black text-textPrimary mb-2 text-center">New Order Assigned!</Text>
+          <Text className="text-3xl font-black text-textPrimary mb-2 text-center">
+            {isInstant ? '⚡ Instant Pickup!' : 'New Order Assigned!'}
+          </Text>
           <Text className="text-lg text-textSecondary font-medium mb-6 text-center">
-            {isDelivery ? 'Delivery' : 'Pickup'} • #{activeTask.orderId.slice(-6).toUpperCase()}
+            {isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup')} • #{activeTask.orderId.slice(-6).toUpperCase()}
           </Text>
 
           <View className="w-full bg-bgDark rounded-2xl p-5 mb-8 border border-bgSurfaceLight">
@@ -82,10 +93,11 @@ export function GlobalAssignmentModal() {
               <MapPin size={20} color="#94A3B8" className="mr-3 mt-0.5" />
               <Text className="flex-1 text-textSecondary font-medium leading-relaxed">{address}</Text>
             </View>
-            {!isDelivery && (
-              <View className="bg-primary/10 self-start px-3 py-1.5 rounded-lg border border-primary/20">
-                <Text className="text-primary font-bold text-sm">
-                  {pickupLabel(activeTask as any)}
+            {!isDelivery && !!slotText && (
+              <View className={`self-start px-3.5 py-2 rounded-xl border flex-row items-center gap-2 ${isInstant ? 'bg-amber-500/15 border-amber-500/40' : 'bg-primary/10 border-primary/20'}`}>
+                {isInstant ? <Zap size={16} color="#f59e0b" /> : <Clock size={16} color="#994BFF" />}
+                <Text className={`font-bold text-sm ${isInstant ? 'text-amber-400' : 'text-primary'}`}>
+                  {slotText}
                 </Text>
               </View>
             )}

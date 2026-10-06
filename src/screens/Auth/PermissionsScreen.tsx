@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Volume2, Camera, MapPin, CheckCircle2 } from 'lucide-react-native';
+import { Volume2, Camera, MapPin, CheckCircle2, Layers } from 'lucide-react-native';
 import { unlockAudio } from '../../utils/alerts';
 import { useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
@@ -79,13 +79,23 @@ export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
             </View>
           </View>
 
-          <View className="flex-row items-center">
+          <View className="flex-row items-center mb-4">
             <View className="w-12 h-12 bg-orange-500/10 rounded-xl items-center justify-center mr-4">
               <MapPin size={24} color="#f97316" />
             </View>
             <View className="flex-1">
               <Text className="text-textPrimary font-bold text-lg">Location</Text>
               <Text className="text-textMuted text-xs">Required for geofenced shifts</Text>
+            </View>
+          </View>
+
+          <View className="flex-row items-center">
+            <View className="w-12 h-12 bg-purple-500/10 rounded-xl items-center justify-center mr-4">
+              <Layers size={24} color="#994bff" />
+            </View>
+            <View className="flex-1">
+              <Text className="text-textPrimary font-bold text-lg">Display Over Apps</Text>
+              <Text className="text-textMuted text-xs">Full-screen assignment popups & alarms</Text>
             </View>
           </View>
         </View>

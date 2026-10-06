@@ -28,4 +28,25 @@ describe('getTopEligibleTask', () => {
     expect(result).not.toBeNull();
     expect(result!.orderId).toBe('o1');
   });
+
+  it('immediately surfaces a supervisor-pushed task to the helper', () => {
+    const pushedProcess = makeProcess({
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      status: 'getting_washed',
+      stages: {
+        getting_washed: {
+          assignee: 'h1',
+          assignedBy: 'supervisor_1',
+          assignedAt: Date.now(),
+          // acceptedAt is null/undefined
+        },
+      },
+    });
+    const orders = [{ id: 'o1', status: 'processing', userId: 'u1', vendorId: 'v1' }];
+    const result = getTopEligibleTask([pushedProcess], orders, 'h1', 'helper', null, resources, true);
+    expect(result).not.toBeNull();
+    expect(result!.isPushedToMe).toBe(true);
+    expect(result!.orderId).toBe('o1');
+  });
 });

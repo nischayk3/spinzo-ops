@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Modal, ScrollView, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { X, Minus, Plus, AlertTriangle } from 'lucide-react-native';
-import { httpsCallable } from 'firebase/functions';
-import { functions } from '../config/firebase';
+import { functions, httpsCallable } from '../config/firebase';
+
 import { SHOE_EDIT_CATEGORIES, calculateItemPrice, calculateDeliveryFee } from '../utils/editPricing';
 
 interface EditOrderModalProps {
@@ -150,6 +150,8 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
       const callable = httpsCallable(functions, 'opsProcessing');
       const res: any = await callable({
         orderId: order.id,
+        userId: order.userId,
+        vendorId: order.vendorId || 'vendor_1',
         action: 'editOrder',
         items,
         totalAmount: grandTotal,

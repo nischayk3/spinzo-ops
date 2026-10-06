@@ -31,9 +31,10 @@ export function buildTSPL(labels: GarmentLabel[], meta: LabelMeta, opts?: { widt
 
 export async function printGarmentLabels(labels: GarmentLabel[], meta: LabelMeta): Promise<{ ok: boolean; mock: boolean; tspl?: string }> {
   const tspl = buildTSPL(labels, meta);
-  if (Platform.OS === 'web') {
-    openLabelPreview(tspl, labels, meta);
-  }
+  // Physical print popups disabled for now so scanner and UI operations are never blocked.
+  // if (Platform.OS === 'web') {
+  //   openLabelPreview(tspl, labels, meta);
+  // }
   return { ok: true, mock: true, tspl };
 }
 

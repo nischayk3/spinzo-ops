@@ -7,6 +7,8 @@ export interface StageRecord {
   assignedBy?: string;   // supervisor uid when the stage was pushed to a helper
   assignedAt?: unknown;
   acceptedAt?: unknown;  // helper acknowledged (popup Accept or pressed Start)
+  detergentAddedAt?: unknown;
+  softenerAddedAt?: unknown;
 }
 export interface GarmentLabel { seq: number; qr: string; }
 export interface GarmentRegistration { seq: number; qr?: string; scannedAt?: unknown; scannedBy?: string; }
@@ -33,6 +35,7 @@ export interface OpsProcess {
   claimedAt?: unknown;
   tokenNumber?: string;
   siblingCount?: number;
+  isPushedToMe?: boolean;
 }
 
 const LABELS: Record<string, string> = {
@@ -127,7 +130,9 @@ export function isMachineStep(step: string | null | undefined): boolean {
 export function holdsBusyStage(p: OpsProcess, uid: string): boolean {
   if (!myInProgress(p, uid)) return false;
   const cur = currentStep(p)!;
-  return !p.stages[cur]?.startedAt || !isMachineStep(cur);
+  const s = p.stages[cur];
+  if (s?.assignedBy && !s?.acceptedAt) return false;
+  return !s?.startedAt || !isMachineStep(cur);
 }
 
 export function isHelperBusy(processes: OpsProcess[], uid: string): boolean {

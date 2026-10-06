@@ -8,6 +8,7 @@ import {
   Package,
   Bike,
   Tag,
+  Zap,
 } from 'lucide-react-native';
 import { timeAgo, formatItemSummary, parseOrderTokens } from '../../utils/orderFeed';
 
@@ -120,15 +121,18 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
       ) : null}
 
       {/* Slot / times (cleanly formatted, never shows empty clock) */}
-      {slotDisplay ? (
-        <View className="flex-row items-center mb-3 bg-bgDark/60 px-3 py-2 rounded-lg border border-bgSurfaceLight/50">
-          <Clock size={14} color="#22c55e" />
-          <Text className="text-textSecondary text-xs ml-2 font-medium">
-            <Text className="text-textMuted font-bold uppercase">{isPickup ? 'Pickup: ' : 'Delivery: '}</Text>
-            {slotDisplay}
-          </Text>
-        </View>
-      ) : null}
+      {slotDisplay ? (() => {
+        const isInstant = Boolean(slotDisplay && slotDisplay.toLowerCase().includes('instant'));
+        return (
+          <View className={`flex-row items-center mb-3 px-3 py-2 rounded-lg border ${isInstant ? 'bg-amber-500/10 border-amber-500/30' : 'bg-bgDark/60 border-bgSurfaceLight/50'}`}>
+            {isInstant ? <Zap size={14} color="#f59e0b" /> : <Clock size={14} color="#22c55e" />}
+            <Text className="text-textSecondary text-xs ml-2 font-medium flex-1">
+              <Text className={`font-bold uppercase ${isInstant ? 'text-amber-400' : 'text-textMuted'}`}>{isPickup ? (isInstant ? '⚡ Instant Pickup: ' : 'Pickup: ') : 'Delivery: '}</Text>
+              <Text className={isInstant ? 'text-textPrimary font-bold' : ''}>{slotDisplay.replace(/^Instant\s*[•\-–]\s*/i, '')}</Text>
+            </Text>
+          </View>
+        );
+      })() : null}
 
       {/* Order items + breakdown */}
       {p.items && p.items.length > 0 ? (
@@ -189,13 +193,20 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
       {/* Customer phone */}
       {p.customerPhone ? (
-        <Pressable
-          onPress={() => Linking.openURL(`tel:${p.customerPhone}`)}
-          className="flex-row items-center mb-3 cursor-pointer"
-        >
-          <Phone size={14} color="#94A3B8" />
-          <Text className="text-info text-sm ml-2 font-medium">{p.customerPhone}</Text>
-        </Pressable>
+        <View className="flex-row mb-3">
+          <Pressable
+            onPress={(e) => {
+              e?.stopPropagation?.();
+              Linking.openURL(`tel:${p.customerPhone}`);
+            }}
+            className="flex-row items-center cursor-pointer self-start py-0.5"
+            style={{ alignSelf: 'flex-start' }}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+          >
+            <Phone size={14} color="#94A3B8" />
+            <Text className="text-info text-sm ml-2 font-medium">{p.customerPhone}</Text>
+          </Pressable>
+        </View>
       ) : null}
 
       {/* Tokens / Bundles / Notes */}

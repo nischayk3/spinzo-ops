@@ -1,8 +1,5 @@
 import { create } from 'zustand';
-import { db } from '../config/firebase';
-import { collection, onSnapshot } from '../config/firebase';
-import { httpsCallable } from 'firebase/functions';
-import { functions } from '../config/firebase';
+import { db, collection, onSnapshot, functions, httpsCallable } from '../config/firebase';
 import { parseOpsProcess, OpsProcess, myInProgress, GarmentLabel } from '../utils/opsProcess';
 
 export type OpsProcessingResult =
@@ -35,6 +32,7 @@ interface OpsProcessState {
   scanGarment: (orderId: string, qr: string, processId?: string) => Promise<OpsProcessingResult>;
   unregisterGarment: (orderId: string, seq: number, processId?: string) => Promise<OpsProcessingResult>;
   submitTagging: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  markChemicalAdded: (orderId: string, processId: string, chemical: 'detergent' | 'softener') => Promise<OpsProcessingResult>;
   pickupDelivery: (orderId: string) => Promise<OpsProcessingResult>;
   // Simulation-only: registers all of an order's labels in one call by scanning
   // each generated QR server-side. Only available when SIM_SCAN is set, since the
@@ -176,6 +174,15 @@ export const useOpsProcessStore = create<OpsProcessState>((set) => ({
   markOutForDelivery: async (orderId, userId) => {
     try {
       const res = await callSupervisor()({ action: 'markOutForDelivery', orderId, userId });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+  markChemicalAdded: async (orderId, processId, chemical) => {
+    try {
+      const targetProcessId = processId || getProcessId(orderId);
+      const res = await callOps()({ orderId, processId: targetProcessId, action: 'markChemicalAdded', chemical } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

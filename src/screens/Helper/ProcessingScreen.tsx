@@ -14,7 +14,7 @@ import type { RootStackParamList } from '../../navigation/RootNavigator';
 import { WorkflowSteps } from '../../components/WorkflowSteps';
 import { FloatingTaskCard } from '../../components/FloatingTaskCard';
 
-type AppRole = 'helper' | 'iron' | 'supervisor';
+type AppRole = 'helper' | 'iron' | 'supervisor' | 'admin';
 
 const IRON_TABS = ['getting_ironed'];
 
@@ -31,13 +31,13 @@ const OTHER_KEY = '__other__';
 const HELPER_TABS = STAGE_ORDER.filter(s => s !== 'getting_ironed');
 
 export const canStartStage = (role: AppRole, step: string): boolean => {
-  if (role === 'supervisor') return true;
+  if (role === 'supervisor' || role === 'admin') return true;
   if (role === 'iron' || role === 'helper') return STAGE_ORDER.includes(step);
   return false;
 };
 
 const getTabsForRole = (role: AppRole) => {
-  if (role === 'supervisor') return STAGE_ORDER;
+  if (role === 'supervisor' || role === 'admin') return STAGE_ORDER;
   if (role === 'iron' || role === 'helper') return STAGE_ORDER;
   return [];
 };
@@ -284,7 +284,15 @@ function SupervisorFeed() {
           <View className="flex-1">
             <Text className="text-textPrimary font-medium text-base mb-1">{order?.customerName || 'Unknown Customer'}</Text>
             {!!order?.customerPhone && (
-              <TouchableOpacity onPress={() => Linking.openURL(`tel:${order.customerPhone}`)} className="flex-row items-center">
+              <TouchableOpacity
+                onPress={(e) => {
+                  e?.stopPropagation?.();
+                  Linking.openURL(`tel:${order.customerPhone}`);
+                }}
+                className="flex-row items-center self-start py-0.5"
+                style={{ alignSelf: 'flex-start' }}
+                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              >
                 <Phone size={12} color="#94A3B8" className="mr-1" />
                 <Text className="text-textSecondary text-xs">{order.customerPhone}</Text>
               </TouchableOpacity>

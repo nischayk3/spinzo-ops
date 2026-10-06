@@ -1,5 +1,4 @@
-import { httpsCallable } from 'firebase/functions';
-import { functions } from '../config/firebase';
+import { functions, httpsCallable } from '../config/firebase';
 
 export type VerifyPickupResult =
   | { ok: true; alreadyDone?: boolean }

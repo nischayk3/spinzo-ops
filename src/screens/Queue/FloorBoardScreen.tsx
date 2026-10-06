@@ -168,13 +168,19 @@ export function FloorBoardScreen() {
 
               <View className="flex-row items-start justify-between mb-3">
                 <View className="flex-1 mr-4">
-                  <TouchableOpacity onPress={() => item.customerPhone && navigation.navigate('CustomerDetail', { phone: item.customerPhone })}>
-                    <Text className="text-gray-900 font-medium text-base mb-1">
-                      {item.customerName || 'Unknown Customer'}
-                    </Text>
-                  </TouchableOpacity>
+                  <Text className="text-gray-900 font-medium text-base mb-1">
+                    {item.customerName || 'Unknown Customer'}
+                  </Text>
                   {item.customerPhone ? (
-                    <TouchableOpacity onPress={() => Linking.openURL(`tel:${item.customerPhone}`)} className="flex-row items-center mb-1">
+                    <TouchableOpacity
+                      onPress={(e) => {
+                        e?.stopPropagation?.();
+                        Linking.openURL(`tel:${item.customerPhone}`);
+                      }}
+                      className="flex-row items-center mb-1 self-start py-0.5"
+                      style={{ alignSelf: 'flex-start' }}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                    >
                       <Phone size={12} color="#994bff" />
                       <Text className="text-[#994bff] font-medium text-sm ml-1">{item.customerPhone}</Text>
                     </TouchableOpacity>

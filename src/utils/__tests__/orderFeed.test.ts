@@ -130,7 +130,8 @@ describe('serviceSummary', () => {
 
 describe('slotLabel', () => {
   it('labels instant, scheduled, and missing pickup', () => {
-    expect(slotLabel({ id: '1', userId: 'u1', status: 'placed', pickupDetails: { isInstant: true } })).toBe('Instant pickup');
+    expect(slotLabel({ id: '1', userId: 'u1', status: 'placed', pickupDetails: { isInstant: true } })).toBe('Instant • Within 30–45 mins');
+    expect(slotLabel({ id: '1b', userId: 'u1', status: 'placed', pickupDetails: { isInstant: true, scheduledTime: '10:00 - 10:30' } })).toBe('Instant • 10:00 - 10:30');
     expect(slotLabel({ id: '2', userId: 'u2', status: 'placed', pickupDetails: { scheduledDate: '2026-08-07', scheduledTime: '10:00 - 11:00' } })).toBe('2026-08-07 10:00 - 11:00');
     expect(slotLabel({ id: '3', userId: 'u3', status: 'placed' })).toBe('—');
   });
