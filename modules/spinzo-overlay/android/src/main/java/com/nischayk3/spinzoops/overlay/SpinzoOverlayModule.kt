@@ -12,36 +12,41 @@ class SpinzoOverlayModule : Module() {
         Name("SpinzoOverlay")
 
         Function("canDrawOverlays") {
-            val context = appContext.reactContext ?: return@Function false
-            Settings.canDrawOverlays(context)
+            appContext.reactContext?.let { context ->
+                Settings.canDrawOverlays(context)
+            } ?: false
         }
 
         Function("openOverlaySettings") {
-            val context = appContext.reactContext ?: return@Function
-            val intent = Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:${context.packageName}")
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            appContext.reactContext?.let { context ->
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}")
+                ).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
             }
-            context.startActivity(intent)
         }
 
         Function("setOnShift") { onShift: Boolean ->
-            val context = appContext.reactContext ?: return@Function
-            val prefs = context.getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
-            prefs.edit().putBoolean("on_shift", onShift).apply()
+            appContext.reactContext?.let { context ->
+                val prefs = context.getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
+                prefs.edit().putBoolean("on_shift", onShift).apply()
+            }
         }
 
         Function("dismissOverlay") {
-            val context = appContext.reactContext ?: return@Function
-            SpinzoOverlayManager.dismissOverlay(context)
+            appContext.reactContext?.let { context ->
+                SpinzoOverlayManager.dismissOverlay(context)
+            }
         }
 
         Function("getCachedFCMToken") {
-            val context = appContext.reactContext ?: return@Function null
-            val prefs = context.getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
-            prefs.getString("fcm_token", null)
+            appContext.reactContext?.let { context ->
+                val prefs = context.getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
+                prefs.getString("fcm_token", null)
+            }
         }
 
         Function("getPendingAcceptedOrder") {

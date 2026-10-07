@@ -193,12 +193,12 @@ object SpinzoOverlayManager {
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         mediaPlayer = null
 
         try {
             vibrator?.cancel()
-        } catch (_: Exception) {}
+        } catch (e: Exception) {}
         vibrator = null
     }
 
