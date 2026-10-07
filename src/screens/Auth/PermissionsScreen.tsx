@@ -5,6 +5,7 @@ import { Volume2, Camera, MapPin, CheckCircle2, Layers } from 'lucide-react-nati
 import { unlockAudio } from '../../utils/alerts';
 import { useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
+import { requestNotificationPermissions, setupNotificationChannels } from '../../utils/systemNotifications';
 
 interface PermissionsScreenProps {
   onComplete: () => void;
@@ -37,6 +38,10 @@ export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
         setIsLoading(false);
         return;
       }
+
+      // 4. Notification Permission & Android Channel Setup
+      await requestNotificationPermissions();
+      await setupNotificationChannels();
 
       onComplete();
     } catch (e) {

@@ -49,4 +49,24 @@ describe('getTopEligibleTask', () => {
     expect(result!.isPushedToMe).toBe(true);
     expect(result!.orderId).toBe('o1');
   });
+
+  it('surfaces a supervisor-pushed task even if helper has not clocked in yet (onShift: false)', () => {
+    const pushedProcess = makeProcess({
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      status: 'getting_washed',
+      stages: {
+        getting_washed: {
+          assignee: 'h1',
+          assignedBy: 'supervisor_1',
+          assignedAt: Date.now(),
+        },
+      },
+    });
+    const orders = [{ id: 'o1', status: 'processing', userId: 'u1', vendorId: 'v1' }];
+    const result = getTopEligibleTask([pushedProcess], orders, 'h1', 'helper', null, resources, false);
+    expect(result).not.toBeNull();
+    expect(result!.isPushedToMe).toBe(true);
+    expect(result!.orderId).toBe('o1');
+  });
 });

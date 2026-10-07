@@ -7,6 +7,7 @@ import { acceptTask } from '../utils/opsPickup';
 import { isPending, pickupLabel } from '../utils/opsTasks';
 import { slotLabel } from '../utils/orderFeed';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
+import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 
 export function GlobalAssignmentModal() {
   const { myTasks, myDeliveries } = useOpsStaffStore();
@@ -48,8 +49,17 @@ export function GlobalAssignmentModal() {
   React.useEffect(() => {
     if (activeTask && !acceptingId) {
       dramaticChime();
+      triggerAssignmentNotification({
+        orderId: activeTask.orderId,
+        orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
+        taskType: isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup'),
+        address,
+        slotText,
+        isInstant,
+      });
     } else if (!activeTask) {
       stopAlarm();
+      clearAssignmentNotifications();
     }
     return () => { stopAlarm(); };
   }, [activeTask?.id]);
@@ -58,6 +68,7 @@ export function GlobalAssignmentModal() {
     if (!activeTask) return;
     setAcceptingId(activeTask.id);
     stopAlarm();
+    clearAssignmentNotifications();
     try {
       const res = await acceptTask(activeTask.id, isDelivery);
       if (!res.ok) {

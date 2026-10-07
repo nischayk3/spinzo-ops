@@ -80,7 +80,17 @@
       ],
       "expo-audio",
       "@react-native-firebase/app",
-      "@react-native-firebase/auth"
+      "@react-native-firebase/auth",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#994bff",
+          "sounds": [
+            "./assets/sounds/alarm.wav"
+          ]
+        }
+      ]
     ],
     "extra": {
       "eas": {

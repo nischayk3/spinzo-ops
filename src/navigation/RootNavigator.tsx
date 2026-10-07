@@ -21,6 +21,7 @@ import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
 import { useLifecycleNotifications } from '../utils/lifecycleNotifications';
+import { setupNotificationChannels } from '../utils/systemNotifications';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
 import { HelperAssignmentModal } from '../components/HelperAssignmentModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
@@ -157,27 +158,32 @@ export function RootNavigator() {
 
   useEffect(() => {
     initializeAuth();
+    setupNotificationChannels();
   }, [initializeAuth]);
 
   // Initialize live listeners for all authenticated ops staff so
   // task announcements + shift state + GlobalAssignmentModal work.
   const uid = user?.id;
+  const staffDoc = useOpsStaffStore(s => s.staffDoc);
+  const effectiveRole = activeRole || staffDoc?.role;
+
   useEffect(() => {
-    if (uid && activeRole) {
+    const role = activeRole || staffDoc?.role;
+    if (uid && role) {
       useOpsStaffStore.getState().initialize(uid);
       useStoreResourcesStore.getState().initialize();
-      if (activeRole === 'helper' || activeRole === 'iron' || activeRole === 'rider') {
+      if (role === 'helper' || role === 'iron' || role === 'rider') {
         useOrderFeedStore.getState().initialize();
       }
-      if (activeRole === 'helper' || activeRole === 'iron') {
+      if (role === 'helper' || role === 'iron') {
         useOpsProcessStore.getState().initialize(uid);
       }
-      if (activeRole === 'supervisor') {
+      if (role === 'supervisor' || role === 'admin') {
         useOrderFeedStore.getState().initialize();
         useStaffRosterStore.getState().initialize();
       }
     }
-  }, [uid, activeRole]);
+  }, [uid, activeRole, staffDoc?.role]);
 
   // Auto-logout heartbeat: check every minute if it's past 11:30 PM or if the shift is stale.
   useEffect(() => {
@@ -271,8 +277,8 @@ export function RootNavigator() {
           component={CustomerDetailScreen}
         />
       </Stack.Navigator>
-      {isLoggedIn && activeRole === 'rider' && <GlobalAssignmentModal />}
-      {isLoggedIn && (activeRole === 'helper' || activeRole === 'iron') && <HelperAssignmentModal />}
+      {isLoggedIn && effectiveRole === 'rider' && <GlobalAssignmentModal />}
+      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron') && <HelperAssignmentModal />}
     </>
   );
 }

@@ -130,17 +130,17 @@ export function getTopEligibleTask(
   resources: StoreResources = { washers: 1, dryers: 1, ironingStations: 1 },
   onShift = true
 ): OpsProcess | null {
-  // ✅ SHIFT GATE: an off-shift helper (not clocked in via QR) must NOT be shown
-  // — or be able to receive — any task. This is the fix for helpers receiving
-  // orders without clocking in.
-  if (!onShift) return null;
-
   // Ignore processes whose order is already finished/cancelled.
   const live = processes.filter(p => !isOrderTerminal(orders.find(o => o.id === p.orderId)?.status));
 
-  // ── 0. Supervisor-assigned tasks always surface so the helper acknowledges them ──
+  // ── 0. Supervisor-assigned tasks ALWAYS surface so the helper acknowledges them ──
+  // Pushed tasks take absolute precedence — even if the helper's shift status is still syncing.
   const pushed = live.find(p => isPushedToMe(p, uid));
   if (pushed) return { ...pushed, isPushedToMe: true };
+
+  // ✅ SHIFT GATE: an off-shift helper (not clocked in via QR) must NOT be auto-offered
+  // generic tasks from the open queue.
+  if (!onShift) return null;
 
   // ── Busy gate: hands-on work in progress (a running machine does NOT count) ──
   if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;

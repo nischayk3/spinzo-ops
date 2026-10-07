@@ -3,12 +3,15 @@ import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useAuthStore } from '../store/authStore';
 import { useOpsStaffStore } from '../store/opsStaffStore';
-import { announceStageTransition, announceNewOrder, announceWasherMilestone } from './alerts';
+import { announceStageTransition, announceNewOrder, announceWasherMilestone, dramaticChime } from './alerts';
+import * as Speech from 'expo-speech';
 import { stepLabel, currentStep } from './opsProcess';
+import { triggerAssignmentNotification } from './systemNotifications';
 
 const seenStates: Record<string, number> = {};
 const seenOrders = new Set<string>();
 const announcedMilestones = new Set<string>();
+const announcedHelperTasks = new Set<string>();
 
 export function useLifecycleNotifications() {
   const processes = useOpsProcessStore(s => s.processes);
@@ -108,4 +111,28 @@ export function useLifecycleNotifications() {
     const interval = setInterval(checkWasherMilestones, 5000);
     return () => clearInterval(interval);
   }, [processes, activeRole, myUid]);
+
+  // 4. Helper Task Assignment Audio & Voice Announcement
+  useEffect(() => {
+    if (!myUid) return;
+    processes.forEach(p => {
+      const cur = currentStep(p);
+      if (!cur) return;
+      const stage = p.stages?.[cur];
+      // If assigned to me by supervisor and not yet accepted
+      if (stage && stage.assignee === myUid && stage.assignedBy && !stage.acceptedAt && !stage.completedAt) {
+        const key = `${p.id}_${cur}_assigned`;
+        if (!announcedHelperTasks.has(key)) {
+          announcedHelperTasks.add(key);
+          dramaticChime();
+          Speech.speak(`New ${stepLabel(cur)} task assigned to you`, { language: 'en-IN' });
+          triggerAssignmentNotification({
+            orderId: p.orderId,
+            orderShortId: p.orderId.slice(-6).toUpperCase(),
+            taskType: `${stepLabel(cur)} Stage`,
+          });
+        }
+      }
+    });
+  }, [processes, myUid]);
 }

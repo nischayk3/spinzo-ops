@@ -8,10 +8,11 @@ import { useAuthStore } from '../store/authStore';
 import { getTopEligibleTask } from '../utils/helperEligibility';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
-import { stepLabel } from '../utils/opsProcess';
+import { stepLabel, currentStep } from '../utils/opsProcess';
 import { serviceSummary, orderTotal } from '../utils/orderFeed';
 import { doc, runTransaction } from '../config/firebase';
 import { db } from '../config/firebase';
+import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 
 export function HelperAssignmentModal() {
   const { staffDoc, clearActiveHelperTask } = useOpsStaffStore();
@@ -28,8 +29,17 @@ export function HelperAssignmentModal() {
   useEffect(() => {
     if (activeTask && !acceptingId) {
       dramaticChime();
+      const cur = currentStep(activeTask);
+      triggerAssignmentNotification({
+        orderId: activeTask.orderId,
+        orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
+        taskType: cur ? `${stepLabel(cur)} Stage` : 'Process Stage',
+        address: order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '',
+        isInstant: Boolean(order?.pickupDetails?.isInstant),
+      });
     } else {
       stopAlarm();
+      clearAssignmentNotifications();
     }
     return () => {
       stopAlarm();
@@ -57,6 +67,7 @@ export function HelperAssignmentModal() {
     if (!activeTask || !staffDoc) return;
     setAcceptingId(activeTask.id);
     stopAlarm();
+    clearAssignmentNotifications();
 
     try {
       const curStep = activeTask.steps[activeTask.currentIndex] || activeTask.status;
