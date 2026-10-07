@@ -48,10 +48,6 @@ async function sendFCMOrderAssignment({
       return;
     }
     const staffData = staffDoc.data();
-    if (staffData.onShift !== true) {
-      console.log(`[FCM] Staff ${staffId} is off-shift, skipping push`);
-      return;
-    }
     const fcmToken = staffData.fcmToken;
     if (!fcmToken) {
       console.log(`[FCM] Staff ${staffId} has no fcmToken registered`);

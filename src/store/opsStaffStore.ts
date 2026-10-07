@@ -43,6 +43,7 @@ export interface StaffDoc {
     orderId: string;
     step: string;
   } | null;
+  fcmToken?: string | null;
 }
 
 export interface StoreInfo {
@@ -101,6 +102,41 @@ let unsubDeliveries: (() => void) | null = null;
 // Tracks ids we've already alerted on so a refresh/re-subscribe doesn't re-announce.
 const announcedTaskIds = loadAnnounced();
 
+export async function syncFCMToken(uid: string): Promise<string | null> {
+  if (!uid) return null;
+  try {
+    let token: string | null = null;
+    if (Platform.OS === 'android') {
+      try {
+        token = await SpinzoOverlay.getFCMToken();
+      } catch (e) {
+        console.warn('[opsStaff] Native getFCMToken error:', e);
+      }
+    }
+    if (!token && Platform.OS !== 'web') {
+      try {
+        const tokenRes = await Notifications.getDevicePushTokenAsync();
+        token = tokenRes?.data || null;
+      } catch (e) {
+        console.warn('[opsStaff] Expo push token error:', e);
+      }
+    }
+
+    if (token) {
+      console.log(`[opsStaff] Successfully synced FCM token for ${uid}`);
+      await setDoc(
+        doc(db, 'ops_staff', uid),
+        { fcmToken: token },
+        { merge: true }
+      );
+      return token;
+    }
+  } catch (err) {
+    console.warn('[opsStaff] syncFCMToken failed non-fatally:', err);
+  }
+  return null;
+}
+
 export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   staffDoc: null,
   myTasks: [],
@@ -114,6 +150,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     unsubDeliveries?.();
 
     set({ isLoading: true });
+    syncFCMToken(uid);
 
     unsubStaff = onSnapshot(
       doc(db, 'ops_staff', uid),
@@ -124,6 +161,12 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         }
         const d = snap.data() as StaffDoc;
         set({ staffDoc: { ...d, uid }, isLoading: false });
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.setOnShift(d.onShift === true);
+        }
+        if (!d.fcmToken) {
+          syncFCMToken(uid);
+        }
       },
       (err) => set({ error: String(err), isLoading: false })
     );
@@ -208,15 +251,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
 
     let fcmToken: string | null = null;
     try {
-      if (Platform.OS === 'android') {
-        fcmToken = SpinzoOverlay.getCachedFCMToken();
-      }
-      if (!fcmToken && Platform.OS !== 'web') {
-        const tokenRes = await Notifications.getDevicePushTokenAsync();
-        if (tokenRes && tokenRes.data) {
-          fcmToken = tokenRes.data;
-        }
-      }
+      fcmToken = await syncFCMToken(uid);
     } catch (e) {
       console.warn('[opsStaff] FCM token retrieval notice:', e);
     }

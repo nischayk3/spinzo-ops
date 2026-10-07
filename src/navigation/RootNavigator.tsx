@@ -29,6 +29,7 @@ import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } f
 import { View, ActivityIndicator, Text, Platform, AppState } from 'react-native';
 import { SpinzoOverlay } from 'spinzo-overlay';
 import { acceptTask } from '../utils/opsPickup';
+import { OverlayPermissionBanner } from '../components/OverlayPermissionBanner';
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -126,26 +127,35 @@ export function RootNavigator() {
   const [permissionsLoaded, setPermissionsLoaded] = React.useState(false);
   useLifecycleNotifications();
 
-  // Persist the "App Setup done" decision so a page reload doesn't force the
-  // rider to re-grant camera/location every time. Per-platform storage keeps it across
-  // sessions without re-prompting (the OS permission itself already persists).
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        if (typeof window !== 'undefined' && window.localStorage) {
-          const v = window.localStorage.getItem('ops_permissions_granted');
-          if (mounted) setHasGrantedPermissions(v === '1');
-        } else {
-          const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
-          const v = await AsyncStorage.getItem('ops_permissions_granted');
-          if (mounted) setHasGrantedPermissions(v === '1');
-        }
-      } catch { /* non-fatal */ }
-      if (mounted) setPermissionsLoaded(true);
-    })();
-    return () => { mounted = false; };
+  // Check permissions: On Android, verify both stored setup and actual OS overlay permission
+  const checkPermissionsStatus = React.useCallback(async () => {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const v = window.localStorage.getItem('ops_permissions_granted');
+        setHasGrantedPermissions(v === '1');
+      } else {
+        const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
+        const setupDone = (await AsyncStorage.getItem('ops_permissions_granted')) === '1';
+        const overlayOk = Platform.OS === 'android' ? SpinzoOverlay.canDrawOverlays() : true;
+        setHasGrantedPermissions(setupDone && overlayOk);
+      }
+    } catch {
+      setHasGrantedPermissions(false);
+    } finally {
+      setPermissionsLoaded(true);
+    }
   }, []);
+
+  useEffect(() => {
+    checkPermissionsStatus();
+
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        checkPermissionsStatus();
+      }
+    });
+    return () => sub.remove();
+  }, [checkPermissionsStatus]);
 
   const handlePermissionsComplete = () => {
     setHasGrantedPermissions(true);
@@ -278,6 +288,7 @@ export function RootNavigator() {
 
   return (
     <>
+      {isLoggedIn && hasGrantedPermissions && <OverlayPermissionBanner />}
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {!isLoggedIn ? (
           <Stack.Screen name="Login" component={LoginScreen} />

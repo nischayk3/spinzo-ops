@@ -1,12 +1,11 @@
-import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import { View, Text, TouchableOpacity, ActivityIndicator, Alert, Platform, AppState } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Volume2, Camera, MapPin, CheckCircle2, Layers } from 'lucide-react-native';
 import { unlockAudio } from '../../utils/alerts';
 import { useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
 import { requestNotificationPermissions, setupNotificationChannels } from '../../utils/systemNotifications';
-import { Platform } from 'react-native';
 import { SpinzoOverlay } from 'spinzo-overlay';
 
 interface PermissionsScreenProps {
@@ -19,6 +18,16 @@ export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
   const [overlayGranted, setOverlayGranted] = useState(() =>
     Platform.OS === 'android' ? SpinzoOverlay.canDrawOverlays() : true
   );
+
+  // Auto-refresh overlay permission when returning from device settings
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && Platform.OS === 'android') {
+        setOverlayGranted(SpinzoOverlay.canDrawOverlays());
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   const handleEnablePermissions = async () => {
     setIsLoading(true);
@@ -66,7 +75,6 @@ export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
                 text: 'Open Settings',
                 onPress: () => {
                   SpinzoOverlay.openOverlaySettings();
-                  setTimeout(() => onComplete(), 1500);
                 },
               },
             ]

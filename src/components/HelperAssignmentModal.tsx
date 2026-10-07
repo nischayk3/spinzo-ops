@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
 import { BellRing, CheckCircle2, MapPin, Package, Hash, User, Layers } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
@@ -13,6 +13,7 @@ import { serviceSummary, orderTotal } from '../utils/orderFeed';
 import { doc, runTransaction } from '../config/firebase';
 import { db } from '../config/firebase';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
+import { SpinzoOverlay } from 'spinzo-overlay';
 
 export function HelperAssignmentModal() {
   const { staffDoc, clearActiveHelperTask } = useOpsStaffStore();
@@ -30,19 +31,36 @@ export function HelperAssignmentModal() {
     if (activeTask && !acceptingId) {
       dramaticChime();
       const cur = currentStep(activeTask);
+      const addr = order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '';
       triggerAssignmentNotification({
         orderId: activeTask.orderId,
         orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
         taskType: cur ? `${stepLabel(cur)} Stage` : 'Process Stage',
-        address: order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '',
+        address: addr,
         isInstant: Boolean(order?.pickupDetails?.isInstant),
       });
+
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.showOverlay({
+          orderId: activeTask.orderId || activeTask.id,
+          taskType: 'helper_step',
+          customerName: order?.customerName || '',
+          address: addr || 'Store Operations',
+          stepName: cur ? stepLabel(cur) : '',
+        });
+      }
     } else {
       stopAlarm();
       clearAssignmentNotifications();
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.dismissOverlay();
+      }
     }
     return () => {
       stopAlarm();
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.dismissOverlay();
+      }
     };
   }, [activeTask?.id, acceptingId]);
 
@@ -68,6 +86,9 @@ export function HelperAssignmentModal() {
     setAcceptingId(activeTask.id);
     stopAlarm();
     clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
 
     try {
       const curStep = activeTask.steps[activeTask.currentIndex] || activeTask.status;

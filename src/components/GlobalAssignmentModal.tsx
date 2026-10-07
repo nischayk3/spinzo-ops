@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
 import { BellRing, MapPin, Zap, Clock } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
@@ -8,6 +8,7 @@ import { isPending, pickupLabel } from '../utils/opsTasks';
 import { slotLabel } from '../utils/orderFeed';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
+import { SpinzoOverlay } from 'spinzo-overlay';
 
 export function GlobalAssignmentModal() {
   const { myTasks, myDeliveries } = useOpsStaffStore();
@@ -57,11 +58,30 @@ export function GlobalAssignmentModal() {
         slotText,
         isInstant,
       });
+
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.showOverlay({
+          orderId: activeTask.orderId,
+          taskType: isDelivery ? 'delivery' : (isInstant ? 'instant_pickup' : 'pickup'),
+          customerName: matchedOrder?.customerName || '',
+          address: address || 'Customer Address',
+          slot: slotText,
+          isInstant: isInstant ? 'true' : 'false',
+        });
+      }
     } else if (!activeTask) {
       stopAlarm();
       clearAssignmentNotifications();
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.dismissOverlay();
+      }
     }
-    return () => { stopAlarm(); };
+    return () => {
+      stopAlarm();
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.dismissOverlay();
+      }
+    };
   }, [activeTask?.id]);
 
   const handleAccept = async () => {
@@ -69,6 +89,9 @@ export function GlobalAssignmentModal() {
     setAcceptingId(activeTask.id);
     stopAlarm();
     clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
     try {
       const res = await acceptTask(activeTask.id, isDelivery);
       if (!res.ok) {

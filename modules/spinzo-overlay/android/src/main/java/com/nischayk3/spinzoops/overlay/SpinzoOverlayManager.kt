@@ -121,6 +121,7 @@ object SpinzoOverlayManager {
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             layoutType,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
@@ -139,7 +140,9 @@ object SpinzoOverlayManager {
         if (currentOverlayView != null) {
             try {
                 val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-                windowManager.removeView(currentOverlayView)
+                if (currentOverlayView?.isAttachedToWindow == true) {
+                    windowManager.removeView(currentOverlayView)
+                }
             } catch (e: Exception) {
                 Log.w("SpinzoOverlay", "Error removing overlay view: ${e.message}")
             }
@@ -150,18 +153,26 @@ object SpinzoOverlayManager {
     private fun startAudioAndVibration(context: Context) {
         stopAudioAndVibration()
         try {
-            val soundUri = Uri.parse("android.resource://${context.packageName}/${R.raw.alarm}")
-            mediaPlayer = MediaPlayer().apply {
-                setDataSource(context, soundUri)
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ALARM)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                )
-                isLooping = true
-                prepare()
-                start()
+            val afd = context.resources.openRawResourceFd(R.raw.alarm)
+            if (afd != null) {
+                mediaPlayer = MediaPlayer().apply {
+                    setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+                    )
+                    setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                    afd.close()
+                    isLooping = true
+                    prepare()
+                    start()
+                }
+            } else {
+                mediaPlayer = MediaPlayer.create(context, R.raw.alarm)?.apply {
+                    isLooping = true
+                    start()
+                }
             }
         } catch (e: Exception) {
             Log.w("SpinzoOverlay", "MediaPlayer error: ${e.message}")
@@ -239,6 +250,7 @@ object SpinzoOverlayManager {
             .setContentText(data["address"] ?: "Tap to accept order")
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setFullScreenIntent(pendingIntent, true)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .build()
