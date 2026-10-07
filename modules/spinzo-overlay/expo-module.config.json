@@ -1,0 +1,8 @@
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": [
+      "com.nischayk3.spinzoops.overlay.SpinzoOverlayModule"
+    ]
+  }
+}

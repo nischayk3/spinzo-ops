@@ -6,6 +6,8 @@ import { unlockAudio } from '../../utils/alerts';
 import { useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
 import { requestNotificationPermissions, setupNotificationChannels } from '../../utils/systemNotifications';
+import { Platform } from 'react-native';
+import { SpinzoOverlay } from 'spinzo-overlay';
 
 interface PermissionsScreenProps {
   onComplete: () => void;
@@ -14,6 +16,9 @@ interface PermissionsScreenProps {
 export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [isLoading, setIsLoading] = useState(false);
+  const [overlayGranted, setOverlayGranted] = useState(() =>
+    Platform.OS === 'android' ? SpinzoOverlay.canDrawOverlays() : true
+  );
 
   const handleEnablePermissions = async () => {
     setIsLoading(true);
@@ -42,6 +47,34 @@ export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
       // 4. Notification Permission & Android Channel Setup
       await requestNotificationPermissions();
       await setupNotificationChannels();
+
+      // 5. Android Overlay Permission (SYSTEM_ALERT_WINDOW)
+      if (Platform.OS === 'android') {
+        const canDraw = SpinzoOverlay.canDrawOverlays();
+        setOverlayGranted(canDraw);
+        if (!canDraw) {
+          Alert.alert(
+            'Display Over Other Apps',
+            'To receive order popups even when you are using Instagram, YouTube, or your home screen, please toggle "Allow display over other apps" for SpinZo Ops.',
+            [
+              {
+                text: 'Skip',
+                style: 'cancel',
+                onPress: () => onComplete(),
+              },
+              {
+                text: 'Open Settings',
+                onPress: () => {
+                  SpinzoOverlay.openOverlaySettings();
+                  setTimeout(() => onComplete(), 1500);
+                },
+              },
+            ]
+          );
+          setIsLoading(false);
+          return;
+        }
+      }
 
       onComplete();
     } catch (e) {
@@ -94,15 +127,30 @@ export function PermissionsScreen({ onComplete }: PermissionsScreenProps) {
             </View>
           </View>
 
-          <View className="flex-row items-center">
-            <View className="w-12 h-12 bg-purple-500/10 rounded-xl items-center justify-center mr-4">
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => {
+              if (Platform.OS === 'android') {
+                SpinzoOverlay.openOverlaySettings();
+              }
+            }}
+            className="flex-row items-center"
+          >
+            <View className={`w-12 h-12 ${overlayGranted ? 'bg-purple-500/20' : 'bg-purple-500/10'} rounded-xl items-center justify-center mr-4`}>
               <Layers size={24} color="#994bff" />
             </View>
             <View className="flex-1">
-              <Text className="text-textPrimary font-bold text-lg">Display Over Apps</Text>
+              <View className="flex-row items-center">
+                <Text className="text-textPrimary font-bold text-lg mr-2">Display Over Apps</Text>
+                {overlayGranted && (
+                  <View className="bg-emerald-500/20 px-2 py-0.5 rounded-full">
+                    <Text className="text-emerald-400 text-[10px] font-bold">Enabled</Text>
+                  </View>
+                )}
+              </View>
               <Text className="text-textMuted text-xs">Full-screen assignment popups & alarms</Text>
             </View>
-          </View>
+          </TouchableOpacity>
         </View>
 
         <TouchableOpacity

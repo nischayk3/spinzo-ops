@@ -112,6 +112,13 @@ export async function dramaticChime(loop: boolean = true) {
           stopAlarm();
         }
       }, 2500);
+    } else {
+      // Loop failsafe: never ring indefinitely — auto-stop after 30 seconds max
+      singleLoopTimeout = setTimeout(() => {
+        if (shouldBePlaying) {
+          stopAlarm();
+        }
+      }, 30000);
     }
   } catch (e) {
     console.log('Failed to play alarm sound', e);

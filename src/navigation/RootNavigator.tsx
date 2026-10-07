@@ -26,7 +26,9 @@ import { stopAlarm } from '../utils/alerts';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
 import { HelperAssignmentModal } from '../components/HelperAssignmentModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
-import { View, ActivityIndicator, Text } from 'react-native';
+import { View, ActivityIndicator, Text, Platform, AppState } from 'react-native';
+import { SpinzoOverlay } from 'spinzo-overlay';
+import { acceptTask } from '../utils/opsPickup';
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -163,6 +165,32 @@ export function RootNavigator() {
     stopAlarm();
     clearAssignmentNotifications();
   }, [initializeAuth]);
+
+  // Handle background accepted orders from the native overlay
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+
+    const checkPendingAccept = async () => {
+      try {
+        const pending = SpinzoOverlay.getPendingAcceptedOrder();
+        if (pending && pending.orderId) {
+          SpinzoOverlay.clearPendingAcceptedOrder();
+          console.log('[SpinzoOverlay] Processing pending accept from native overlay:', pending);
+          await acceptTask(pending.orderId, pending.isDelivery);
+        }
+      } catch (err) {
+        console.warn('[SpinzoOverlay] Failed to accept pending order:', err);
+      }
+    };
+
+    checkPendingAccept();
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        checkPendingAccept();
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   // Initialize live listeners for all authenticated ops staff so
   // task announcements + shift state + GlobalAssignmentModal work.

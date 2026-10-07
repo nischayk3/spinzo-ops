@@ -37,6 +37,7 @@
     "react-native-svg": "^15.15.5",
     "react-native-web": "^0.21.2",
     "react-native-worklets": "0.10.1",
+    "spinzo-overlay": "file:./modules/spinzo-overlay",
     "zustand": "^5.0.9"
   },
   "devDependencies": {

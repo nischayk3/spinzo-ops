@@ -20,9 +20,11 @@ export function useLifecycleNotifications() {
   const activeRole = useAuthStore(s => s.activeRole);
   const staffDoc = useOpsStaffStore(s => s.staffDoc);
   const myUid = staffDoc?.uid;
+  const isSupervisorOrAdmin = activeRole === 'supervisor' || activeRole === 'admin' || staffDoc?.role === 'supervisor' || staffDoc?.role === 'admin';
 
-  // 1. Announce Stage Transitions
+  // 1. Announce Stage Transitions (Supervisors and admins only)
   useEffect(() => {
+    if (!isSupervisorOrAdmin) return;
     processes.forEach(p => {
       const prevIndex = seenStates[p.orderId] ?? -1;
       
@@ -35,10 +37,11 @@ export function useLifecycleNotifications() {
         seenStates[p.orderId] = p.currentIndex;
       }
     });
-  }, [processes]);
+  }, [processes, isSupervisorOrAdmin]);
 
-  // 2. Announce New Orders
+  // 2. Announce New Orders (Supervisors and admins only; delivery partners get alerted strictly on order assignment)
   useEffect(() => {
+    if (!isSupervisorOrAdmin) return;
     if (isOrdersLoading) return; // Wait until initial load is done
     
     // On the first render after loading, we just populate the Set so we don't announce all history.
@@ -56,7 +59,7 @@ export function useLifecycleNotifications() {
         }
       }
     });
-  }, [orders, isOrdersLoading]);
+  }, [orders, isOrdersLoading, isSupervisorOrAdmin]);
 
   // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete)
   useEffect(() => {

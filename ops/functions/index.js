@@ -1,4 +1,4 @@
-const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
+const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
@@ -24,6 +24,63 @@ function pickupAddressFromOrder(order) {
   const a = order && order.address;
   if (!a) return '';
   return typeof a === 'string' ? a : (a.address || a.line1 || '');
+}
+
+/**
+ * Send high-priority FCM data message to staff member's device for native overlay/heads-up alert.
+ * Payload MUST be DATA-ONLY (no top-level notification object) to ensure Android wakes up onMessageReceived in background.
+ */
+async function sendFCMOrderAssignment({
+  staffId,
+  orderId,
+  taskType = 'pickup',
+  customerName = '',
+  address = '',
+  slot = '',
+  isInstant = false,
+  stepName = '',
+}) {
+  if (!staffId) return;
+  try {
+    const staffDoc = await db.doc(`ops_staff/${staffId}`).get();
+    if (!staffDoc.exists) {
+      console.log(`[FCM] Staff doc not found for: ${staffId}`);
+      return;
+    }
+    const staffData = staffDoc.data();
+    if (staffData.onShift !== true) {
+      console.log(`[FCM] Staff ${staffId} is off-shift, skipping push`);
+      return;
+    }
+    const fcmToken = staffData.fcmToken;
+    if (!fcmToken) {
+      console.log(`[FCM] Staff ${staffId} has no fcmToken registered`);
+      return;
+    }
+
+    const message = {
+      token: fcmToken,
+      data: {
+        type: 'order_assignment',
+        orderId: String(orderId || ''),
+        taskType: String(taskType || 'pickup'),
+        customerName: String(customerName || ''),
+        address: String(address || ''),
+        slot: String(slot || ''),
+        isInstant: String(isInstant ? 'true' : 'false'),
+        stepName: String(stepName || ''),
+      },
+      android: {
+        priority: 'high',
+        ttl: 60 * 1000,
+      },
+    };
+
+    const response = await admin.messaging().send(message);
+    console.log(`[FCM] Sent assignment push to ${staffId} for #${orderId}:`, response);
+  } catch (err) {
+    console.error(`[FCM] Failed to send assignment push to ${staffId}:`, err);
+  }
 }
 
 async function selectRider() {
@@ -106,6 +163,22 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
     if (queueExists) return;
     tx.set(assignee ? db.doc(`ops_tasks/${orderId}`) : db.doc(`ops_queue/${orderId}`), payload);
   });
+
+  if (assignee) {
+    const isInstant = Boolean(order && order.pickupDetails && order.pickupDetails.isInstant);
+    const slot = (order && order.pickupDetails && order.pickupDetails.type === 'instant')
+      ? 'Instant Pickup'
+      : (order && order.pickupDetails && order.pickupDetails.scheduledTime) || '';
+    await sendFCMOrderAssignment({
+      staffId: assignee,
+      orderId,
+      taskType: isInstant ? 'Instant Pickup' : 'Pickup',
+      customerName: (order && (order.customerName || order.userName)) || '',
+      address: pickupAddressFromOrder(order),
+      slot,
+      isInstant,
+    });
+  }
 });
 
 // When a rider goes on shift, claim any parked orders.
@@ -1319,8 +1392,11 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
       if (action === 'markOutForDelivery') {
         if (order.status !== 'ready') return { ok: false, error: 'invalid_state' };
+        const deliveryDate = order.deliveryDate || new Date().toISOString().split('T')[0];
+        const deliveryTime = order.deliveryTime || 'Immediate';
         if (!order.deliveryDate || !order.deliveryTime) {
-          return { ok: false, error: 'delivery_not_scheduled' };
+          tx.update(orderRef, { deliveryDate, deliveryTime, deliveryScheduledAt: now, updatedAt: now });
+          tx.set(vendorRef, { deliveryDate, deliveryTime, deliveryScheduledAt: now, updatedAt: now }, { merge: true });
         }
 
         // Assign a rider
@@ -1334,6 +1410,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             assignee,
             status: 'assigned',
             assignedAt: now,
+            deliveryDate,
+            deliveryTime,
           });
         } else {
           tx.set(delTaskRef, {
@@ -1344,8 +1422,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             status: 'assigned',
             assignee,
             deliveryAddress: pickupAddressFromOrder(order),
-            deliveryDate: order.deliveryDate,
-            deliveryTime: order.deliveryTime,
+            deliveryDate,
+            deliveryTime,
             deliveryOTP: order.deliveryOTP || null,
             customerName: order.customerName || order.userName || '',
             customerPhone: order.customerPhone || order.userPhone || '',
@@ -1415,9 +1493,15 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
         if (isDelivery) {
           if (order.status !== 'ready') return { ok: false, error: 'invalid_state' };
-          if (!order.deliveryDate || !order.deliveryTime) return { ok: false, error: 'delivery_not_scheduled' };
+          const deliveryDate = order.deliveryDate || new Date().toISOString().split('T')[0];
+          const deliveryTime = order.deliveryTime || 'Immediate';
           
-          const updateData = { status: 'out_for_delivery', outForDeliveryAt: now, updatedAt: now };
+          const updateData = {
+            status: 'out_for_delivery',
+            outForDeliveryAt: now,
+            updatedAt: now,
+            ...(!order.deliveryDate || !order.deliveryTime ? { deliveryDate, deliveryTime, deliveryScheduledAt: now } : {}),
+          };
           tx.update(orderRef, updateData);
           tx.set(vendorRef, updateData, { merge: true });
 
@@ -1426,13 +1510,15 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               assignee: riderId,
               status: 'out_for_delivery',
               assignedAt: now,
+              deliveryDate,
+              deliveryTime,
               acceptedAt: admin.firestore.FieldValue.delete(),
             });
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
               assignee: riderId, deliveryAddress: pickupAddressFromOrder(order),
-              deliveryDate: order.deliveryDate, deliveryTime: order.deliveryTime,
+              deliveryDate, deliveryTime,
               deliveryOTP: order.deliveryOTP || null, customerName: order.customerName || order.userName || '',
               customerPhone: order.customerPhone || order.userPhone || '', assignedAt: now, createdAt: now
             });
@@ -1530,6 +1616,25 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
       return { ok: false, error: 'invalid_action' };
     });
+    if (result.ok && action === 'assignStepToHelper') {
+      try {
+        const { processId, helperId } = data;
+        const pSnap = await db.doc(`ops_process/${processId}`).get();
+        if (pSnap.exists) {
+          const p = pSnap.data();
+          await sendFCMOrderAssignment({
+            staffId: helperId,
+            orderId: p.orderId || processId,
+            taskType: 'step',
+            customerName: p.customerName || '',
+            stepName: p.steps[p.currentIndex] || '',
+          });
+        }
+      } catch (err) {
+        console.error('assignStepToHelper FCM push error', err);
+      }
+    }
+
     // After a successful cancel, clean up ops_process docs (outside the tx since
     // it requires a collection query by parentOrderId).
     if (result.ok && action === 'cancelOrder') {
@@ -1548,5 +1653,56 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   } catch (err) {
     console.error('supervisorActions failed', err);
     return { ok: false, error: 'server_error' };
+  }
+});
+
+// Universal safety net: fires whenever an ops_tasks is assigned to a rider
+exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event) => {
+  if (!event.data) return;
+  const before = event.data.before ? event.data.before.data() : null;
+  const after = event.data.after ? event.data.after.data() : null;
+  if (!after) return; // deleted
+
+  const newAssignee = after.assignee;
+  const oldAssignee = before ? before.assignee : null;
+
+  // Only trigger if assignee was newly set or changed, and task is pending/assigned
+  if (newAssignee && newAssignee !== oldAssignee && (after.status === 'pending' || after.status === 'assigned')) {
+    const isInstant = Boolean(after.pickupSlot && after.pickupSlot.isInstant);
+    const slot = (after.pickupSlot && after.pickupSlot.type === 'instant')
+      ? 'Instant Pickup'
+      : (after.pickupSlot && after.pickupSlot.scheduledTime) || '';
+    await sendFCMOrderAssignment({
+      staffId: newAssignee,
+      orderId: event.params.orderId,
+      taskType: isInstant ? 'Instant Pickup' : 'Pickup',
+      customerName: after.customerName || '',
+      address: after.pickupAddress || '',
+      slot,
+      isInstant,
+    });
+  }
+});
+
+// Universal safety net: fires whenever an ops_delivery_tasks is assigned to a rider
+exports.onDeliveryTaskWritten = onDocumentWritten('ops_delivery_tasks/{orderId}', async (event) => {
+  if (!event.data) return;
+  const before = event.data.before ? event.data.before.data() : null;
+  const after = event.data.after ? event.data.after.data() : null;
+  if (!after) return;
+
+  const newAssignee = after.assignee;
+  const oldAssignee = before ? before.assignee : null;
+
+  if (newAssignee && newAssignee !== oldAssignee && (after.status === 'assigned' || after.status === 'out_for_delivery')) {
+    await sendFCMOrderAssignment({
+      staffId: newAssignee,
+      orderId: event.params.orderId,
+      taskType: 'delivery',
+      customerName: after.customerName || '',
+      address: after.deliveryAddress || '',
+      slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim(),
+      isInstant: false,
+    });
   }
 });

@@ -1,0 +1,7 @@
+{
+  "name": "spinzo-overlay",
+  "version": "1.0.0",
+  "description": "Native Android System Overlay for SpinZo Ops order assignments",
+  "main": "index.ts",
+  "types": "index.ts"
+}

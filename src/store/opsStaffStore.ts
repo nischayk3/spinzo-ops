@@ -4,6 +4,8 @@ import { db } from '../config/firebase';
 import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from '../config/firebase';
 import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
 import { primeAlerts, announceAssignedPickup, announceAssignedDelivery, stopAlarm } from '../utils/alerts';
+import * as Notifications from 'expo-notifications';
+import { SpinzoOverlay } from 'spinzo-overlay';
 
 // Persist announced task ids so a page reload doesn't re-announce the same pickup.
 const ANNOUNCED_KEY = 'opsAnnouncedTasks';
@@ -200,6 +202,25 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
 
   goOnShift: async (uid, role, phone, name, extra) => {
     primeAlerts();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.setOnShift(true);
+    }
+
+    let fcmToken: string | null = null;
+    try {
+      if (Platform.OS === 'android') {
+        fcmToken = SpinzoOverlay.getCachedFCMToken();
+      }
+      if (!fcmToken && Platform.OS !== 'web') {
+        const tokenRes = await Notifications.getDevicePushTokenAsync();
+        if (tokenRes && tokenRes.data) {
+          fcmToken = tokenRes.data;
+        }
+      }
+    } catch (e) {
+      console.warn('[opsStaff] FCM token retrieval notice:', e);
+    }
+
     try {
       await setDoc(
         doc(db, 'ops_staff', uid),
@@ -210,6 +231,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
           name: name || '',
           onShift: true,
           shiftStartAt: new Date(),
+          ...(fcmToken ? { fcmToken } : {}),
           ...(extra || {}),
         },
         { merge: true }
@@ -256,6 +278,10 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   },
 
   goOffShift: async (uid) => {
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.setOnShift(false);
+      SpinzoOverlay.dismissOverlay();
+    }
     try {
       await setDoc(doc(db, 'ops_staff', uid), { onShift: false, shiftEndAt: new Date() }, { merge: true });
     } catch (err) {
@@ -265,6 +291,10 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   },
 
   reset: () => {
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.setOnShift(false);
+      SpinzoOverlay.dismissOverlay();
+    }
     unsubStaff?.();
     unsubTasks?.();
     unsubDeliveries?.();
