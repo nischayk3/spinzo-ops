@@ -193,12 +193,10 @@ export function announceNewOrder() {
 }
 
 export function announceAssignedPickup(task: Pick<OpsTask, 'orderId' | 'pickupAddress'>) {
-  dramaticChime();
   speak(`Pickup assigned. Order ${task.orderId.slice(-6).toUpperCase()}. ${task.pickupAddress || ''}`);
 }
 
 export function announceAssignedDelivery(orderId: string, address: string) {
-  dramaticChime();
   speak(`Delivery assigned. Order ${orderId.slice(-6).toUpperCase()}. ${address || ''}`);
 }
 

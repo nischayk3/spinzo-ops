@@ -49,6 +49,9 @@ describe('shouldAnnounce', () => {
   it('does not announce non-pending tasks', () => {
     expect(shouldAnnounce({ id: 'A', status: 'picked_up' } as any, new Set())).toBe(false);
   });
+  it('does not announce tasks that are already accepted', () => {
+    expect(shouldAnnounce({ id: 'A', status: 'pending', acceptedAt: new Date() } as any, new Set())).toBe(false);
+  });
 });
 
 describe('pickupLabel', () => {

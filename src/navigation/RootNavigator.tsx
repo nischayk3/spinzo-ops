@@ -21,7 +21,8 @@ import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
 import { useLifecycleNotifications } from '../utils/lifecycleNotifications';
-import { setupNotificationChannels } from '../utils/systemNotifications';
+import { setupNotificationChannels, clearAssignmentNotifications } from '../utils/systemNotifications';
+import { stopAlarm } from '../utils/alerts';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
 import { HelperAssignmentModal } from '../components/HelperAssignmentModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
@@ -159,6 +160,8 @@ export function RootNavigator() {
   useEffect(() => {
     initializeAuth();
     setupNotificationChannels();
+    stopAlarm();
+    clearAssignmentNotifications();
   }, [initializeAuth]);
 
   // Initialize live listeners for all authenticated ops staff so

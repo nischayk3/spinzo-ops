@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import { db } from '../config/firebase';
 import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from '../config/firebase';
 import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
-import { primeAlerts, announceAssignedPickup, announceAssignedDelivery } from '../utils/alerts';
+import { primeAlerts, announceAssignedPickup, announceAssignedDelivery, stopAlarm } from '../utils/alerts';
 
 // Persist announced task ids so a page reload doesn't re-announce the same pickup.
 const ANNOUNCED_KEY = 'opsAnnouncedTasks';
@@ -126,6 +126,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
       (err) => set({ error: String(err), isLoading: false })
     );
 
+    let isInitialTasks = true;
     unsubTasks = onSnapshot(
       query(collection(db, 'ops_tasks'), where('assignee', '==', uid)),
       (snap) => {
@@ -133,18 +134,22 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         snap.forEach((docSnap) => {
           const t = parseOpsTask(docSnap.id, docSnap.data());
           tasks.push(t);
-          if (shouldAnnounce(t, announcedTaskIds) && docSnap.id) {
+          if (!isInitialTasks && shouldAnnounce(t, announcedTaskIds) && docSnap.id) {
             announcedTaskIds.add(docSnap.id);
             saveAnnounced(announcedTaskIds);
             announceAssignedPickup(t);
+          } else if (docSnap.id) {
+            announcedTaskIds.add(docSnap.id);
           }
         });
+        isInitialTasks = false;
         set({ myTasks: tasks });
       },
       (err) => set({ error: String(err), isLoading: false })
     );
 
     // Listen for delivery tasks assigned to this rider
+    let isInitialDeliveries = true;
     unsubDeliveries = onSnapshot(
       query(collection(db, 'ops_delivery_tasks'), where('assignee', '==', uid)),
       (snap) => {
@@ -178,12 +183,15 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             proofUrl: d.proofUrl || null,
           };
           deliveries.push(task);
-          if (shouldAnnounce(task, announcedTaskIds) && docSnap.id) {
+          if (!isInitialDeliveries && shouldAnnounce(task, announcedTaskIds) && docSnap.id) {
             announcedTaskIds.add(docSnap.id);
             saveAnnounced(announcedTaskIds);
             announceAssignedDelivery(task.orderId, task.deliveryAddress);
+          } else if (docSnap.id) {
+            announcedTaskIds.add(docSnap.id);
           }
         });
+        isInitialDeliveries = false;
         set({ myDeliveries: deliveries });
       },
       (err) => console.error('[opsStaff] delivery tasks error:', err)
@@ -263,6 +271,8 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     unsubStaff = null;
     unsubTasks = null;
     unsubDeliveries = null;
+    announcedTaskIds.clear();
+    stopAlarm();
     set({ staffDoc: null, myTasks: [], myDeliveries: [], isLoading: false, error: null });
   },
 }));

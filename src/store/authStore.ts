@@ -11,6 +11,7 @@ import {
   signOut as firebaseSignOut
 } from '../config/firebase';
 import { doc, getDoc } from '../config/firebase';
+import { clearAssignmentNotifications } from '../utils/systemNotifications';
 
 // Helper to get or create verifier (web only)
 const getVerifier = () => {
@@ -204,6 +205,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       // Drop the rider's live staff/task listeners so they don't leak past logout
       // and keep announcing for the previous user.
       useOpsStaffStore.getState().reset();
+      clearAssignmentNotifications();
       set({ user: null, isLoggedIn: false, activeRole: null, currentStoreId: null });
     } catch (error) {
       console.error("Logout failed", error);

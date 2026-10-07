@@ -3,7 +3,7 @@ import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useAuthStore } from '../store/authStore';
 import { useOpsStaffStore } from '../store/opsStaffStore';
-import { announceStageTransition, announceNewOrder, announceWasherMilestone, dramaticChime } from './alerts';
+import { announceStageTransition, announceNewOrder, announceWasherMilestone } from './alerts';
 import * as Speech from 'expo-speech';
 import { stepLabel, currentStep } from './opsProcess';
 import { triggerAssignmentNotification } from './systemNotifications';
@@ -124,7 +124,6 @@ export function useLifecycleNotifications() {
         const key = `${p.id}_${cur}_assigned`;
         if (!announcedHelperTasks.has(key)) {
           announcedHelperTasks.add(key);
-          dramaticChime();
           Speech.speak(`New ${stepLabel(cur)} task assigned to you`, { language: 'en-IN' });
           triggerAssignmentNotification({
             orderId: p.orderId,

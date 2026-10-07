@@ -742,16 +742,30 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               )}
               <View className="flex-row gap-3">
                 <TouchableOpacity
-                  onPress={() => setShowAssignRiderModal(true)}
-                  disabled={busy || !order.deliveryDate || !order.deliveryTime}
-                  className={`flex-1 h-14 rounded-xl items-center justify-center ${busy || !order.deliveryDate || !order.deliveryTime ? 'bg-gray-100' : 'bg-blue-50 border border-blue-200'}`}
+                  onPress={() => {
+                    if (!order.deliveryDate || !order.deliveryTime) {
+                      setShowRescheduleModal(true);
+                    } else {
+                      setShowAssignRiderModal(true);
+                    }
+                  }}
+                  disabled={busy}
+                  className={`flex-1 h-14 rounded-xl items-center justify-center ${busy ? 'bg-gray-100' : (!order.deliveryDate || !order.deliveryTime ? 'bg-amber-50 border border-amber-300' : 'bg-blue-50 border border-blue-200')}`}
                 >
-                  <Text className={`font-bold text-sm ${busy || !order.deliveryDate || !order.deliveryTime ? 'text-gray-400' : 'text-blue-700'}`}>Assign Rider</Text>
+                  <Text className={`font-bold text-sm ${!order.deliveryDate || !order.deliveryTime ? 'text-amber-800' : 'text-blue-700'}`}>
+                    {!order.deliveryDate || !order.deliveryTime ? 'Schedule & Assign' : 'Assign Rider'}
+                  </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  onPress={handleMarkOutForDelivery}
-                  disabled={busy || !order.deliveryDate || !order.deliveryTime}
-                  className={`flex-1 h-14 rounded-xl items-center justify-center ${busy || !order.deliveryDate || !order.deliveryTime ? 'bg-gray-200' : 'bg-orange-500'}`}
+                  onPress={() => {
+                    if (!order.deliveryDate || !order.deliveryTime) {
+                      setShowRescheduleModal(true);
+                    } else {
+                      handleMarkOutForDelivery();
+                    }
+                  }}
+                  disabled={busy}
+                  className={`flex-1 h-14 rounded-xl items-center justify-center ${busy ? 'bg-gray-200' : (!order.deliveryDate || !order.deliveryTime ? 'bg-orange-200' : 'bg-orange-500')}`}
                 >
                   {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-sm text-center">Auto-Assign & Dispatch</Text>}
                 </TouchableOpacity>
@@ -868,8 +882,25 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 <Text className="text-gray-700 font-medium">{order?.status === 'ready' ? 'Schedule Delivery' : 'Reschedule Pickup'}</Text>
               </TouchableOpacity>
             )}
-            {(order?.status === 'placed' || order?.status === 'confirmed') && (
-              <TouchableOpacity onPress={() => { setShowMenu(false); setShowAssignRiderModal(true); }} className="p-4 border-b border-gray-100 flex-row items-center">
+            {(order?.status === 'placed' || order?.status === 'confirmed' || order?.status === 'ready') && (
+              <TouchableOpacity
+                onPress={() => {
+                  setShowMenu(false);
+                  if (order?.status === 'ready' && (!order.deliveryDate || !order.deliveryTime)) {
+                    Alert.alert(
+                      'Schedule Delivery Required',
+                      'Please set the delivery date and time before assigning a delivery rider.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Schedule Delivery', onPress: () => setShowRescheduleModal(true) },
+                      ]
+                    );
+                    return;
+                  }
+                  setShowAssignRiderModal(true);
+                }}
+                className="p-4 border-b border-gray-100 flex-row items-center"
+              >
                 <UserPlus size={16} color="#3b82f6" className="mr-3" />
                 <Text className="text-blue-700 font-medium">Assign Rider</Text>
               </TouchableOpacity>

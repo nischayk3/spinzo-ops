@@ -54,8 +54,12 @@ export function isPending(task: Pick<OpsTask, 'status'>): boolean {
   return task.status === 'pending' || task.status === 'assigned' || task.status === 'in_transit_to_store' || task.status === 'out_for_delivery';
 }
 
-export function shouldAnnounce(task: Pick<OpsTask, 'id' | 'status'>, seenIds: Set<string>): boolean {
-  return !seenIds.has(task.id) && isPending(task);
+export function shouldAnnounce(task: Pick<OpsTask, 'id' | 'status'> & { acceptedAt?: unknown }, seenIds: Set<string>): boolean {
+  if (!task || !task.id) return false;
+  if (seenIds.has(task.id)) return false;
+  // If the task has already been accepted, never announce it
+  if (task.acceptedAt) return false;
+  return isPending(task);
 }
 
 export function pickupLabel(task: Pick<OpsTask, 'pickupSlot'> & { createdAt?: any }): string {
