@@ -105,9 +105,9 @@ export function stage(p: OpsProcess, step: string): StageRecord | undefined {
   return p.stages[step];
 }
 
-// A stage is claimable when it is the current step and not started.
+// A stage is in the queue when it is the current step and not completed.
 export function stepQueue(p: OpsProcess, step: string): boolean {
-  return currentStep(p) === step && !stage(p, step)?.startedAt;
+  return currentStep(p) === step && !isDone(p) && !stage(p, step)?.completedAt;
 }
 
 export function myInProgress(p: OpsProcess, uid: string): boolean {

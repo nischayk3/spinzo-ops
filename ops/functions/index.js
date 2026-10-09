@@ -1600,7 +1600,16 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
         if (action === 'unassignStep') {
           if (!assignee) return { ok: true, status: 'unassigned' };
-          tx.update(pRef, { [`stages.${step}`]: progress });
+          const isMachine = step === 'getting_washed' || step === 'getting_dried';
+          const updateStage = isMachine ? progress : (({ startedAt, ...rest }) => rest)(progress);
+          tx.update(pRef, { [`stages.${step}`]: updateStage });
+
+          try {
+            const hRef = db.doc(`ops_staff/${assignee}`);
+            tx.update(hRef, { activeHelperTask: admin.firestore.FieldValue.delete() });
+          } catch (e) {
+            console.warn('Could not clear activeHelperTask on staff doc', e);
+          }
           return { ok: true, status: 'unassigned' };
         }
 

@@ -105,10 +105,8 @@ object SpinzoOverlayManager {
             }
         }
 
-        btnClose.setOnClickListener {
-            Log.d("SpinzoOverlay", "User dismissed overlay for #$orderId")
-            dismissOverlay(context)
-        }
+        // Dismiss mechanism removed: riders/helpers must press ACCEPT ORDER
+        btnClose?.visibility = View.GONE
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY

@@ -135,14 +135,23 @@ describe('derived helpers', () => {
     expect(stage(base({}), 'missing')).toBeUndefined();
   });
 
-  it('stepQueue is true only for the current step that has not started', () => {
-    // getting_washed is current (index 1) and unstarted
+  it('stepQueue is true only for the current step that is not completed', () => {
+    // getting_washed is current (index 1) and incomplete
     const p = base({ currentIndex: 1, status: 'getting_washed' });
     expect(stepQueue(p, 'getting_washed')).toBe(true);
-    // started steps are not queueable
+    // completed steps are not queueable
     expect(stepQueue(p, 'tagging')).toBe(false);
     // non-current steps are not queueable
     expect(stepQueue(p, 'getting_dried')).toBe(false);
+  });
+
+  it('stepQueue remains true for current step even if startedAt is set (e.g. unassigned mid-run)', () => {
+    const p = base({
+      currentIndex: 1,
+      status: 'getting_washed',
+      stages: { ...base({}).stages, getting_washed: { startedAt: 100 } },
+    });
+    expect(stepQueue(p, 'getting_washed')).toBe(true);
   });
 
   it('myInProgress is true when the current step is assigned to uid and not completed', () => {
