@@ -139,6 +139,17 @@ export function isHelperBusy(processes: OpsProcess[], uid: string): boolean {
   return processes.some(p => holdsBusyStage(p, uid));
 }
 
+/** Helper has accepted a washer/dryer stage but hasn't pressed Start yet (actively loading). */
+export function isActivelyLoadingMachine(processes: OpsProcess[], uid: string): boolean {
+  return processes.some(p => {
+    if (!myInProgress(p, uid)) return false;
+    const cur = currentStep(p);
+    if (!isMachineStep(cur)) return false;
+    const s = p.stages[cur!];
+    return !s?.startedAt;
+  });
+}
+
 export function currentStepLabel(p: Pick<OpsProcess, 'steps' | 'currentIndex' | 'status'>): string {
   const step = p.steps[p.currentIndex];
   return step ? stepLabel(step) : stepLabel(p.status);

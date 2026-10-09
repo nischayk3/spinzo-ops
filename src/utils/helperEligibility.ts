@@ -1,4 +1,4 @@
-import { OpsProcess, currentStep, isDone, isHelperBusy } from './opsProcess';
+import { OpsProcess, currentStep, isDone, isHelperBusy, isMachineStep, isActivelyLoadingMachine } from './opsProcess';
 import { StoreResources } from '../store/storeResourcesStore';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -39,15 +39,15 @@ function isMachineAtCapacity(
   }
 }
 
-// ─── Task Priority (finish what's almost done first) ───────────────────────────
+// ─── Task Priority (Machines first: washer and dryer must never sit empty) ─────
 
 const STEP_PRIORITY: Record<string, number> = {
-  packaging: 1,        // Almost done → free up shelf space
-  getting_ironed: 2,   // Bottleneck resource
-  getting_dried: 3,    // Machine-dependent
-  getting_washed: 4,   // Machine-dependent
+  getting_dried: 1,    // Machine priority: Load available dryer immediately
+  getting_washed: 2,   // Machine priority: Load available washer immediately
+  packaging: 3,        // Ready for packaging
+  getting_ironed: 4,   // Bottleneck iron station
   prestain: 5,
-  tagging: 6,          // New incoming work → lowest priority
+  tagging: 6,          // New incoming work
 };
 
 function getStepPriority(step: string | null): number {
@@ -142,10 +142,39 @@ export function getTopEligibleTask(
   // generic tasks from the open queue.
   if (!onShift) return null;
 
-  // ── Busy gate: hands-on work in progress (a running machine does NOT count) ──
+  // ── 1. Filter eligible processes (with global machine capacity check) ──
+  const eligible = live.filter(p => {
+    const cur = currentStep(p);
+    // A started-but-unassigned stage (supervisor unassigned it mid-run) already
+    // occupies its machine — don't count it against itself.
+    const atCapacity = !!cur && !p.stages[cur]?.startedAt && isMachineAtCapacity(live, cur, resources);
+    return isHelperEligible(p, role, atCapacity);
+  });
+
+  // Sort by priority: getting_dried (1) -> getting_washed (2) -> packaging (3)...
+  eligible.sort((a, b) => getStepPriority(currentStep(a)) - getStepPriority(currentStep(b)));
+  const topProcess = eligible[0] || null;
+
+  // ── 2. Machine Priority: Washer & Dryer should NEVER remain empty! ──
+  // If an available machine (dryer or washer) needs a load, surface it on top priority.
+  // Any on-shift helper can be assigned to load the machine, UNLESS they are already
+  // actively loading another machine.
+  const isTopProcessMachine = topProcess && isMachineStep(currentStep(topProcess));
+  if (isTopProcessMachine) {
+    if (!isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
+      return topProcess;
+    }
+  }
+
+  // ── 3. Busy gate: hands-on work in progress for non-machine tasks ──
   if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
 
-  // ── 1. Check for unclaimed orders that need tagging ──
+  // ── 4. Offer top non-machine process (packaging, ironing, etc.) if higher priority than new tagging ──
+  if (topProcess && getStepPriority(currentStep(topProcess)) < getStepPriority('tagging')) {
+    return topProcess;
+  }
+
+  // ── 5. Check for unclaimed orders that need tagging ──
   const claimedOrderIds = new Set(processes.map(p => p.orderId));
   const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
   if (o) {
@@ -162,19 +191,5 @@ export function getTopEligibleTask(
     };
   }
 
-  // ── 2. Filter eligible processes (with global machine capacity check) ──
-  const eligible = live.filter(p => {
-    const cur = currentStep(p);
-    // A started-but-unassigned stage (supervisor unassigned it mid-run) already
-    // occupies its machine — don't count it against itself.
-    const atCapacity = !!cur && !p.stages[cur]?.startedAt && isMachineAtCapacity(live, cur, resources);
-    return isHelperEligible(p, role, atCapacity);
-  });
-
-  if (eligible.length === 0) return null;
-
-  // ── 3. Sort by priority: finish almost-done work first ──
-  eligible.sort((a, b) => getStepPriority(currentStep(a)) - getStepPriority(currentStep(b)));
-
-  return eligible[0];
+  return topProcess;
 }
