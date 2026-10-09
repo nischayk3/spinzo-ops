@@ -135,7 +135,7 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
 
   const assignee = await selectRider();
   const userId = event.params.userId;
-  const vendorId = order.vendorId || 'vendor_1';
+  const vendorId = order.vendorId || 'default';
   const payload = assignee
     ? taskPayload(orderId, order, assignee, userId, vendorId)
     : {
@@ -376,7 +376,7 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
     const order = orderSnap.data();
 
-    const vendorId = (task && task.vendorId) || order.vendorId || 'vendor_1';
+    const vendorId = order.vendorId || (task && task.vendorId) || 'default';
     const now = admin.firestore.Timestamp.now();
 
     try {
@@ -396,7 +396,7 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
 
         const updateData = { status: 'pickup_completed', updatedAt: now };
         tx.update(db.doc(`users/${userId}/orders/${orderId}`), updateData);
-        tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
         
         if (task) {
           tx.update(db.doc(`ops_tasks/${orderId}`), {
@@ -426,7 +426,7 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
   if (!orderSnap.exists) return { ok: false, error: 'not_found' };
   const order = orderSnap.data();
 
-  const vendorId = (task && task.vendorId) || order.vendorId || 'vendor_1';
+  const vendorId = order.vendorId || (task && task.vendorId) || 'default';
   const now = admin.firestore.Timestamp.now();
 
   // --- Transaction: re-read + status guard + OTP re-verify + dual write + task flip.
@@ -470,7 +470,7 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
       }
 
       tx.update(db.doc(`users/${userId}/orders/${orderId}`), updateData);
-      tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+      tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
       if (task) {
         const taskUpdate = {
           status: 'in_transit_to_store',
@@ -614,7 +614,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     await db.doc(`ops_delivery_tasks/${orderId}`).set({
       orderId,
       userId,
-      vendorId: after.vendorId || 'vendor_1',
+      vendorId: after.vendorId || 'default',
       type: 'delivery',
       status: 'pending', // waiting for supervisor to dispatch
       assignee: null,
@@ -668,32 +668,28 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
   const task = taskSnap.exists ? taskSnap.data() : null;
   let userId = (data.userId && typeof data.userId === 'string' ? data.userId : null) || (task && task.userId);
-  let vendorId = (data.vendorId && typeof data.vendorId === 'string' ? data.vendorId : null) || (task && task.vendorId) || 'vendor_1';
+  let vendorId = (data.vendorId && typeof data.vendorId === 'string' ? data.vendorId : null);
 
   const processId = data.processId || orderId;
   const processRef = db.doc(`ops_process/${processId}`);
-
-  // Fallback 1: try ops_process doc which also stores userId/vendorId
-  if (!userId) {
-    const processSnap = await processRef.get();
-    if (processSnap.exists) {
-      const pd = processSnap.data();
-      userId = pd.userId;
-      vendorId = pd.vendorId || vendorId;
-    }
+  const processSnap = await processRef.get();
+  if (processSnap.exists) {
+    const pd = processSnap.data();
+    if (!userId) userId = pd.userId;
+    if (!vendorId && pd.vendorId) vendorId = pd.vendorId;
   }
 
-  // Fallback 2: try ops_queue (parked orders awaiting pickup or helper claim)
+  // Fallback 1: try ops_queue (parked orders awaiting pickup or helper claim)
   if (!userId) {
     const queueSnap = await db.doc(`ops_queue/${orderId}`).get();
     if (queueSnap.exists) {
       const qd = queueSnap.data();
       userId = qd.userId;
-      vendorId = qd.vendorId || vendorId;
+      if (!vendorId && qd.vendorId) vendorId = qd.vendorId;
     }
   }
 
-  // Fallback 3: collectionGroup search across orders if task/process docs were not present
+  // Fallback 2: collectionGroup search across orders if task/process docs were not present
   if (!userId) {
     try {
       const cgSnap = await db.collectionGroup('orders')
@@ -704,7 +700,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const orderDoc = cgSnap.docs[0];
         const od = orderDoc.data();
         userId = od.userId || (orderDoc.ref.parent && orderDoc.ref.parent.parent && orderDoc.ref.parent.parent.id);
-        vendorId = od.vendorId || vendorId;
+        if (!vendorId && od.vendorId) vendorId = od.vendorId;
       }
     } catch (e) {
       console.warn('collectionGroup fallback for orderId failed:', e);
@@ -714,6 +710,14 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   if (!userId) return { ok: false, error: 'not_found' };
 
   const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
+  if (!vendorId) {
+    const orderSnap = await orderRef.get();
+    if (orderSnap.exists && orderSnap.data().vendorId) {
+      vendorId = orderSnap.data().vendorId;
+    }
+  }
+  if (!vendorId && task && task.vendorId) vendorId = task.vendorId;
+  if (!vendorId) vendorId = 'default';
   const now = admin.firestore.Timestamp.now();
 
   // ── Edit Order ──────────────────────────────────────────────────────────
@@ -744,7 +748,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       };
       await orderRef.update(updateData);
       // Also update the vendor mirror
-      await db.doc(`vendors/${vendorId}/orders/${orderId}`).update(updateData);
+      await db.doc(`vendors/${vendorId}/orders/${orderId}`).set(updateData, { merge: true });
       return { ok: true };
     } catch (err) {
       console.error('opsProcessing editOrder failed', err);
@@ -819,7 +823,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (prodStep) updateData.processingStep = prodStep;
         
         tx.update(orderRef, updateData);
-        tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
         
         return { ok: true };
       });
@@ -934,7 +938,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (isProductionStep(step)) {
           const updateData = { processingStep: step, updatedAt: now };
           tx.update(orderRef, updateData);
-          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
         }
         return { ok: true, step };
       });
@@ -990,7 +994,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             const deliveryOTP = generateOTP();
             const updateData = { status: 'ready', readyAt: now, deliveryOTP };
             tx.update(orderRef, updateData);
-            tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+            tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
           } else {
             const parentId = process.parentOrderId || orderId;
             const allProcesses = await tx.get(
@@ -1006,13 +1010,13 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
               const deliveryOTP = generateOTP();
               const updateData = { status: 'ready', readyAt: now, deliveryOTP };
               tx.update(orderRef, updateData);
-              tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+              tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
             }
           }
         } else if (isProductionStep(nextStatus)) {
           const updateData = { processingStep: nextStatus, updatedAt: now };
           tx.update(orderRef, updateData);
-          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
         }
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
@@ -1145,7 +1149,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             const deliveryOTP = generateOTP();
             const updateData = { status: 'ready', readyAt: now, deliveryOTP };
             tx.update(orderRef, updateData);
-            tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+            tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
           } else {
             const parentId = p.parentOrderId || orderId;
             const allProcesses = await tx.get(
@@ -1161,13 +1165,13 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
               const deliveryOTP = generateOTP();
               const updateData = { status: 'ready', readyAt: now, deliveryOTP };
               tx.update(orderRef, updateData);
-              tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+              tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
             }
           }
         } else if (isProductionStep(nextStatus)) {
           const updateData = { processingStep: nextStatus, updatedAt: now };
           tx.update(orderRef, updateData);
-          tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+          tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
         }
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
@@ -1235,7 +1239,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             const deliveryOTP = generateOTP();
             const updateData = { status: 'ready', readyAt: now, deliveryOTP };
             tx.update(orderRef, updateData);
-            tx.update(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData);
+            tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
           }
         }
 
@@ -1283,7 +1287,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   }
 
   const data = request.data || {};
-  const { action, orderId, userId, vendorId = 'vendor_1' } = data;
+  const { action, orderId, userId, vendorId: reqVendorId } = data;
   
   if (role !== 'supervisor' && role !== 'admin' && !(role === 'rider' && action === 'verifyDeliveryOTP')) {
     return { ok: false, error: 'unauthorized' };
@@ -1292,7 +1296,6 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   if (!orderId || !userId || !action) return { ok: false, error: 'invalid_input' };
   
   const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
-  const vendorRef = db.doc(`vendors/${vendorId}/orders/${orderId}`);
   const now = admin.firestore.Timestamp.now();
 
   try {
@@ -1306,6 +1309,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
       const queueSnap = await tx.get(db.doc(`ops_queue/${orderId}`));
       const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
       const delTaskSnap = await tx.get(delTaskRef);
+
+      const vendorId = reqVendorId || order.vendorId || (taskSnap.exists && taskSnap.data().vendorId) || 'default';
+      const vendorRef = db.doc(`vendors/${vendorId}/orders/${orderId}`);
 
       if (action === 'cancelOrder') {
         const { reason, note } = data;
