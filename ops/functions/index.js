@@ -537,17 +537,41 @@ async function deleteProcessDocs(orderId) {
 }
 
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
-// (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync).
-exports.syncTaskFromOrder = onDocumentUpdated('users/{userId}/orders/{orderId}', async (event) => {
+// (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync),
+// or when an order is deleted entirely from the main Livfresh admin panel.
+exports.syncTaskFromOrder = onDocumentWritten('users/{userId}/orders/{orderId}', async (event) => {
   if (!event.data) return;
+
+  const orderId = event.params.orderId;
+
+  // If the order document was deleted from the main app/admin panel, clean up ops tasks
+  if (!event.data.after.exists) {
+    console.log(`[OrderDeleted] Order ${orderId} was deleted. Cleaning up ops tasks.`);
+    try {
+      const taskRef = db.doc(`ops_tasks/${orderId}`);
+      const snap = await taskRef.get();
+      if (snap.exists && snap.data().status !== 'cancelled') {
+        await taskRef.update({ status: 'cancelled', cancelledAt: TS() });
+      }
+      await Promise.allSettled([
+        db.doc(`ops_queue/${orderId}`).delete(),
+        db.doc(`ops_delivery_tasks/${orderId}`).delete(),
+        db.doc(`ops_process/${orderId}`).delete(),
+        deleteProcessDocs(orderId),
+      ]);
+    } catch (err) {
+      console.error(`syncTaskFromOrder cleanup on delete failed for ${orderId}:`, err);
+    }
+    return;
+  }
+
+  if (!event.data.before.exists) return; // creation is handled by autoAssignRider
   const before = event.data.before.data();
   const after = event.data.after.data();
   if (!before || !after) return;
 
   const trans = taskTransition(before.status, after.status);
   if (!trans) return;
-
-  const orderId = event.params.orderId;
 
   if (trans.dropQueue) {
     try {
