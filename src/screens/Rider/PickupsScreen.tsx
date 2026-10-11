@@ -55,13 +55,14 @@ export function PickupsScreen() {
     ? (orders.find(o => o.id === activeTask.orderId) || orders.find(o => o.id === activeTaskId))
     : orders.find(o => o.id === activeTaskId);
 
-  // Extract all distinct services requiring tokens from the active order
+  // Extract all distinct services requiring tokens from the active order or task
   const servicesToTag = useMemo(() => {
-    if (!activeOrder?.items || activeOrder.items.length === 0) {
+    const activeItems = activeOrder?.items || activeTask?.items;
+    if (!activeItems || activeItems.length === 0) {
       return [{ key: 'general', label: 'Order Bag / Token', details: 'All items' }];
     }
     const list: { key: string; label: string; details: string }[] = [];
-    for (const item of activeOrder.items) {
+    for (const item of activeItems) {
       const rawKey = item.serviceType || (item as any).serviceId;
       if (!rawKey) continue;
       let key = rawKey;
@@ -97,7 +98,7 @@ export function PickupsScreen() {
       }
     }
     return list.length > 0 ? list : [{ key: 'general', label: 'Order Bag / Token', details: 'All items' }];
-  }, [activeOrder]);
+  }, [activeOrder, activeTask]);
 
   const isOtpValid = otp.length === 4;
   const areTokensValid = servicesToTag.every(s => Boolean(tokens[s.key]?.trim()));
@@ -180,6 +181,11 @@ export function PickupsScreen() {
       ? pickupLabel(t)
       : (order && slotLabel(order) !== '—' ? slotLabel(order) : undefined);
 
+    const items = order?.items || t.items;
+    const totalAmount = order ? orderTotal(order) : (typeof t.totalAmount === 'number' ? t.totalAmount : undefined);
+    const paymentStatus = order?.paymentStatus || t.paymentStatus;
+    const notes = order?.notes || t.notes;
+
     return (
       <RiderTaskCard
         type="pickup"
@@ -188,16 +194,16 @@ export function PickupsScreen() {
         customerPhone={order?.customerPhone || t.customerPhone}
         status={t.status}
         createdAt={order?.createdAt || t.createdAt}
-        items={order?.items}
-        totalAmount={order ? orderTotal(order) : undefined}
-        paymentStatus={order?.paymentStatus}
+        items={items}
+        totalAmount={totalAmount}
+        paymentStatus={paymentStatus}
         pickupAddress={t.pickupAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined))}
         pickupSlot={pickupSlotText}
-        notes={order?.notes}
+        notes={notes}
         tokenNumber={t.tokenNumber || order?.tokenNumber}
         tokens={order?.tokens || (t as any).tokens}
-        lat={order?.latitude || order?.address?.latitude}
-        lng={order?.longitude || order?.address?.longitude}
+        lat={order?.latitude || order?.address?.latitude || t.latitude}
+        lng={order?.longitude || order?.address?.longitude || t.longitude}
         onPrimary={
           isInTransit
             ? () => { setOtp(''); setActiveStoreTaskId(t.id); }
@@ -210,7 +216,7 @@ export function PickupsScreen() {
         }
         primaryLabel={isInTransit ? 'Handover to Store' : 'Verify pickup OTP'}
         onEdit={
-          !isInTransit && order && order.items && order.items.length > 0
+          !isInTransit && items && items.length > 0
             ? () => setEditOrderId(t.orderId)
             : undefined
         }

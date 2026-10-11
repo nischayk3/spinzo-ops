@@ -18,6 +18,13 @@ export interface OpsTask {
   deliveryOTP?: string | null;
   customerName?: string;
   customerPhone?: string;
+  items?: any[];
+  totalAmount?: number;
+  paymentStatus?: string;
+  paymentMode?: string;
+  notes?: string;
+  latitude?: number;
+  longitude?: number;
   pickedUpAt?: any;
   cancelledAt?: any;
   proofUrl?: string | null;
@@ -44,6 +51,13 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     deliveryOTP: d.deliveryOTP ?? undefined,
     customerName: d.customerName ?? undefined,
     customerPhone: d.customerPhone ?? undefined,
+    items: d.items ?? undefined,
+    totalAmount: typeof d.totalAmount === 'number' ? d.totalAmount : undefined,
+    paymentStatus: d.paymentStatus ?? undefined,
+    paymentMode: d.paymentMode ?? undefined,
+    notes: d.notes ?? undefined,
+    latitude: d.latitude ?? undefined,
+    longitude: d.longitude ?? undefined,
     pickedUpAt: d.pickedUpAt ?? undefined,
     cancelledAt: d.cancelledAt ?? undefined,
     proofUrl: d.proofUrl ?? undefined,
