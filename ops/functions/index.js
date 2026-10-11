@@ -1,6 +1,6 @@
 const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onCall } = require('firebase-functions/v2/https');
+const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
 const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate } = require('./dispatch');
 
@@ -23,7 +23,8 @@ function generateOTP() {
 function pickupAddressFromOrder(order) {
   const a = order && order.address;
   if (!a) return '';
-  return typeof a === 'string' ? a : (a.address || a.line1 || '');
+  if (typeof a === 'string') return a;
+  return a.formattedAddress || a.address || a.fullAddress || a.line1 || [a.houseNumber, a.building, a.street, a.area, a.city].filter(Boolean).join(', ') || '';
 }
 
 /**
@@ -112,16 +113,28 @@ async function selectRider() {
 }
 
 function taskPayload(orderId, order, assignee, userId, vendorId) {
+  const addr = pickupAddressFromOrder(order);
+  const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
   return {
     orderId,
     userId,
     vendorId,
     assignee,
     status: 'pending',
-    pickupAddress: pickupAddressFromOrder(order),
+    customerName: (order && (order.customerName || order.userName)) || '',
+    customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
+    pickupAddress: addr,
     pickupSlot: (order && order.pickupDetails) || null,
     tokenNumber: (order && order.tokenNumber) || null,
+    tokens: (order && order.tokens) || null,
     pickupOTP: (order && order.pickupOTP) || null,
+    items: (order && order.items) || [],
+    totalAmount: total,
+    paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
+    paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
+    notes: (order && (order.notes || order.instruction)) || '',
+    latitude: (order && (order.latitude || (order.address && order.address.latitude))) || null,
+    longitude: (order && (order.longitude || (order.address && order.address.longitude))) || null,
     assignedAt: TS(),
     createdAt: TS(),
   };
@@ -136,6 +149,7 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const assignee = await selectRider();
   const userId = event.params.userId;
   const vendorId = order.vendorId || 'default';
+  const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
   const payload = assignee
     ? taskPayload(orderId, order, assignee, userId, vendorId)
     : {
@@ -143,10 +157,20 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
         userId,
         vendorId,
         status: 'pending',
+        customerName: (order && (order.customerName || order.userName)) || '',
+        customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
         pickupAddress: pickupAddressFromOrder(order),
         pickupSlot: (order && order.pickupDetails) || null,
         tokenNumber: (order && order.tokenNumber) || null,
+        tokens: (order && order.tokens) || null,
         pickupOTP: (order && order.pickupOTP) || null,
+        items: (order && order.items) || [],
+        totalAmount: total,
+        paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
+        paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
+        notes: (order && (order.notes || order.instruction)) || '',
+        latitude: (order && (order.latitude || (order.address && order.address.latitude))) || null,
+        longitude: (order && (order.longitude || (order.address && order.address.longitude))) || null,
         createdAt: TS(),
       };
 
@@ -257,10 +281,20 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
           vendorId: data.vendorId || null,
           assignee,
           status: 'pending',
+          customerName: data.customerName || '',
+          customerPhone: data.customerPhone || '',
           pickupAddress: data.pickupAddress || '',
           pickupSlot: data.pickupSlot || null,
           tokenNumber: data.tokenNumber || null,
+          tokens: data.tokens || null,
           pickupOTP: data.pickupOTP || null,
+          items: data.items || [],
+          totalAmount: data.totalAmount || 0,
+          paymentStatus: data.paymentStatus || 'pending',
+          paymentMode: data.paymentMode || '',
+          notes: data.notes || '',
+          latitude: data.latitude || null,
+          longitude: data.longitude || null,
           assignedAt: TS(),
           createdAt: data.createdAt || TS(),
         });
@@ -1292,6 +1326,54 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   if (role !== 'supervisor' && role !== 'admin' && !(role === 'rider' && action === 'verifyDeliveryOTP')) {
     return { ok: false, error: 'unauthorized' };
   }
+
+  if (action === 'backfillOpsTasks') {
+    if (role !== 'supervisor' && role !== 'admin') {
+      return { ok: false, error: 'unauthorized' };
+    }
+    const tasksSnap = await db.collection('ops_tasks')
+      .where('status', 'in', ['pending', 'assigned', 'in_transit_to_store'])
+      .get();
+    let updatedCount = 0;
+    for (const tDoc of tasksSnap.docs) {
+      const td = tDoc.data();
+      const targetOrderId = td.orderId || tDoc.id;
+      let targetUserId = td.userId;
+      let orderData = null;
+
+      if (targetUserId) {
+        const oSnap = await db.doc(`users/${targetUserId}/orders/${targetOrderId}`).get();
+        if (oSnap.exists) orderData = oSnap.data();
+      }
+      if (!orderData) {
+        const cgSnap = await db.collectionGroup('orders').where('id', '==', targetOrderId).limit(1).get();
+        if (!cgSnap.empty) {
+          orderData = cgSnap.docs[0].data();
+          if (!targetUserId) targetUserId = orderData.userId || (cgSnap.docs[0].ref.parent && cgSnap.docs[0].ref.parent.parent && cgSnap.docs[0].ref.parent.parent.id);
+        }
+      }
+
+      if (orderData) {
+        const total = (orderData.totalAmount || (orderData.billDetails && orderData.billDetails.total) || orderData.cartTotal) || 0;
+        const patch = {
+          customerName: orderData.customerName || orderData.userName || '',
+          customerPhone: orderData.customerPhone || orderData.userPhone || '',
+          pickupAddress: pickupAddressFromOrder(orderData),
+          items: orderData.items || [],
+          totalAmount: total,
+          paymentStatus: orderData.paymentStatus || orderData.paymentMethod || 'pending',
+          paymentMode: orderData.paymentMode || orderData.paymentMethod || '',
+          notes: orderData.notes || orderData.instruction || '',
+          latitude: orderData.latitude || (orderData.address && orderData.address.latitude) || null,
+          longitude: orderData.longitude || (orderData.address && orderData.address.longitude) || null,
+        };
+        if (targetUserId && !td.userId) patch.userId = targetUserId;
+        await tDoc.ref.set(patch, { merge: true });
+        updatedCount += 1;
+      }
+    }
+    return { ok: true, updatedCount };
+  }
   
   if (!orderId || !userId || !action) return { ok: false, error: 'invalid_input' };
   
@@ -1557,12 +1639,23 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             tx.delete(db.doc(`ops_queue/${orderId}`));
           } else {
             // Manual pickup assignment with no existing task/queue — create one.
+            const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
             tx.set(db.doc(`ops_tasks/${orderId}`), {
               orderId, userId, vendorId, assignee: riderId, status: 'assigned',
+              customerName: (order && (order.customerName || order.userName)) || '',
+              customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: pickupAddressFromOrder(order),
               pickupSlot: order.pickupDetails || null,
               tokenNumber: order.tokenNumber || null,
+              tokens: order.tokens || null,
               pickupOTP: order.pickupOTP || null,
+              items: (order && order.items) || [],
+              totalAmount: total,
+              paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
+              paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
+              notes: (order && (order.notes || order.instruction)) || '',
+              latitude: (order && (order.latitude || (order.address && order.address.latitude))) || null,
+              longitude: (order && (order.longitude || (order.address && order.address.longitude))) || null,
               assignedAt: now, createdAt: now,
             });
           }
@@ -1678,12 +1771,60 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   }
 });
 
-// Universal safety net: fires whenever an ops_tasks is assigned to a rider
+// Universal safety net: fires whenever an ops_tasks is written/assigned to a rider
 exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event) => {
   if (!event.data) return;
   const before = event.data.before ? event.data.before.data() : null;
   const after = event.data.after ? event.data.after.data() : null;
   if (!after) return; // deleted
+
+  // Auto-heal missing customer details directly onto ops_tasks:
+  if (!after.customerName || !after.customerPhone || !after.pickupAddress || !after.items) {
+    try {
+      const orderId = event.params.orderId;
+      let userId = after.userId;
+      let order = null;
+      if (userId) {
+        const snap = await db.doc(`users/${userId}/orders/${orderId}`).get();
+        if (snap.exists) order = snap.data();
+      }
+      if (!order) {
+        const cgSnap = await db.collectionGroup('orders').where('id', '==', orderId).limit(1).get();
+        if (!cgSnap.empty) {
+          order = cgSnap.docs[0].data();
+          userId = userId || order.userId || (cgSnap.docs[0].ref.parent && cgSnap.docs[0].ref.parent.parent && cgSnap.docs[0].ref.parent.parent.id);
+        }
+      }
+      if (order) {
+        const total = (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal) || 0;
+        const patch = {};
+        if (!after.customerName) patch.customerName = order.customerName || order.userName || '';
+        if (!after.customerPhone) patch.customerPhone = order.customerPhone || order.userPhone || '';
+        if (!after.pickupAddress) patch.pickupAddress = pickupAddressFromOrder(order);
+        if (!after.items && order.items) patch.items = order.items;
+        if (typeof after.totalAmount !== 'number') patch.totalAmount = total;
+        if (!after.paymentStatus) patch.paymentStatus = order.paymentStatus || order.paymentMethod || 'pending';
+        if (!after.paymentMode) patch.paymentMode = order.paymentMode || order.paymentMethod || '';
+        if (!after.notes && (order.notes || order.instruction)) patch.notes = order.notes || order.instruction || '';
+        if (!after.tokens && order.tokens) patch.tokens = order.tokens;
+        if (!after.latitude && (order.latitude || (order.address && order.address.latitude))) {
+          patch.latitude = order.latitude || (order.address && order.address.latitude);
+        }
+        if (!after.longitude && (order.longitude || (order.address && order.address.longitude))) {
+          patch.longitude = order.longitude || (order.address && order.address.longitude);
+        }
+        if (userId && !after.userId) patch.userId = userId;
+
+        if (Object.keys(patch).length > 0) {
+          await db.doc(`ops_tasks/${orderId}`).set(patch, { merge: true });
+          // Merge write will trigger onOpsTaskWritten again with fully enriched data
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('onOpsTaskWritten auto-heal error:', e);
+    }
+  }
 
   const newAssignee = after.assignee;
   const oldAssignee = before ? before.assignee : null;
@@ -1703,6 +1844,107 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
       slot,
       isInstant,
     });
+  }
+});
+
+// One-shot HTTP endpoint to heal and enrich all active ops_tasks immediately
+exports.healOpsTasks = onRequest({ cors: true, invoker: 'public' }, async (req, res) => {
+  try {
+    // 1. Get all riders
+    const ridersSnap = await db.collection('ops_staff').where('role', '==', 'rider').get();
+    const riderIds = ridersSnap.docs.map(d => d.id);
+    
+    // Also include any other staff uids found
+    const allStaffSnap = await db.collection('ops_staff').get();
+    const allStaffIds = allStaffSnap.docs.map(d => d.id);
+
+    const tasksToHeal = new Map();
+
+    // Query tasks assigned to each staff member
+    for (const uid of allStaffIds) {
+      const staffTasks = await db.collection('ops_tasks').where('assignee', '==', uid).get();
+      staffTasks.forEach(d => {
+        const td = d.data();
+        if (td.status === 'pending' || td.status === 'assigned' || td.status === 'in_transit_to_store') {
+          tasksToHeal.set(d.id, { ref: d.ref, data: td });
+        }
+      });
+    }
+
+    // Also check ops_queue
+    const queueSnap = await db.collection('ops_queue').get();
+    queueSnap.forEach(d => {
+      const td = d.data();
+      if (td.status === 'pending') {
+        tasksToHeal.set(d.id, { ref: d.ref, data: td });
+      }
+    });
+
+    let updatedCount = 0;
+    const details = [];
+
+    for (const [taskId, { ref: tRef, data: td }] of tasksToHeal.entries()) {
+      const targetOrderId = td.orderId || taskId;
+      let targetUserId = td.userId;
+      let orderData = null;
+
+      if (targetUserId) {
+        const oSnap = await db.doc(`users/${targetUserId}/orders/${targetOrderId}`).get();
+        if (oSnap.exists) {
+          orderData = oSnap.data();
+        } else {
+          // List user orders and check by document ID (case-insensitive or matching suffix)
+          const userOrdersSnap = await db.collection(`users/${targetUserId}/orders`).get();
+          for (const uDoc of userOrdersSnap.docs) {
+            if (uDoc.id.toLowerCase() === targetOrderId.toLowerCase() || uDoc.id.toUpperCase().endsWith(targetOrderId.toUpperCase().slice(-6))) {
+              orderData = uDoc.data();
+              break;
+            }
+          }
+        }
+      }
+
+      if (!orderData) {
+        // Search vendor orders
+        const vendorsSnap = await db.collection('vendors').get();
+        for (const vDoc of vendorsSnap.docs) {
+          const voSnap = await db.doc(`vendors/${vDoc.id}/orders/${targetOrderId}`).get();
+          if (voSnap.exists) {
+            orderData = voSnap.data();
+            if (!targetUserId && orderData.userId) targetUserId = orderData.userId;
+            break;
+          }
+        }
+      }
+
+      if (orderData) {
+        const total = (orderData.totalAmount || (orderData.billDetails && orderData.billDetails.total) || orderData.cartTotal) || 0;
+        const patch = {
+          customerName: orderData.customerName || orderData.userName || '',
+          customerPhone: orderData.customerPhone || orderData.userPhone || '',
+          pickupAddress: pickupAddressFromOrder(orderData),
+          items: orderData.items || [],
+          totalAmount: total,
+          paymentStatus: orderData.paymentStatus || orderData.paymentMethod || 'pending',
+          paymentMode: orderData.paymentMode || orderData.paymentMethod || '',
+          notes: orderData.notes || orderData.instruction || '',
+          latitude: orderData.latitude || (orderData.address && orderData.address.latitude) || null,
+          longitude: orderData.longitude || (orderData.address && orderData.address.longitude) || null,
+        };
+        if (orderData.tokens && !td.tokens) patch.tokens = orderData.tokens;
+        if (targetUserId && !td.userId) patch.userId = targetUserId;
+        await tRef.set(patch, { merge: true });
+        updatedCount += 1;
+        details.push({ orderId: targetOrderId, customerName: patch.customerName, phone: patch.customerPhone, address: patch.pickupAddress });
+      } else {
+        details.push({ orderId: targetOrderId, error: 'order_not_found', userId: targetUserId });
+      }
+    }
+
+    res.json({ ok: true, foundPending: tasksToHeal.size, updatedCount, details });
+  } catch (err) {
+    console.error('healOpsTasks error:', err);
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
