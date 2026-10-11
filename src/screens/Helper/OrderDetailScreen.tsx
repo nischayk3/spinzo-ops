@@ -37,6 +37,7 @@ const friendlyScanError = (code: string): string => {
 
 const friendlyActionError = (code: string): string => {
   const map: Record<string, string> = {
+    payment_required: 'This order is unpaid. The customer must pay in the SpinZo app before completing delivery.',
     already_claimed: 'This order is already claimed.',
     invalid_state: "This order isn't in a state that allows that action.",
     unauthorized: "You're not assigned to this stage.",

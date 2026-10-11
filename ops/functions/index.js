@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass; iron people take only
 // ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
@@ -1462,9 +1462,20 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (role === 'rider' && delTaskSnap.exists && delTaskSnap.data().assignee !== auth.uid) {
           return { ok: false, error: 'unauthorized' };
         }
-        const { otp, proofUrl } = data;
+        const { otp, proofUrl, allowUnpaidDelivery } = data;
         if (!otp || String(otp) !== String(order.deliveryOTP)) {
           return { ok: false, error: 'invalid_otp' };
+        }
+
+        // ⚠️ Payment Gate: Order must be paid before delivery completion
+        const paymentCheck = checkPaymentGate(order, { allowUnpaidDelivery, role });
+        if (!paymentCheck.allowed) {
+          return {
+            ok: false,
+            error: paymentCheck.reason,
+            message: paymentCheck.message,
+            amount: paymentCheck.amount,
+          };
         }
 
         const updateData = {

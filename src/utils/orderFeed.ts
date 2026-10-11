@@ -55,6 +55,7 @@ export interface FeedOrder {
   totalAmount?: number;
   billDetails?: { total?: number; itemTotal?: number; deliveryFee?: number; gst?: number; discount?: number };
   paymentStatus?: string;
+  paymentMode?: string;
   notes?: string;
   tokenNumber?: string;
   tokens?: Record<string, string>;

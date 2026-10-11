@@ -31,6 +31,7 @@ const orderFromDoc = (d: any): FeedOrder => {
     totalAmount: data.totalAmount || data.billDetails?.total || data.cartTotal,
     billDetails: data.billDetails,
     paymentStatus: data.paymentStatus || data.paymentMethod,
+    paymentMode: data.paymentMode || data.paymentMethod,
     notes: data.notes || data.instruction,
     tokenNumber: data.tokenNumber,
     tokens: data.tokens,

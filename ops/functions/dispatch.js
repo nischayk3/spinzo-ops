@@ -232,4 +232,40 @@ function splitOrderIntoServices(order) {
   return Object.values(groups);
 }
 
-module.exports = { pickRider, normalizePhone, pickupGuard, taskTransition, isAwaitingPickup, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS };
+
+/**
+ * Checks if an order requires payment before completion and whether it is satisfied.
+ * @param {object} order - the order document data
+ * @param {{ allowUnpaidDelivery?: boolean, role?: string }} options
+ * @returns {{ allowed: boolean, reason?: string, message?: string, amount: number, overridden?: boolean }}
+ */
+function checkPaymentGate(order, options = {}) {
+  const orderTotal = (order && order.billDetails && typeof order.billDetails.total === "number")
+    ? order.billDetails.total
+    : ((order && (order.total || order.finalAmount)) || 0);
+
+  const isAllCredits = Array.isArray(order && order.items) && order.items.length > 0 && order.items.every(i => i && i.isCreditItem);
+  const isCreditMode = order && (order.paymentMode === "credit" || order.paymentMethod === "credit");
+  const requiresPayment = orderTotal > 0 && !isAllCredits && !isCreditMode;
+
+  const paymentStatus = (order && order.paymentStatus ? String(order.paymentStatus) : "").toLowerCase().trim();
+  const isPaid = paymentStatus === "paid";
+
+  if (!requiresPayment || isPaid) {
+    return { allowed: true, amount: orderTotal };
+  }
+
+  // If requires payment and not paid, check if explicit supervisor/admin override was given
+  if (options.allowUnpaidDelivery && (options.role === "supervisor" || options.role === "admin")) {
+    return { allowed: true, amount: orderTotal, overridden: true };
+  }
+
+  return {
+    allowed: false,
+    reason: "payment_required",
+    message: "PAYMENT_REQUIRED: This order has not been paid yet. Ask the customer to pay in the SpinZo app before completing delivery.",
+    amount: orderTotal
+  };
+}
+
+module.exports = { checkPaymentGate, pickRider, normalizePhone, pickupGuard, taskTransition, isAwaitingPickup, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS };

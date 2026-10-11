@@ -80,7 +80,8 @@ export function DeliveriesScreen() {
         return true;
       } else {
         const msg =
-          res.error === 'invalid_otp' ? 'Incorrect OTP. Please try again.'
+          res.error === 'payment_required' ? 'PAYMENT REQUIRED: This order has not been paid yet. Ask the customer to pay in the SpinZo app before completing delivery.'
+          : res.error === 'invalid_otp' ? 'Incorrect OTP. Please try again.'
           : res.error === 'invalid_state' ? 'This order is no longer out for delivery.'
           : res.error === 'unauthorized' ? 'You are not authorized for this delivery.'
           : 'Could not verify delivery. Please try again.';
@@ -136,6 +137,20 @@ export function DeliveriesScreen() {
                       <Text className="text-red-400 text-xs font-bold">OVERDUE — pending delivery</Text>
                     </View>
                   ) : null}
+                  {(() => {
+                    const total = order ? orderTotal(order) : (t.totalAmount || 0);
+                    const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
+                    const isCredit = order?.paymentMode === "credit";
+                    if (total > 0 && !isPaid && !isCredit) {
+                      return (
+                        <View className="bg-amber-500/15 border border-amber-500/40 rounded-lg px-3 py-1.5 mb-2 flex-row items-center justify-between">
+                          <Text className="text-amber-400 text-xs font-bold">⚠️ UNPAID: ₹{total}</Text>
+                          <Text className="text-amber-300 text-xs">Customer must pay in app</Text>
+                        </View>
+                      );
+                    }
+                    return null;
+                  })()}
                   <RiderTaskCard
                     type="delivery"
                     orderNumber={t.orderId.slice(-6).toUpperCase()}
@@ -155,7 +170,27 @@ export function DeliveriesScreen() {
                     lat={order?.latitude}
                     lng={order?.longitude}
                     bundleCount={t.bundleCount}
-                    onPrimary={() => t.status === 'assigned' ? setShowPickupScanner(t.id) : setActiveTaskId(t.id)}
+                    onPrimary={() => {
+                      if (t.status === "assigned") {
+                        setShowPickupScanner(t.id);
+                      } else {
+                        const total = order ? orderTotal(order) : (t.totalAmount || 0);
+                        const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
+                        const isCredit = order?.paymentMode === "credit";
+                        if (total > 0 && !isPaid && !isCredit) {
+                          Alert.alert(
+                            `Payment Pending (₹${total})`,
+                            "This order has not been marked paid yet. Ask the customer to pay in their SpinZo app before completing delivery.",
+                            [
+                              { text: "Cancel", style: "cancel" },
+                              { text: "Enter Delivery OTP", onPress: () => setActiveTaskId(t.id) }
+                            ]
+                          );
+                        } else {
+                          setActiveTaskId(t.id);
+                        }
+                      }
+                    }}
                     primaryLabel={t.status === 'assigned' ? 'Verify Pickup' : 'Deliver'}
                   />
                 </View>
