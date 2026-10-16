@@ -75,6 +75,16 @@ export function toMillis(ts: any): number {
   return 0;
 }
 
+const localSnoozeTimestamps = new Map<string, number>();
+
+export function recordLocalSnooze(key: string, timestamp: number = Date.now()) {
+  localSnoozeTimestamps.set(key, timestamp);
+}
+
+export function clearLocalSnooze(key: string) {
+  localSnoozeTimestamps.delete(key);
+}
+
 /**
  * Checks if a specific process has an active nudge due for a given staff user.
  */
@@ -103,9 +113,13 @@ export function getProcessNudge(
     const startMs = toMillis(stage.startedAt);
     if (!startMs) return null;
 
+    const nudgeKey = `${process.id || process.orderId}_${cur}_started`;
     const lastSnoozeMs = toMillis(stage.nudge?.started?.lastSnoozedAt);
-    const isDue = lastSnoozeMs
-      ? now >= lastSnoozeMs + rule.repeatIntervalMs
+    const localSnoozeMs = localSnoozeTimestamps.get(nudgeKey) || 0;
+    const effectiveSnoozeMs = Math.max(lastSnoozeMs, localSnoozeMs);
+
+    const isDue = effectiveSnoozeMs
+      ? now >= effectiveSnoozeMs + rule.repeatIntervalMs
       : now >= startMs + rule.initialDelayMs;
 
     if (isDue) {
@@ -132,9 +146,13 @@ export function getProcessNudge(
     const acceptMs = toMillis(stage.acceptedAt);
     if (!acceptMs) return null;
 
+    const nudgeKey = `${process.id || process.orderId}_${cur}_accepted`;
     const lastSnoozeMs = toMillis(stage.nudge?.accepted?.lastSnoozedAt);
-    const isDue = lastSnoozeMs
-      ? now >= lastSnoozeMs + rule.repeatIntervalMs
+    const localSnoozeMs = localSnoozeTimestamps.get(nudgeKey) || 0;
+    const effectiveSnoozeMs = Math.max(lastSnoozeMs, localSnoozeMs);
+
+    const isDue = effectiveSnoozeMs
+      ? now >= effectiveSnoozeMs + rule.repeatIntervalMs
       : now >= acceptMs + rule.initialDelayMs;
 
     if (isDue) {

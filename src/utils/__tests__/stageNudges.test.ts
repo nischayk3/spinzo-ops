@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getProcessNudge, STAGE_NUDGE_RULES } from '../stageNudges';
+import { getProcessNudge, STAGE_NUDGE_RULES, recordLocalSnooze, clearLocalSnooze } from '../stageNudges';
 import { OpsProcess } from '../opsProcess';
 
 function makeTestProcess(cur: 'getting_washed' | 'getting_dried', stageData: any): OpsProcess {
@@ -102,4 +102,29 @@ describe('stageNudges', () => {
     expect(dryStartedNudge?.snoozeLabel).toBe('Still running');
     expect(dryStartedNudge?.actionLabel).toBe('Complete Drying');
   });
+
+  it('suppresses nudges instantly when recordLocalSnooze is called', () => {
+    const baseTime = 3000000;
+    const process = makeTestProcess('getting_washed', {
+      assignee: UID,
+      acceptedAt: baseTime,
+    });
+
+    // At 10m, it's due
+    const now = baseTime + 10 * 60 * 1000;
+    expect(getProcessNudge(process, UID, now)).not.toBeNull();
+
+    // Call recordLocalSnooze
+    recordLocalSnooze('proc_1_getting_washed_accepted', now);
+
+    // Immediately afterwards (2m later), it must be suppressed locally
+    expect(getProcessNudge(process, UID, now + 2 * 60 * 1000)).toBeNull();
+
+    // After repeat interval (5m later), it becomes due again
+    expect(getProcessNudge(process, UID, now + 5 * 60 * 1000)).not.toBeNull();
+
+    // Clean up
+    clearLocalSnooze('proc_1_getting_washed_accepted');
+  });
 });
+

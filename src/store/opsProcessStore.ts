@@ -132,18 +132,19 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
 
   startStep: async (orderId, processId) => {
     try {
-      const targetProcessId = processId || getProcessId(orderId);
-      const res = await callOps()({ orderId, processId: targetProcessId, action: 'startStep' });
+      const cleanOrderId = orderId.includes('__') ? orderId.split('__')[0] : orderId;
+      const targetProcessId = processId || getProcessId(orderId) || cleanOrderId;
+      const res = await callOps()({ orderId: cleanOrderId, processId: targetProcessId, action: 'startStep' });
       if (res.data?.ok) {
         const proc = get().processes.find((p: OpsProcess) => p.id === targetProcessId);
         const cur = proc ? currentStep(proc) : null;
         if (cur === 'getting_washed' || cur === 'getting_dried') {
-          cancelStageNudgeTimer(targetProcessId || orderId, cur);
+          cancelStageNudgeTimer(targetProcessId || cleanOrderId, cur);
           const rule = STAGE_NUDGE_RULES[`${cur}_started`];
           if (rule) {
             scheduleStageNudgeTimer({
-              orderId,
-              processId: targetProcessId || orderId,
+              orderId: cleanOrderId,
+              processId: targetProcessId || cleanOrderId,
               step: cur,
               phase: 'started',
               delaySeconds: Math.floor(rule.initialDelayMs / 1000),
@@ -160,10 +161,11 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   },
   completeStep: async (orderId, processId) => {
     try {
-      const targetProcessId = processId || getProcessId(orderId);
-      const res = await callOps()({ orderId, processId: targetProcessId, action: 'completeStep' });
+      const cleanOrderId = orderId.includes('__') ? orderId.split('__')[0] : orderId;
+      const targetProcessId = processId || getProcessId(orderId) || cleanOrderId;
+      const res = await callOps()({ orderId: cleanOrderId, processId: targetProcessId, action: 'completeStep' });
       if (res.data?.ok) {
-        cancelStageNudgeTimer(targetProcessId || orderId);
+        cancelStageNudgeTimer(targetProcessId || cleanOrderId);
       }
       return res.data;
     } catch (e: any) {
@@ -172,7 +174,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   },
   completePackaging: async (orderId, qualityMedia = {}, processId) => {
     try {
-      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'completePackaging', qualityMedia });
+      const cleanOrderId = orderId.includes('__') ? orderId.split('__')[0] : orderId;
+      const targetProcessId = processId || getProcessId(orderId) || cleanOrderId;
+      const res = await callOps()({ orderId: cleanOrderId, processId: targetProcessId, action: 'completePackaging', qualityMedia });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
@@ -180,9 +184,10 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   },
   snoozeNudge: async (orderId, step, phase, processId) => {
     try {
-      const targetProcessId = processId || getProcessId(orderId);
+      const cleanOrderId = orderId.includes('__') ? orderId.split('__')[0] : orderId;
+      const targetProcessId = processId || getProcessId(orderId) || cleanOrderId;
       const res = await callOps()({
-        orderId,
+        orderId: cleanOrderId,
         processId: targetProcessId,
         action: 'snoozeNudge',
         step,
@@ -192,8 +197,8 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
         const rule = STAGE_NUDGE_RULES[`${step}_${phase}`];
         if (rule) {
           scheduleStageNudgeTimer({
-            orderId,
-            processId: targetProcessId || orderId,
+            orderId: cleanOrderId,
+            processId: targetProcessId || cleanOrderId,
             step,
             phase,
             delaySeconds: Math.floor(rule.repeatIntervalMs / 1000),

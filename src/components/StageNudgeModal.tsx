@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
-import { Clock, AlertTriangle, Play, CheckCircle } from 'lucide-react-native';
+import { Clock, Play, CheckCircle, X } from 'lucide-react-native';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useAuthStore } from '../store/authStore';
-import { getActiveStageNudge, ActiveStageNudge } from '../utils/stageNudges';
+import { getActiveStageNudge, ActiveStageNudge, recordLocalSnooze } from '../utils/stageNudges';
 import { dramaticChime, stopAlarm } from '../utils/alerts';
 import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
@@ -71,30 +71,37 @@ export function StageNudgeModal() {
 
   if (!activeNudge) return null;
 
+  const handleDismiss = () => {
+    stopAlarm();
+    clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
+    // Snooze locally for 2 minutes on explicit X dismiss so user isn't immediately blocked
+    recordLocalSnooze(`${activeNudge.processId || activeNudge.orderId}_${activeNudge.step}_${activeNudge.phase}`);
+    setActiveNudge(null);
+  };
+
   const handleSnooze = async () => {
     stopAlarm();
-    setBusy(true);
-    setActionError(null);
+    clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
+    const current = activeNudge;
+    // Instantly record local snooze and dismiss the dialog so operations are 100% smooth
+    recordLocalSnooze(`${current.processId || current.orderId}_${current.step}_${current.phase}`);
+    setActiveNudge(null);
+
     try {
-      const res = await snoozeNudge(
-        activeNudge.orderId,
-        activeNudge.step,
-        activeNudge.phase,
-        activeNudge.processId
+      await snoozeNudge(
+        current.orderId,
+        current.step,
+        current.phase,
+        current.processId
       );
-      if (!res.ok) {
-        setActionError(res.error || 'Failed to snooze nudge');
-      } else {
-        setActiveNudge(null);
-        clearAssignmentNotifications();
-        if (Platform.OS === 'android') {
-          SpinzoOverlay.dismissOverlay();
-        }
-      }
     } catch (e: any) {
-      setActionError(e?.message || 'Network error');
-    } finally {
-      setBusy(false);
+      console.warn('Background snooze failed:', e);
     }
   };
 
@@ -109,17 +116,27 @@ export function StageNudgeModal() {
       } else {
         res = await completeStep(activeNudge.orderId, activeNudge.processId);
       }
-      if (!res.ok) {
-        setActionError(res.error || 'Action failed');
-      } else {
+
+      const alreadyDoneErrors = ['already_started', 'already_completed', 'already_progressed', 'invalid_state'];
+      if (res?.ok || (res?.error && alreadyDoneErrors.includes(res.error))) {
+        // Successfully transitioned or already transitioned by another action
         setActiveNudge(null);
         clearAssignmentNotifications();
         if (Platform.OS === 'android') {
           SpinzoOverlay.dismissOverlay();
         }
+      } else {
+        const errorMap: Record<string, string> = {
+          unauthorized: 'You are not assigned to this step.',
+          not_found: 'Process record not found. Please refresh.',
+          server_error: 'Server is synchronizing. Please tap again to retry.',
+          internal: 'Connection glitch. Please tap again to retry.',
+          invalid_input: 'Action could not be verified. Please tap again.',
+        };
+        setActionError(errorMap[res?.error] || res?.error || 'Action failed. Please try again.');
       }
     } catch (e: any) {
-      setActionError(e?.message || 'Network error');
+      setActionError('Connection error. Please check internet and tap again.');
     } finally {
       setBusy(false);
     }
@@ -143,9 +160,16 @@ export function StageNudgeModal() {
             <View className="flex-1">
               <Text className="text-textPrimary font-bold text-lg">{activeNudge.title}</Text>
               <Text className="text-textMuted text-xs font-semibold">
-                Order #{activeNudge.orderId.slice(-6).toUpperCase()} • {activeNudge.elapsedMinutes}m elapsed
+                Order #{activeNudge.orderId.includes('__') ? activeNudge.orderId.split('__')[0].slice(-6).toUpperCase() : activeNudge.orderId.slice(-6).toUpperCase()} • {activeNudge.elapsedMinutes}m elapsed
               </Text>
             </View>
+            <TouchableOpacity
+              onPress={handleDismiss}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              className="p-1 rounded-full bg-bgDark border border-bgSurfaceLight/50"
+            >
+              <X size={16} color="#94a3b8" />
+            </TouchableOpacity>
           </View>
 
           {/* Message */}
