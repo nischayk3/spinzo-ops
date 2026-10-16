@@ -12,6 +12,7 @@ import {
   formatItemSummary,
   formatOrderItems,
   parseOrderTokens,
+  matchOrderSearch,
   FeedOrder,
 } from '../orderFeed';
 
@@ -282,5 +283,63 @@ describe('parseOrderTokens', () => {
     const chips = parseOrderTokens(null, 'Token #23');
     expect(chips).toHaveLength(1);
     expect(chips[0]).toEqual({ token: '23' });
+  });
+});
+
+describe('matchOrderSearch', () => {
+  const sampleOrder: FeedOrder = makeOrder({
+    id: 'ORDER_XYZ_789456',
+    customerName: 'Aarav Mehta',
+    customerPhone: '9876543210',
+    tokenNumber: '14',
+    tokens: { wash_fold: '14', ironing: '19' },
+    pickupNote: 'Handle silk saree carefully',
+  });
+
+  it('returns true on empty query', () => {
+    expect(matchOrderSearch(sampleOrder, '')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, '   ')).toBe(true);
+  });
+
+  it('matches by exact token number', () => {
+    expect(matchOrderSearch(sampleOrder, '14')).toBe(true);
+  });
+
+  it('matches token with prefixes (#, Token, TK-)', () => {
+    expect(matchOrderSearch(sampleOrder, '#14')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, 'Token 14')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, 'TK-14')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, 'token#14')).toBe(true);
+  });
+
+  it('matches secondary token from multi-service tokens map', () => {
+    expect(matchOrderSearch(sampleOrder, '19')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, '#19')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, 'Token 19')).toBe(true);
+  });
+
+  it('matches by Order ID and short ID', () => {
+    expect(matchOrderSearch(sampleOrder, 'XYZ_789456')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, '789456')).toBe(true);
+  });
+
+  it('matches by Customer Phone', () => {
+    expect(matchOrderSearch(sampleOrder, '9876543210')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, '98765')).toBe(true);
+  });
+
+  it('matches by Customer Name (case-insensitive)', () => {
+    expect(matchOrderSearch(sampleOrder, 'aarav')).toBe(true);
+    expect(matchOrderSearch(sampleOrder, 'Mehta')).toBe(true);
+  });
+
+  it('matches by pickup notes', () => {
+    expect(matchOrderSearch(sampleOrder, 'silk saree')).toBe(true);
+  });
+
+  it('returns false when no match', () => {
+    expect(matchOrderSearch(sampleOrder, '999999')).toBe(false);
+    expect(matchOrderSearch(sampleOrder, 'Priya')).toBe(false);
+    expect(matchOrderSearch(sampleOrder, '#99')).toBe(false);
   });
 });

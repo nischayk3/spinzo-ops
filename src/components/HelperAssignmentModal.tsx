@@ -24,7 +24,7 @@ export function HelperAssignmentModal() {
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
-  const activeTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources, staffDoc.onShift === true) : null;
+  const activeTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources, staffDoc.onShift === true, staffDoc.phone) : null;
   const order = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
 
   useEffect(() => {
@@ -160,6 +160,12 @@ export function HelperAssignmentModal() {
               </View>
             )}
 
+            {order?.isUrgent && (
+              <View className="mt-2 bg-red-500/20 border border-red-500/50 rounded-full px-3 py-1 flex-row items-center">
+                <Text className="text-red-400 font-black text-xs uppercase tracking-widest">⚡ URGENT ORDER</Text>
+              </View>
+            )}
+
             <View className="mt-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20">
               <Text className="text-primary font-black uppercase tracking-widest text-sm">{stepLabel(curStep)}</Text>
             </View>
@@ -167,6 +173,12 @@ export function HelperAssignmentModal() {
 
           {/* Order identity — order number + token (truck #) so two helpers never mix up orders */}
           <View className="px-5 py-4">
+            {order?.pickupNote ? (
+              <View className="bg-amber-500/15 border border-amber-500/40 rounded-xl p-3 mb-4">
+                <Text className="text-amber-400 text-xs font-bold uppercase mb-0.5">Rider Pickup Note</Text>
+                <Text className="text-amber-200 text-sm font-medium">{order.pickupNote}</Text>
+              </View>
+            ) : null}
             {token ? (
               <View className="flex-row items-center justify-between bg-primary/10 border border-primary/20 rounded-2xl p-4 mb-4">
                 <View className="flex-row items-center">

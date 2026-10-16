@@ -56,3 +56,19 @@ export async function acceptTask(orderId: string, isDelivery?: boolean): Promise
     return { ok: false, error: err?.message || 'network_error' };
   }
 }
+
+export async function updatePickupMeta(
+  orderId: string,
+  params: { isUrgent?: boolean; pickupNote?: string; userId?: string }
+): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const callable = httpsCallable<
+      { action: string; orderId: string; isUrgent?: boolean; pickupNote?: string; userId?: string },
+      { ok: boolean; error?: string }
+    >(functions, 'opsStatusSync');
+    const res = await callable({ action: 'updatePickupMeta', orderId, ...params });
+    return res.data;
+  } catch (err: any) {
+    return { ok: false, error: err?.message || 'network_error' };
+  }
+}

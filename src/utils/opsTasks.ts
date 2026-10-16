@@ -28,6 +28,8 @@ export interface OpsTask {
   pickedUpAt?: any;
   cancelledAt?: any;
   proofUrl?: string | null;
+  isUrgent?: boolean;
+  pickupNote?: string;
 }
 
 export function parseOpsTask(id: string, snapData: Record<string, any> | null | undefined): OpsTask {
@@ -61,6 +63,8 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     pickedUpAt: d.pickedUpAt ?? undefined,
     cancelledAt: d.cancelledAt ?? undefined,
     proofUrl: d.proofUrl ?? undefined,
+    isUrgent: typeof d.isUrgent === 'boolean' ? d.isUrgent : (d.opsMeta?.isUrgent ?? undefined),
+    pickupNote: typeof d.pickupNote === 'string' ? d.pickupNote : (d.opsMeta?.pickupNote ?? undefined),
   };
 }
 

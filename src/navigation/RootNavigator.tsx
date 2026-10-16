@@ -25,6 +25,7 @@ import { setupNotificationChannels, clearAssignmentNotifications } from '../util
 import { stopAlarm } from '../utils/alerts';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
 import { HelperAssignmentModal } from '../components/HelperAssignmentModal';
+import { StageNudgeModal } from '../components/StageNudgeModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
 import { View, ActivityIndicator, Text, Platform, AppState } from 'react-native';
 import { SpinzoOverlay } from 'spinzo-overlay';
@@ -52,6 +53,11 @@ const ComingSoonScreen = () => (
 
 const AppTabs = () => {
   const activeRole = useAuthStore(state => state.activeRole);
+  const myTasks = useOpsStaffStore(state => state.myTasks);
+  const myDeliveries = useOpsStaffStore(state => state.myDeliveries);
+
+  const pendingPickupsCount = myTasks.filter(t => t.status === 'pending' || t.status === 'assigned' || t.status === 'in_transit_to_store').length;
+  const activeDeliveriesCount = myDeliveries.filter(d => d.status === 'out_for_delivery' || d.status === 'assigned').length;
 
   return (
     <Tab.Navigator
@@ -96,7 +102,10 @@ const AppTabs = () => {
       {activeRole === 'rider' && (
         <Tab.Screen
           name="Pickups"
-          options={{ tabBarIcon: ({ color }) => <Bike color={color} size={24} /> }}
+          options={{
+            tabBarIcon: ({ color }) => <Bike color={color} size={24} />,
+            tabBarBadge: pendingPickupsCount > 0 ? pendingPickupsCount : undefined,
+          }}
         >
           {() => <PickupsScreen />}
         </Tab.Screen>
@@ -105,7 +114,10 @@ const AppTabs = () => {
       {activeRole === 'rider' && (
         <Tab.Screen
           name="Deliveries"
-          options={{ tabBarIcon: ({ color }) => <Package color={color} size={24} /> }}
+          options={{
+            tabBarIcon: ({ color }) => <Package color={color} size={24} />,
+            tabBarBadge: activeDeliveriesCount > 0 ? activeDeliveriesCount : undefined,
+          }}
         >
           {() => <DeliveriesScreen />}
         </Tab.Screen>
@@ -321,6 +333,7 @@ export function RootNavigator() {
       </Stack.Navigator>
       {isLoggedIn && effectiveRole === 'rider' && <GlobalAssignmentModal />}
       {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron') && <HelperAssignmentModal />}
+      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron' || effectiveRole === 'supervisor' || effectiveRole === 'admin') && <StageNudgeModal />}
     </>
   );
 }

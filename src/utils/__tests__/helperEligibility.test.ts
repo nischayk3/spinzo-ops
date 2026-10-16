@@ -205,4 +205,341 @@ describe('getTopEligibleTask', () => {
     // Should NOT interrupt h1 while h1 is actively loading washer 1
     expect(result).toBeNull();
   });
+
+  it('allows a second washer to be offered when washers: 2 and 1 washer is already running', () => {
+    // Washer 1 is running for order o1
+    const runningWasher1 = makeProcess({
+      id: 'p1',
+      orderId: 'o1',
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      status: 'getting_washed',
+      stages: {
+        getting_washed: {
+          assignee: 'h2',
+          startedAt: Date.now() - 5000,
+        },
+      },
+    });
+
+    // Order o2 is ready to wash
+    const waitingWasher2 = makeProcess({
+      id: 'p2',
+      orderId: 'o2',
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      status: 'getting_washed',
+      stages: {},
+    });
+
+    const orders = [
+      { id: 'o1', status: 'processing', userId: 'u1' },
+      { id: 'o2', status: 'processing', userId: 'u2' },
+    ];
+
+    // Case A: 1 washer limit -> throttled (o2 is null)
+    const throttledResult = getTopEligibleTask(
+      [runningWasher1, waitingWasher2],
+      orders,
+      'h1',
+      'helper',
+      null,
+      { washers: 1, dryers: 1, ironingStations: 1 },
+      true
+    );
+    expect(throttledResult).toBeNull();
+
+    // Case B: 2 washers limit -> offered to h1!
+    const allowedResult = getTopEligibleTask(
+      [runningWasher1, waitingWasher2],
+      orders,
+      'h1',
+      'helper',
+      null,
+      { washers: 2, dryers: 1, ironingStations: 1 },
+      true
+    );
+    expect(allowedResult).not.toBeNull();
+    expect(allowedResult!.orderId).toBe('o2');
+  });
+
+  it('strictly throttles dryers when dryers: 1 even if 2 washers are running', () => {
+    // Dryer 1 is running for order o1
+    const runningDryer1 = makeProcess({
+      id: 'p1',
+      orderId: 'o1',
+      steps: ['getting_dried'],
+      currentIndex: 0,
+      status: 'getting_dried',
+      stages: {
+        getting_dried: {
+          assignee: 'h2',
+          startedAt: Date.now() - 5000,
+        },
+      },
+    });
+
+    // Order o2 finished washing and is ready for dryer
+    const waitingDryer2 = makeProcess({
+      id: 'p2',
+      orderId: 'o2',
+      steps: ['getting_dried'],
+      currentIndex: 0,
+      status: 'getting_dried',
+      stages: {},
+    });
+
+    const orders = [
+      { id: 'o1', status: 'processing', userId: 'u1' },
+      { id: 'o2', status: 'processing', userId: 'u2' },
+    ];
+
+    // With dryers: 1, o2 must be blocked
+    const throttledDryerResult = getTopEligibleTask(
+      [runningDryer1, waitingDryer2],
+      orders,
+      'h1',
+      'helper',
+      null,
+      { washers: 2, dryers: 1, ironingStations: 1 },
+      true
+    );
+    expect(throttledDryerResult).toBeNull();
+
+    // In 2-3 days when dryers: 2, o2 becomes eligible immediately
+    const allowedDryerResult = getTopEligibleTask(
+      [runningDryer1, waitingDryer2],
+      orders,
+      'h1',
+      'helper',
+      null,
+      { washers: 2, dryers: 2, ironingStations: 1 },
+      true
+    );
+    expect(allowedDryerResult).not.toBeNull();
+    expect(allowedDryerResult!.orderId).toBe('o2');
+  });
+
+  describe('Ironing Priority & Restriction', () => {
+    it('strictly blocks ironing orders from New Helper or unauthorized phones', () => {
+      const ironProcess = makeProcess({
+        id: 'p_iron',
+        orderId: 'o_iron',
+        steps: ['getting_ironed'],
+        currentIndex: 0,
+        status: 'getting_ironed',
+        stages: {},
+      });
+      const orders = [{ id: 'o_iron', status: 'processing', userId: 'u1' }];
+
+      // New Helper phone -> null
+      const blocked = getTopEligibleTask(
+        [ironProcess],
+        orders,
+        'helper_new',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true,
+        '+919999999999'
+      );
+      expect(blocked).toBeNull();
+
+      // No phone passed -> null
+      const noPhone = getTopEligibleTask(
+        [ironProcess],
+        orders,
+        'helper_new',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true
+      );
+      expect(noPhone).toBeNull();
+    });
+
+    it('allows Samsul and Abdur to receive ironing orders', () => {
+      const ironProcess = makeProcess({
+        id: 'p_iron',
+        orderId: 'o_iron',
+        steps: ['getting_ironed'],
+        currentIndex: 0,
+        status: 'getting_ironed',
+        stages: {},
+      });
+      const orders = [{ id: 'o_iron', status: 'processing', userId: 'u1' }];
+
+      // Samsul (+916369768237)
+      const samsulTask = getTopEligibleTask(
+        [ironProcess],
+        orders,
+        'h_samsul',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true,
+        '+916369768237'
+      );
+      expect(samsulTask).not.toBeNull();
+      expect(samsulTask?.orderId).toBe('o_iron');
+
+      // Abdur (+917559105832)
+      const abdurTask = getTopEligibleTask(
+        [ironProcess],
+        orders,
+        'h_abdur',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true,
+        '+917559105832'
+      );
+      expect(abdurTask).not.toBeNull();
+      expect(abdurTask?.orderId).toBe('o_iron');
+    });
+  });
+
+  describe('Machine Buffers', () => {
+    it('enforces washer buffer of 2 pending orders per washer', () => {
+      // 2 washers -> max 4 pending orders allowed in buffer
+      const mkWash = (id: string) => makeProcess({
+        id,
+        orderId: id,
+        steps: ['getting_washed'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {},
+      });
+
+      const p1 = mkWash('w1');
+      const p2 = mkWash('w2');
+      const p3 = mkWash('w3');
+      const p4 = mkWash('w4');
+      const p5 = mkWash('w5');
+
+      const orders = [
+        { id: 'w1', status: 'processing', userId: 'u1' },
+        { id: 'w2', status: 'processing', userId: 'u2' },
+        { id: 'w3', status: 'processing', userId: 'u3' },
+        { id: 'w4', status: 'processing', userId: 'u4' },
+        { id: 'w5', status: 'processing', userId: 'u5' },
+      ];
+
+      // 4 pending with 2 washers -> at capacity (buffer full)
+      const fullBuffer = getTopEligibleTask(
+        [p1, p2, p3, p4, p5],
+        orders,
+        'h1',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true
+      );
+      expect(fullBuffer).toBeNull();
+    });
+
+    it('enforces iron buffer of 2 pending orders per iron station', () => {
+      // 1 station -> max 2 pending orders
+      const mkIron = (id: string) => makeProcess({
+        id,
+        orderId: id,
+        steps: ['getting_ironed'],
+        currentIndex: 0,
+        status: 'getting_ironed',
+        stages: {},
+      });
+
+      const p1 = mkIron('i1');
+      const p2 = mkIron('i2');
+      const p3 = mkIron('i3');
+
+      const orders = [
+        { id: 'i1', status: 'processing', userId: 'u1' },
+        { id: 'i2', status: 'processing', userId: 'u2' },
+        { id: 'i3', status: 'processing', userId: 'u3' },
+      ];
+
+      const fullBuffer = getTopEligibleTask(
+        [p1, p2, p3],
+        orders,
+        'h_samsul',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true,
+        '+916369768237'
+      );
+      expect(fullBuffer).toBeNull();
+    });
+  });
+
+  describe('Packaging Overflow Rule', () => {
+    it('triggers instant assignment of oldest packaging order when > 3 packaging orders pending', () => {
+      // 4 packaging orders
+      const pkg1 = makeProcess({
+        id: 'pkg1',
+        orderId: 'pkg1',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: { packaging: { queuedAt: 1000 } as any },
+      });
+      const pkg2 = makeProcess({
+        id: 'pkg2',
+        orderId: 'pkg2',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: { packaging: { queuedAt: 2000 } as any },
+      });
+      const pkg3 = makeProcess({
+        id: 'pkg3',
+        orderId: 'pkg3',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: { packaging: { queuedAt: 3000 } as any },
+      });
+      const pkg4 = makeProcess({
+        id: 'pkg4',
+        orderId: 'pkg4',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: { packaging: { queuedAt: 4000 } as any },
+      });
+
+      // Also an open washer task that would normally have higher priority (Tier 2 vs Tier 3)
+      const wash = makeProcess({
+        id: 'wash1',
+        orderId: 'wash1',
+        steps: ['getting_washed'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {},
+      });
+
+      const orders = [
+        { id: 'pkg1', status: 'processing', userId: 'u1' },
+        { id: 'pkg2', status: 'processing', userId: 'u2' },
+        { id: 'pkg3', status: 'processing', userId: 'u3' },
+        { id: 'pkg4', status: 'processing', userId: 'u4' },
+        { id: 'wash1', status: 'processing', userId: 'u5' },
+      ];
+
+      // With 4 packaging orders pending (>3), packaging overflow rule triggers!
+      // Oldest packaging order (pkg1) is assigned first, overriding the washer task.
+      const result = getTopEligibleTask(
+        [wash, pkg1, pkg2, pkg3, pkg4],
+        orders,
+        'h1',
+        'helper',
+        null,
+        { washers: 2, dryers: 1, ironingStations: 1 },
+        true
+      );
+      expect(result).not.toBeNull();
+      expect(result?.orderId).toBe('pkg1');
+    });
+  });
 });

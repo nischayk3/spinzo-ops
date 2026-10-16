@@ -68,7 +68,45 @@ export interface FeedOrder {
   deliveryDate?: string;
   deliveryTime?: string;
   deliveryOTP?: string;
+  riderId?: string;
+  deliveryRiderId?: string;
   createdAt?: any;
+  isUrgent?: boolean;
+  pickupNote?: string;
+  garmentCount?: number;
+  qualityPhotos?: any;
+  packagingPhotos?: any;
+  packagingProof?: any;
+  proofUrl?: string;
+  stageTimings?: Record<string, {
+    step?: string;
+    acceptedAt?: any;
+    startedAt?: any;
+    completedAt?: any;
+    acceptToCompleteMin?: number;
+    startToCompleteMin?: number;
+    durationMs?: number;
+    assignee?: string;
+    assigneeName?: string;
+    detergentAddedAt?: any;
+    softenerAddedAt?: any;
+  }>;
+  opsDetails?: {
+    garmentCount?: number;
+    registeredCount?: number;
+    qualityPhotos?: any;
+    packagingPhotos?: any;
+    stageTimings?: any;
+    [key: string]: any;
+  };
+  opsMeta?: {
+    isUrgent?: boolean;
+    pickupNote?: string;
+    urgentUpdatedAt?: any;
+    urgentUpdatedBy?: string;
+    pickupNoteUpdatedAt?: any;
+    pickupNoteUpdatedBy?: string;
+  };
 }
 
 export type PickupSlot = {
@@ -380,3 +418,69 @@ export const customerIndex = (orders: FeedOrder[]): Map<string, CustomerSummary>
   map.forEach(c => c.orders.sort((a, b) => tsToMs(b.createdAt) - tsToMs(a.createdAt)));
   return map;
 };
+
+/**
+ * Robust search matcher across token numbers, service tokens, order IDs,
+ * phone numbers, customer names, and notes.
+ */
+export function matchOrderSearch(o: FeedOrder, query: string): boolean {
+  if (!query || !query.trim()) return true;
+  const rawQ = query.trim();
+  const lowerQ = rawQ.toLowerCase();
+
+  // Clean token candidate: strips "#", "token", "tokens", "tk", "t-"
+  const cleanToken = lowerQ
+    .replace(/^#+/, '')
+    .replace(/^tokens?[\s\-#]*/i, '')
+    .replace(/^tks?[\s\-#]*/i, '')
+    .replace(/^t[\s\-#]+/i, '')
+    .trim();
+
+  // 1. Direct Token Number match
+  if (cleanToken && o.tokenNumber) {
+    const tn = String(o.tokenNumber).toLowerCase().trim();
+    if (tn === cleanToken || tn.includes(cleanToken)) return true;
+  }
+
+  // 2. Tokens Record match (service-specific tokens)
+  if (cleanToken && o.tokens && typeof o.tokens === 'object') {
+    const hasToken = Object.values(o.tokens).some(t => {
+      const s = String(t).toLowerCase().trim();
+      return s === cleanToken || s.includes(cleanToken);
+    });
+    if (hasToken) return true;
+  }
+
+  // 3. Token chips parsed from items/services
+  if (cleanToken) {
+    const chips = parseOrderTokens(o.tokens, o.tokenNumber, o.items);
+    if (chips.some(c => c.token.toLowerCase() === cleanToken || c.token.toLowerCase().includes(cleanToken))) {
+      return true;
+    }
+  }
+
+  // 4. Order ID (full or short 6-digit)
+  if (o.id) {
+    const lowerId = o.id.toLowerCase();
+    if (lowerId.includes(lowerQ)) return true;
+    if (cleanToken && lowerId.slice(-6).includes(cleanToken)) return true;
+  }
+
+  // 5. Customer Phone
+  if (o.customerPhone) {
+    const digitsOnly = lowerQ.replace(/\D/g, '');
+    if (digitsOnly && o.customerPhone.includes(digitsOnly)) return true;
+    if (o.customerPhone.toLowerCase().includes(lowerQ)) return true;
+  }
+
+  // 6. Customer Name
+  if (o.customerName && o.customerName.toLowerCase().includes(lowerQ)) {
+    return true;
+  }
+
+  // 7. Pickup Note or Instructions
+  if (o.pickupNote && o.pickupNote.toLowerCase().includes(lowerQ)) return true;
+  if (o.notes && o.notes.toLowerCase().includes(lowerQ)) return true;
+
+  return false;
+}

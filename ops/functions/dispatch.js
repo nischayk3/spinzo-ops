@@ -268,4 +268,37 @@ function checkPaymentGate(order, options = {}) {
   };
 }
 
-module.exports = { checkPaymentGate, pickRider, normalizePhone, pickupGuard, taskTransition, isAwaitingPickup, getProcessingSteps, nextStep, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS };
+/**
+ * Ironing priority list:
+ * 1. Samsul (+916369768237)
+ * 2. Abdur (+917559105832)
+ * No ironing orders to new helper!
+ */
+const IRONING_PRIORITY_PHONES = ['+916369768237', '+917559105832'];
+
+function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
+  if (!phone) return false;
+  const p = normalizePhone(phone);
+  return allowedList.map(normalizePhone).includes(p);
+}
+
+module.exports = {
+  checkPaymentGate,
+  pickRider,
+  normalizePhone,
+  pickupGuard,
+  taskTransition,
+  isAwaitingPickup,
+  getProcessingSteps,
+  nextStep,
+  opsStepsForOrder,
+  isProductionStep,
+  firstProductionStep,
+  parseGarmentQr,
+  generateLabels,
+  stepsForServiceType,
+  splitOrderIntoServices,
+  SERVICE_LABELS,
+  IRONING_PRIORITY_PHONES,
+  isIroningEligible,
+};

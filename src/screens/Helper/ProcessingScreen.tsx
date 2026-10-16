@@ -441,9 +441,6 @@ function SupervisorFeed() {
           <Text className="text-red-600 text-xs font-bold">{error}</Text>
         </View>
       )}
-
-      {/* Floating Task Card for active washing/drying */}
-      <FloatingTaskCard process={activeFloatingProcess || null} onComplete={handleFloatingComplete} />
     </SafeAreaView>
   );
 }
@@ -452,24 +449,36 @@ export function ProcessingScreen() {
   const authRole = useAuthStore(s => s.activeRole) as AppRole;
   const { processes, completeStep } = useOpsProcessStore();
   const user = useAuthStore(s => s.user);
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 
-  // Compute floating process at wrapper level so it persists across child view changes
-  const activeFloatingProcess = processes.find(pr => {
-    const cur = currentStep(pr);
-    return (cur === 'getting_washed' || cur === 'getting_dried') && myInProgress(pr, user?.id || '');
-  });
+  // Compute all active floating machine processes for this staff member
+  const activeFloatingProcesses = useMemo(() => {
+    return processes.filter(pr => {
+      const cur = currentStep(pr);
+      return (cur === 'getting_washed' || cur === 'getting_dried') && myInProgress(pr, user?.id || '');
+    });
+  }, [processes, user?.id]);
 
-  const handleFloatingComplete = async () => {
-    if (activeFloatingProcess) {
-      await completeStep(activeFloatingProcess.orderId);
+  const handleFloatingComplete = async (targetOrderId?: string) => {
+    const targetId = targetOrderId || activeFloatingProcesses[0]?.orderId;
+    if (targetId) {
+      await completeStep(targetId);
     }
+  };
+
+  const handlePressCard = (orderId: string, processId?: string) => {
+    navigation.navigate('OrderDetail', { orderId, processId });
   };
 
   return (
     <View className="flex-1">
       <SupervisorFeed />
       {/* Floating Task Card rendered at wrapper level so it always persists */}
-      <FloatingTaskCard process={activeFloatingProcess || null} onComplete={handleFloatingComplete} />
+      <FloatingTaskCard
+        processes={activeFloatingProcesses}
+        onComplete={handleFloatingComplete}
+        onPressCard={handlePressCard}
+      />
     </View>
   );
 }

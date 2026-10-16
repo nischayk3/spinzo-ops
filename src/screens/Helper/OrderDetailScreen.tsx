@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check } from 'lucide-react-native';
+import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Image } from 'react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
@@ -20,6 +20,7 @@ import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
 import { PackagingVerification } from '../../components/PackagingVerification';
 import { WorkflowSteps } from '../../components/WorkflowSteps';
+import { useStoreResourcesStore } from '../../store/storeResourcesStore';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
 
@@ -247,6 +248,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const orders = useOrderFeedStore(s => s.orders);
   const { processes, claim, startStep, completeStep, printLabels, scanGarment, unregisterGarment, submitTagging, cancelOrder, reschedulePickup, scheduleDelivery, markOutForDelivery, verifyDeliveryOTP } = useOpsProcessStore();
   const { clearActiveHelperTask } = useOpsStaffStore();
+  const resources = useStoreResourcesStore(s => s.resources);
 
   const [countText, setCountText] = useState('');
   const [printError, setPrintError] = useState<string | null>(null);
@@ -297,12 +299,74 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [showAssignHelperModal, setShowAssignHelperModal] = useState(false);
 
 
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+
   const done = process ? isDone(process) : false;
   const taggingStage = process?.stages?.tagging;
   const garments = process?.garments || {};
   const registered = garments.registered || [];
   const registeredSeqs = registered.map((r: any) => typeof r === 'number' ? r : r.seq);
   const registeredCount = registered.length;
+
+  const packagingPhotos = useMemo(() => {
+    const list: string[] = [];
+    const fromOrder = order?.packagingPhotos || order?.qualityPhotos || order?.opsDetails?.packagingPhotos || order?.opsDetails?.qualityPhotos;
+    if (Array.isArray(fromOrder)) {
+      list.push(...fromOrder);
+    } else if (typeof fromOrder === 'string') {
+      list.push(fromOrder);
+    }
+    const fromProcess = process?.stages?.packaging?.qualityProof?.photos;
+    if (Array.isArray(fromProcess)) {
+      fromProcess.forEach(p => {
+        if (p && !list.includes(p)) list.push(p);
+      });
+    }
+    const fromProofUrl = order?.proofUrl;
+    if (fromProofUrl && !list.includes(fromProofUrl)) {
+      list.push(fromProofUrl);
+    }
+    return list;
+  }, [order, process]);
+
+  const bundlesCount = order?.opsDetails?.packagingProof?.bundles ?? order?.packagingProof?.bundles ?? process?.stages?.packaging?.qualityProof?.bundles;
+  const garmentCountDisplay = process?.garments?.count ?? order?.garmentCount ?? order?.opsDetails?.garmentCount;
+  const isTaggingDone = (process?.currentIndex ?? 0) > 0 || process?.status === 'done' || (order?.status !== 'placed' && order?.status !== 'confirmed' && order?.status !== 'in_transit_to_store');
+
+  const timelineEvents = useMemo(() => {
+    if (process) {
+      const raw = opsTimeline(process);
+      const activeOrDone = raw.filter(e => e.startedAt || e.completedAt || e.queuedAt);
+      if (activeOrDone.length > 0) return activeOrDone;
+    }
+    const timings = order?.stageTimings || order?.opsDetails?.stageTimings;
+    if (!timings) return [];
+    const standardSteps = ['tagging', 'getting_washed', 'drying', 'ironing', 'packaging'];
+    const keys = Object.keys(timings);
+    const orderedSteps = standardSteps.filter(s => keys.includes(s));
+    keys.forEach(k => {
+      if (!orderedSteps.includes(k)) orderedSteps.push(k);
+    });
+    return orderedSteps.map(step => {
+      const s = timings[step] || {};
+      return {
+        step,
+        label: stepLabel(step),
+        assigneeName: s.assigneeName,
+        queuedAt: s.queuedAt,
+        acceptedAt: s.acceptedAt,
+        startedAt: s.startedAt,
+        completedAt: s.completedAt,
+        durationMs: s.durationMs,
+        acceptToCompleteMin: s.acceptToCompleteMin,
+        startToCompleteMin: s.startToCompleteMin,
+        detergentAddedAt: s.detergentAddedAt,
+        softenerAddedAt: s.softenerAddedAt,
+        skipped: false,
+        reached: true,
+      };
+    });
+  }, [process, order]);
 
 
   const runAction = async (fn: () => Promise<OpsProcessingResult>, onSuccess?: () => void) => {
@@ -360,16 +424,36 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     setScanError(null);
     setActionError(null);
     try {
-      // DEV BYPASS: Accept any scan (or button press) and register the next expected QR
-      const nextSeq = Array.from({ length: garments.count || 0 })
-        .map((_, i) => i + 1)
-        .find(seq => !registeredSeqs.includes(seq));
-        
-      if (!nextSeq) return;
-      const expectedQr = `SPNZ:${orderId}:${nextSeq}`;
-      
+      let targetSeq: number | undefined;
+      if (typeof data === 'string' && data.startsWith(`SPNZ:${orderId}:`)) {
+        const parts = data.split(':');
+        const parsed = parseInt(parts[2], 10);
+        if (!isNaN(parsed) && parsed >= 1 && parsed <= (garments.count || 0)) {
+          targetSeq = parsed;
+        }
+      }
+
+      if (!targetSeq) {
+        targetSeq = Array.from({ length: garments.count || 0 })
+          .map((_, i) => i + 1)
+          .find(seq => !registeredSeqs.includes(seq));
+      }
+
+      if (!targetSeq) {
+        setScannerVisible(false);
+        return;
+      }
+
+      const expectedQr = `SPNZ:${orderId}:${targetSeq}`;
       const res = await scanGarment(orderId, expectedQr, process?.id);
-      if (!res.ok) setScanError(friendlyScanError(res.error));
+      if (!res.ok) {
+        setScanError(friendlyScanError(res.error));
+      } else {
+        const newCount = registeredSeqs.includes(targetSeq) ? registeredSeqs.length : registeredSeqs.length + 1;
+        if (newCount >= (garments.count || 0)) {
+          setScannerVisible(false);
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -447,6 +531,35 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  const handleUnassignDelivery = async () => {
+    Alert.alert(
+      'Unassign Delivery',
+      'Are you sure you want to unassign the delivery partner and return this order to ready status?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unassign',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(true);
+            try {
+              const res = await useOpsProcessStore.getState().unassignDelivery(orderId, order?.userId || '');
+              setBusy(false);
+              if (!res.ok) {
+                setActionError(friendlyActionError(res.error || 'unknown'));
+              } else {
+                Alert.alert('Success', 'Order unassigned and returned to ready state.');
+              }
+            } catch (e: any) {
+              setBusy(false);
+              setActionError(friendlyActionError(e?.message || 'request_failed'));
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleUnassignHelper = async () => {
     if (!process || !order) return;
     setBusy(true);
@@ -476,6 +589,34 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const started = !!curStage?.startedAt;
   const completed = !!curStage?.completedAt;
+
+  const machineBadge = useMemo(() => {
+    if (!cur || (cur !== 'getting_washed' && cur !== 'getting_dried')) return null;
+    const isWash = cur === 'getting_washed';
+    const names = isWash
+      ? (resources.washerNames || ['Washer 1', 'Washer 2'])
+      : (resources.dryerNames || ['Dryer 1', 'Dryer 2']);
+
+    const runningForStep = processes
+      .filter(p => currentStep(p) === cur && !!p.stages?.[cur]?.startedAt && !p.stages?.[cur]?.completedAt)
+      .sort((a, b) => {
+        const aStart = a.stages?.[cur]?.startedAt;
+        const bStart = b.stages?.[cur]?.startedAt;
+        const aMs = typeof (aStart as any)?.toMillis === 'function' ? (aStart as any).toMillis() : new Date((aStart as any) || 0).getTime();
+        const bMs = typeof (bStart as any)?.toMillis === 'function' ? (bStart as any).toMillis() : new Date((bStart as any) || 0).getTime();
+        return aMs - bMs;
+      });
+
+    if (started) {
+      const idx = runningForStep.findIndex(p => p.orderId === orderId);
+      const assignedName = names[idx >= 0 ? idx : 0] || (isWash ? 'Washer' : 'Dryer');
+      return assignedName;
+    } else {
+      const freeIdx = runningForStep.length;
+      const nextMachine = names[freeIdx] || names[0];
+      return nextMachine;
+    }
+  }, [cur, started, processes, orderId, resources]);
 
   const statusLabel = !process
     ? order?.status === 'pickup_completed' ? 'Ready to tag' : (order?.status?.replace('_', ' ') || 'Pending')
@@ -674,7 +815,16 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
           {renderSupervisorControls()}
-          <Text className="text-gray-900 font-bold mb-4">{stepLabel(cur)}</Text>
+          <View className="flex-row items-center justify-between mb-4">
+            <Text className="text-gray-900 font-bold text-base">{stepLabel(cur)}</Text>
+            {isMachineStep && machineBadge && (
+              <View className="bg-purple-50 border border-purple-200 px-3 py-1 rounded-full">
+                <Text className="text-[#994bff] font-extrabold text-xs uppercase tracking-wider">
+                  {started ? `In ${machineBadge}` : `Assign to: ${machineBadge}`}
+                </Text>
+              </View>
+            )}
+          </View>
           {!started ? (
             <View>
               <TouchableOpacity
@@ -685,7 +835,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 {busy ? <ActivityIndicator color="#fff" /> : (
                   <View className="flex-row items-center gap-2">
                     {isMachineStep && <MachineIcon size={20} color="#fff" />}
-                    <Text className="text-white font-bold text-lg">{isMachineStep ? `Start ${stepLabel(cur)}` : `Start ${stepLabel(cur)}`}</Text>
+                    <Text className="text-white font-bold text-lg">
+                      {isMachineStep && machineBadge ? `Start ${stepLabel(cur)} (${machineBadge})` : `Start ${stepLabel(cur)}`}
+                    </Text>
                   </View>
                 )}
               </TouchableOpacity>
@@ -768,23 +920,53 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         } else if (order?.status === 'out_for_delivery') {
           return (
             <View className="bg-white rounded-xl p-5 mb-4 border border-gray-200">
-              <Text className="text-gray-900 font-bold mb-4">Verify Delivery OTP</Text>
-              <TextInput
-                value={otp}
-                onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
-                keyboardType="number-pad"
-                maxLength={4}
-                placeholder="••••"
-                placeholderTextColor="#94a3b8"
-                className="bg-gray-50 border border-gray-200 rounded-xl h-14 px-4 text-center text-xl tracking-[0.5em] text-gray-900 font-bold mb-4"
-              />
-              <TouchableOpacity
-                onPress={handleVerifyDeliveryOTP}
-                disabled={busy || otp.length !== 4}
-                className={`h-14 rounded-xl items-center justify-center flex-row ${busy || otp.length !== 4 ? 'bg-gray-200' : 'bg-green-500'}`}
-              >
-                {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Verify Delivery</Text>}
-              </TouchableOpacity>
+              <View className="flex-row items-center justify-between mb-2">
+                <Text className="text-gray-900 font-bold text-base">Out for Delivery</Text>
+                <View className="bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-full">
+                  <Text className="text-blue-700 text-xs font-bold">Rider Dispatched</Text>
+                </View>
+              </View>
+              
+              <Text className="text-gray-500 text-xs mb-3">
+                Order is currently out for delivery. You can reassign to another rider or unassign and return order to ready status.
+              </Text>
+
+              <View className="flex-row gap-2 mb-4">
+                <TouchableOpacity
+                  onPress={() => setShowAssignRiderModal(true)}
+                  disabled={busy}
+                  className="flex-1 h-11 rounded-xl items-center justify-center bg-blue-50 border border-blue-200"
+                >
+                  <Text className="font-bold text-xs text-blue-700">Reassign Rider</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={handleUnassignDelivery}
+                  disabled={busy}
+                  className="flex-1 h-11 rounded-xl items-center justify-center bg-amber-50 border border-amber-200"
+                >
+                  <Text className="font-bold text-xs text-amber-700">Unassign / Return</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View className="border-t border-gray-100 pt-3">
+                <Text className="text-gray-900 font-bold mb-2 text-sm">Verify Delivery OTP</Text>
+                <TextInput
+                  value={otp}
+                  onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
+                  keyboardType="number-pad"
+                  maxLength={4}
+                  placeholder="••••"
+                  placeholderTextColor="#94a3b8"
+                  className="bg-gray-50 border border-gray-200 rounded-xl h-14 px-4 text-center text-xl tracking-[0.5em] text-gray-900 font-bold mb-4"
+                />
+                <TouchableOpacity
+                  onPress={handleVerifyDeliveryOTP}
+                  disabled={busy || otp.length !== 4}
+                  className={`h-14 rounded-xl items-center justify-center flex-row ${busy || otp.length !== 4 ? 'bg-gray-200' : 'bg-green-500'}`}
+                >
+                  {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Verify Delivery</Text>}
+                </TouchableOpacity>
+              </View>
             </View>
           );
         } else if (order?.status === 'delivered') {
@@ -868,14 +1050,14 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         </View>
 
         {showMenu && isSupervisor && (
-          <View className="absolute top-16 right-5 bg-white rounded-xl shadow-lg border border-gray-100 z-50 overflow-hidden w-48">
+          <View className="absolute top-16 right-5 bg-white rounded-xl shadow-lg border border-gray-100 z-50 overflow-hidden w-52">
             {(order?.status === 'placed' || order?.status === 'confirmed' || order?.status === 'ready') && (
               <TouchableOpacity onPress={() => { setShowMenu(false); setShowRescheduleModal(true); }} className="p-4 border-b border-gray-100 flex-row items-center">
                 <Calendar size={16} color="#64748b" className="mr-3" />
                 <Text className="text-gray-700 font-medium">{order?.status === 'ready' ? 'Schedule Delivery' : 'Reschedule Pickup'}</Text>
               </TouchableOpacity>
             )}
-            {(order?.status === 'placed' || order?.status === 'confirmed' || order?.status === 'ready') && (
+            {(order?.status === 'placed' || order?.status === 'confirmed' || order?.status === 'ready' || order?.status === 'out_for_delivery') && (
               <TouchableOpacity
                 onPress={() => {
                   setShowMenu(false);
@@ -884,13 +1066,21 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 className="p-4 border-b border-gray-100 flex-row items-center"
               >
                 <UserPlus size={16} color="#3b82f6" className="mr-3" />
-                <Text className="text-blue-700 font-medium">Assign Rider</Text>
+                <Text className="text-blue-700 font-medium">
+                  {order?.status === 'out_for_delivery' ? 'Reassign Rider' : 'Assign Rider'}
+                </Text>
               </TouchableOpacity>
             )}
             {(order?.status === 'placed' || order?.status === 'confirmed') && (
               <TouchableOpacity onPress={() => { setShowMenu(false); handleUnassignPickup(); }} className="p-4 border-b border-gray-100 flex-row items-center">
                 <Undo2 size={16} color="#f59e0b" className="mr-3" />
-                <Text className="text-amber-600 font-medium">Unassign / Return to Queue</Text>
+                <Text className="text-amber-600 font-medium">Unassign Pickup</Text>
+              </TouchableOpacity>
+            )}
+            {(order?.status === 'ready' || order?.status === 'out_for_delivery') && (
+              <TouchableOpacity onPress={() => { setShowMenu(false); handleUnassignDelivery(); }} className="p-4 border-b border-gray-100 flex-row items-center">
+                <Undo2 size={16} color="#f59e0b" className="mr-3" />
+                <Text className="text-amber-600 font-medium">Unassign Delivery</Text>
               </TouchableOpacity>
             )}
             <TouchableOpacity onPress={() => { setShowMenu(false); handleWhatsApp(); }} className="p-4 border-b border-gray-100 flex-row items-center">
@@ -916,7 +1106,14 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               {/* Order identity */}
               <View className="flex-row items-center mb-3 justify-between">
                 <View className="flex-1">
-                  <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
+                  <View className="flex-row items-center gap-2">
+                    <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
+                    {order.isUrgent && (
+                      <View className="bg-red-500 px-2 py-0.5 rounded-full">
+                        <Text className="text-white text-[10px] font-black tracking-wide uppercase">⚡ URGENT</Text>
+                      </View>
+                    )}
+                  </View>
                   <Text className="text-gray-500 text-xs">Order ID: {orderId}</Text>
                 </View>
                 <View className="items-end">
@@ -940,6 +1137,13 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   </View>
                 </View>
               </View>
+
+              {order.pickupNote ? (
+                <View className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-3">
+                  <Text className="text-amber-800 text-xs font-bold uppercase mb-0.5">Rider Pickup Note</Text>
+                  <Text className="text-amber-900 text-sm font-medium">{order.pickupNote}</Text>
+                </View>
+              ) : null}
 
               {/* Dates / timelines */}
               <View className="bg-gray-50 rounded-xl p-3 mb-3">
@@ -1084,25 +1288,151 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         )}
 
         {renderActionState()}
-        
-        {/* Timeline */}
-        {process && (
-          <View className="bg-white rounded-xl p-5 shadow-sm border border-gray-100 mt-2">
-            <Text className="text-gray-900 font-bold mb-4">Timeline</Text>
-            {opsTimeline(process).filter(e => e.startedAt || e.completedAt).map((event, idx, arr) => {
-              const ts = event.completedAt || event.startedAt;
-              const ms = ts ? ((ts as any).toMillis?.() || (ts as any).seconds * 1000 || (ts as any)._seconds * 1000 || (typeof ts === 'number' ? ts : 0)) : 0;
-              const dateStr = ms ? new Date(ms).toLocaleString() : '';
-              
-              return (
-                <View key={idx} className="flex-row mb-4">
-                  <View className="items-center mr-4">
-                    <View className={`w-3 h-3 rounded-full ${event.completedAt ? 'bg-green-500' : 'bg-orange-400'}`} />
-                    {idx < arr.length - 1 && <View className="w-0.5 h-full bg-gray-200 my-1" />}
+
+        {/* Garment Count & Scan Details Card */}
+        {garmentCountDisplay != null && garmentCountDisplay > 0 && isTaggingDone && (
+          <View className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 mb-4">
+            <View className="flex-row items-center justify-between">
+              <View className="flex-row items-center gap-3">
+                <View className="w-10 h-10 rounded-full bg-purple-50 items-center justify-center">
+                  <Shirt size={20} color="#994bff" />
+                </View>
+                <View>
+                  <Text className="text-gray-900 font-bold text-base">
+                    {garmentCountDisplay} Garment{garmentCountDisplay > 1 ? 's' : ''} Tagged
+                  </Text>
+                  <Text className="text-gray-500 text-xs">
+                    All barcode labels scanned & verified
+                  </Text>
+                </View>
+              </View>
+              <View className="bg-green-50 border border-green-200 px-2.5 py-1 rounded-full flex-row items-center gap-1">
+                <CheckCircle2 size={13} color="#16a34a" />
+                <Text className="text-green-700 text-xs font-bold">Verified</Text>
+              </View>
+            </View>
+          </View>
+        )}
+
+        {/* Quality & Packaging Photos Gallery */}
+        {packagingPhotos.length > 0 && (
+          <View className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 mb-4">
+            <View className="flex-row items-center justify-between mb-2">
+              <View className="flex-row items-center gap-2">
+                <Camera size={18} color="#994bff" />
+                <Text className="text-gray-900 font-bold text-base">Packaging & Quality Proof</Text>
+              </View>
+              <View className="flex-row items-center gap-1.5">
+                {bundlesCount ? (
+                  <View className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                    <Text className="text-amber-800 text-xs font-bold">📦 {bundlesCount} Bundle{bundlesCount > 1 ? 's' : ''}</Text>
                   </View>
-                  <View className="flex-1 pb-2">
-                    <Text className="text-gray-900 font-medium">{event.label}</Text>
-                    {dateStr ? <Text className="text-gray-500 text-xs mt-1">{dateStr}</Text> : null}
+                ) : null}
+                <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">
+                  <Text className="text-purple-700 text-xs font-bold">{packagingPhotos.length} photo{packagingPhotos.length > 1 ? 's' : ''}</Text>
+                </View>
+              </View>
+            </View>
+
+            <Text className="text-gray-500 text-xs mb-3">
+              Tap any photo to view full-screen packaging proof.
+            </Text>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
+              {packagingPhotos.map((photoUri, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  onPress={() => setPreviewImage(photoUri)}
+                  activeOpacity={0.8}
+                  className="rounded-xl overflow-hidden border border-gray-200 bg-gray-100 shadow-sm relative"
+                  style={{ width: 96, height: 96 }}
+                >
+                  <Image
+                    source={{ uri: photoUri }}
+                    style={{ width: '100%', height: '100%' }}
+                    resizeMode="cover"
+                  />
+                  <View className="absolute bottom-1 right-1 bg-black/60 rounded px-1.5 py-0.5 flex-row items-center gap-0.5">
+                    <Eye size={10} color="#fff" />
+                    <Text className="text-white text-[9px] font-bold">View</Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+        
+        {/* Step-by-Step Stage Timings & Timeline */}
+        {timelineEvents.length > 0 && (
+          <View className="bg-white rounded-xl p-5 shadow-sm border border-gray-100 mt-1 mb-4">
+            <View className="flex-row items-center justify-between mb-4">
+              <View className="flex-row items-center gap-2">
+                <Clock size={18} color="#994bff" />
+                <Text className="text-gray-900 font-bold text-base">Stage Timings & Timeline</Text>
+              </View>
+              <Text className="text-gray-400 text-xs">{timelineEvents.length} stages recorded</Text>
+            </View>
+
+            {timelineEvents.map((event, idx, arr) => {
+              const ts = event.completedAt || event.startedAt || event.acceptedAt;
+              const ms = ts ? ((ts as any).toMillis?.() || (ts as any).seconds * 1000 || (ts as any)._seconds * 1000 || (typeof ts === 'number' ? ts : 0)) : 0;
+              const dateStr = ms ? new Date(ms).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+              const isCompleted = !!event.completedAt;
+
+              return (
+                <View key={idx} className="flex-row mb-4 last:mb-0">
+                  <View className="items-center mr-3">
+                    <View className={`w-4 h-4 rounded-full items-center justify-center ${isCompleted ? 'bg-green-500' : 'bg-orange-400'}`}>
+                      {isCompleted ? <Check size={10} color="#fff" /> : <View className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    </View>
+                    {idx < arr.length - 1 && <View className="w-0.5 flex-1 bg-gray-200 my-1" />}
+                  </View>
+                  <View className="flex-1 pb-1">
+                    <View className="flex-row items-center justify-between flex-wrap gap-1">
+                      <Text className="text-gray-900 font-bold text-sm">{event.label}</Text>
+                      <View className="flex-row items-center gap-1.5">
+                        {typeof event.acceptToCompleteMin === 'number' && (
+                          <View className="bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                            <Text className="text-green-700 text-[11px] font-bold">
+                              {event.acceptToCompleteMin}m total
+                            </Text>
+                          </View>
+                        )}
+                        {typeof event.startToCompleteMin === 'number' && event.startToCompleteMin !== event.acceptToCompleteMin && (
+                          <View className="bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                            <Text className="text-blue-700 text-[11px] font-bold">
+                              {event.startToCompleteMin}m run
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    </View>
+
+                    <View className="flex-row items-center gap-2 mt-1">
+                      {event.assigneeName ? (
+                        <Text className="text-gray-600 text-xs font-medium">By {event.assigneeName}</Text>
+                      ) : null}
+                      {event.assigneeName && dateStr ? <Text className="text-gray-300 text-xs">·</Text> : null}
+                      {dateStr ? <Text className="text-gray-500 text-xs">{dateStr}</Text> : null}
+                    </View>
+
+                    {/* Milestones if wash cycle */}
+                    {(event.step === 'getting_washed' || event.step === 'wash') && ((event as any).detergentAddedAt || (event as any).softenerAddedAt) && (
+                      <View className="flex-row gap-2 mt-1.5">
+                        {(event as any).detergentAddedAt && (
+                          <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
+                            <Check size={10} color="#994bff" />
+                            <Text className="text-purple-700 text-[10px] font-bold">Detergent @ 13m</Text>
+                          </View>
+                        )}
+                        {(event as any).softenerAddedAt && (
+                          <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
+                            <Check size={10} color="#994bff" />
+                            <Text className="text-purple-700 text-[10px] font-bold">Softener @ 21m</Text>
+                          </View>
+                        )}
+                      </View>
+                    )}
                   </View>
                 </View>
               );
@@ -1111,11 +1441,37 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         )}
       </ScrollView>
 
+      {/* Full-screen Photo Preview Modal */}
+      <Modal
+        visible={!!previewImage}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setPreviewImage(null)}
+      >
+        <View className="flex-1 bg-black/90 justify-center items-center p-4">
+          <TouchableOpacity
+            onPress={() => setPreviewImage(null)}
+            className="absolute top-12 right-6 w-11 h-11 rounded-full bg-white/20 items-center justify-center z-50 border border-white/20"
+          >
+            <X size={22} color="#fff" />
+          </TouchableOpacity>
+          {previewImage && (
+            <Image
+              source={{ uri: previewImage }}
+              className="w-full h-4/5 rounded-2xl"
+              resizeMode="contain"
+            />
+          )}
+        </View>
+      </Modal>
+
       <QRScanner 
         visible={scannerVisible} 
         onClose={() => setScannerVisible(false)} 
         onScan={handleScan}
         actionType="Garment Label"
+        continuous={true}
+        progressText={`${registeredCount} / ${garments.count || 0} Garments Scanned`}
       />
       
       {order && (
@@ -1136,9 +1492,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             visible={showAssignRiderModal}
             onClose={() => setShowAssignRiderModal(false)}
             orderId={orderId}
-            isDelivery={order?.status === 'ready'}
+            isDelivery={order?.status === 'ready' || order?.status === 'out_for_delivery'}
             onAssign={async (riderId) => {
-              const res = await useOpsProcessStore.getState().assignTaskToRider(orderId, order?.userId || '', riderId, order?.status === 'ready');
+              const isDelivery = order?.status === 'ready' || order?.status === 'out_for_delivery';
+              const res = await useOpsProcessStore.getState().assignTaskToRider(orderId, order?.userId || '', riderId, isDelivery);
               if (!res.ok) setActionError(friendlyActionError(res.error));
             }}
           />

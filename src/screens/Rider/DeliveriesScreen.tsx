@@ -31,21 +31,21 @@ export function DeliveriesScreen() {
   const [showPickupScanner, setShowPickupScanner] = useState<string | null>(null);
 
   useEffect(() => {
-    if (user?.id) initialize(user.id);
+    if (user?.id) {
+      initialize(user.id);
+      useOrderFeedStore.getState().initialize();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user?.id]);
 
   const activeDeliveries = myDeliveries
     .filter(d => {
       if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
       const order = orders.find(o => o.id === d.orderId);
       if (order && order.status === 'cancelled') return false;
-      // Hide dead deliveries older than 24h
-      const created = toMs(d.createdAt);
-      if (created && Date.now() - created > HIDE_OLDER_THAN_MS) return false;
       return true;
     })
-    .sort((a, b) => toMs(b.createdAt) - toMs(a.createdAt));
+    .sort((a, b) => toMs(b.assignedAt || b.createdAt) - toMs(a.assignedAt || a.createdAt));
 
   const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
   const orderFor = (t: DeliveryTask): FeedOrder | undefined => orders.find(o => o.id === t.orderId);

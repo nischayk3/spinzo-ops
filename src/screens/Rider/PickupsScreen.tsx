@@ -1,13 +1,14 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { View, Text, FlatList, ActivityIndicator, Modal, TextInput, TouchableOpacity, Alert, Platform, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Bike, Clock } from 'lucide-react-native';
+import { Bike, Clock, Package, ChevronRight } from 'lucide-react-native';
+import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { isPending, pickupLabel, OpsTask } from '../../utils/opsTasks';
 import { timeAgo, orderTotal, slotLabel, FeedOrder } from '../../utils/orderFeed';
-import { verifyPickupOTP, verifyStoreOTP } from '../../utils/opsPickup';
+import { verifyPickupOTP, verifyStoreOTP, updatePickupMeta } from '../../utils/opsPickup';
 import { EditOrderModal } from '../../components/EditOrderModal';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
 
@@ -19,9 +20,16 @@ const isPickupOrderLive = (status?: string): boolean =>
   status === 'placed' || status === 'confirmed' || status === 'in_transit_to_store';
 
 export function PickupsScreen() {
+  const navigation = useNavigation<any>();
   const user = useAuthStore(state => state.user);
   const { myTasks, isLoading, initialize } = useOpsStaffStore();
+  const myDeliveries = useOpsStaffStore(state => state.myDeliveries);
   const orders = useOrderFeedStore(state => state.orders);
+
+  const activeDeliveriesCount = myDeliveries.filter(
+    d => (d.status === 'out_for_delivery' || d.status === 'assigned') &&
+      orders.find(o => o.id === d.orderId)?.status !== 'cancelled'
+  ).length;
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeStoreTaskId, setActiveStoreTaskId] = useState<string | null>(null);
@@ -29,6 +37,9 @@ export function PickupsScreen() {
   const [tokens, setTokens] = useState<Record<string, string>>({});
   const [verifying, setVerifying] = useState(false);
   const [editOrderId, setEditOrderId] = useState<string | null>(null);
+  const [noteModalTask, setNoteModalTask] = useState<OpsTask | null>(null);
+  const [noteText, setNoteText] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
 
   useEffect(() => {
     if (user?.id) {
@@ -175,6 +186,42 @@ export function PickupsScreen() {
     );
   }
 
+  const handleToggleUrgent = async (t: OpsTask) => {
+    const order = getOrder(t);
+    const currentUrgent = Boolean(t.isUrgent ?? order?.isUrgent);
+    try {
+      await updatePickupMeta(t.orderId, {
+        isUrgent: !currentUrgent,
+        userId: order?.userId,
+      });
+    } catch {
+      Alert.alert('Error', 'Failed to update urgent status');
+    }
+  };
+
+  const handleOpenNoteModal = (t: OpsTask) => {
+    const order = getOrder(t);
+    setNoteModalTask(t);
+    setNoteText(t.pickupNote || order?.pickupNote || '');
+  };
+
+  const handleSaveNote = async () => {
+    if (!noteModalTask) return;
+    setSavingNote(true);
+    try {
+      const order = getOrder(noteModalTask);
+      await updatePickupMeta(noteModalTask.orderId, {
+        pickupNote: noteText.trim(),
+        userId: order?.userId,
+      });
+      setNoteModalTask(null);
+    } catch {
+      Alert.alert('Error', 'Failed to save pickup note');
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
   const renderCard = (t: OpsTask, isInTransit?: boolean) => {
     const order = getOrder(t);
     const pickupSlotText = pickupLabel(t) !== '—'
@@ -204,6 +251,10 @@ export function PickupsScreen() {
         tokens={order?.tokens || (t as any).tokens}
         lat={order?.latitude || order?.address?.latitude || t.latitude}
         lng={order?.longitude || order?.address?.longitude || t.longitude}
+        isUrgent={t.isUrgent ?? order?.isUrgent}
+        pickupNote={t.pickupNote || order?.pickupNote}
+        onToggleUrgent={() => handleToggleUrgent(t)}
+        onEditPickupNote={() => handleOpenNoteModal(t)}
         onPrimary={
           isInTransit
             ? () => { setOtp(''); setActiveStoreTaskId(t.id); }
@@ -232,6 +283,29 @@ export function PickupsScreen() {
           {pending.length} pending pickup{pending.length === 1 ? '' : 's'}
         </Text>
       </View>
+
+      {activeDeliveriesCount > 0 ? (
+        <TouchableOpacity
+          activeOpacity={0.8}
+          onPress={() => navigation.navigate('Deliveries')}
+          className="mx-4 mb-3 p-3.5 bg-blue-500/10 border border-blue-500/30 rounded-xl flex-row items-center justify-between"
+        >
+          <View className="flex-row items-center flex-1 mr-2">
+            <View className="w-8 h-8 rounded-lg bg-blue-500/20 items-center justify-center mr-3">
+              <Package size={18} color="#3B82F6" />
+            </View>
+            <View className="flex-1">
+              <Text className="text-white font-bold text-sm">
+                {activeDeliveriesCount} Active Delivery Task{activeDeliveriesCount > 1 ? 's' : ''}
+              </Text>
+              <Text className="text-textSecondary text-xs">
+                Tap to view orders ready for delivery
+              </Text>
+            </View>
+          </View>
+          <ChevronRight size={18} color="#94A3B8" />
+        </TouchableOpacity>
+      ) : null}
 
       <FlatList
         data={pending.length ? [0] : []}
@@ -394,6 +468,48 @@ export function PickupsScreen() {
       </Modal>
 
       <EditOrderModal visible={editOrderId !== null} onClose={() => setEditOrderId(null)} order={editOrder} />
+
+      {/* Pickup Note Modal */}
+      <Modal visible={noteModalTask !== null} transparent animationType="fade" onRequestClose={() => setNoteModalTask(null)}>
+        <View className="flex-1 bg-black/60 items-center justify-center p-4">
+          <View className="bg-bgSurface w-full max-w-sm rounded-2xl p-5 border border-bgSurfaceLight shadow-2xl">
+            <Text className="text-textPrimary font-bold text-lg mb-1">Pickup Note</Text>
+            <Text className="text-textSecondary text-xs mb-3">
+              Add any special request or observation for Order #{noteModalTask?.orderId.slice(-6).toUpperCase()}
+            </Text>
+            <TextInput
+              value={noteText}
+              onChangeText={setNoteText}
+              placeholder="e.g. Silk garments, special stain treatment, gate code..."
+              placeholderTextColor="#94A3B8"
+              multiline
+              numberOfLines={4}
+              className="bg-bgDark text-textPrimary p-3 rounded-xl border border-bgSurfaceLight mb-4 text-sm min-h-[90px]"
+              style={{ textAlignVertical: 'top' }}
+            />
+            <View className="flex-row gap-2">
+              <TouchableOpacity
+                onPress={() => setNoteModalTask(null)}
+                disabled={savingNote}
+                className="flex-1 h-11 bg-bgDark border border-bgSurfaceLight rounded-xl items-center justify-center"
+              >
+                <Text className="text-textSecondary font-semibold">Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleSaveNote}
+                disabled={savingNote}
+                className="flex-1 h-11 bg-primary rounded-xl items-center justify-center flex-row"
+              >
+                {savingNote ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text className="text-white font-bold">Save Note</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }

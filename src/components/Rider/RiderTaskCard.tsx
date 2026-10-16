@@ -1,4 +1,4 @@
-import React, { memo } from 'react';
+import React, { memo, useState } from 'react';
 import { View, Text, Pressable, Linking } from 'react-native';
 import {
   MapPin,
@@ -9,6 +9,8 @@ import {
   Bike,
   Tag,
   Zap,
+  MoreVertical,
+  Edit3,
 } from 'lucide-react-native';
 import { timeAgo, formatItemSummary, parseOrderTokens } from '../../utils/orderFeed';
 
@@ -57,6 +59,10 @@ export interface RiderTaskCardProps {
   onPrimary?: () => void;
   primaryLabel?: string;
   onEdit?: () => void;
+  isUrgent?: boolean;
+  pickupNote?: string;
+  onToggleUrgent?: () => void;
+  onEditPickupNote?: () => void;
 }
 
 const openDirections = (addr: string, p: RiderTaskCardProps) => {
@@ -71,35 +77,120 @@ const openDirections = (addr: string, p: RiderTaskCardProps) => {
 };
 
 function RiderTaskCardInner(p: RiderTaskCardProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const isPickup = p.type === 'pickup';
   const addr = isPickup ? p.pickupAddress : p.deliveryAddress;
   const slotDisplay = (p.pickupSlot || p.slot || (p.deliveryDate && p.deliveryTime ? `${p.deliveryDate} • ${p.deliveryTime}` : (p.deliveryDate || p.deliveryTime || '')) || '').trim();
 
   return (
     <Pressable
-      onPress={p.onPrimary}
+      onPress={() => {
+        if (menuOpen) setMenuOpen(false);
+        else p.onPrimary?.();
+      }}
       className="bg-bgSurface rounded-xl p-4 mb-3 border border-bgSurfaceLight active:opacity-90 cursor-pointer"
     >
       {/* Header: order number + customer + time */}
       <View className="flex-row items-center justify-between mb-3">
-        <View className="flex-row items-center">
+        <View className="flex-row items-center flex-1 mr-2">
           <View className={`w-10 h-10 rounded-full items-center justify-center mr-3 ${isPickup ? 'bg-info/15' : 'bg-primary/15'}`}>
             {isPickup ? <Bike size={18} color="#3B82F6" /> : <Package size={18} color="#994BFF" />}
           </View>
-          <View>
-            <Text className="text-textPrimary font-bold text-lg">#{p.orderNumber}</Text>
+          <View className="flex-1">
+            <View className="flex-row items-center flex-wrap gap-1.5">
+              <Text className="text-textPrimary font-bold text-lg">#{p.orderNumber}</Text>
+              {p.isUrgent ? (
+                <View className="bg-red-500/20 border border-red-500/50 px-2 py-0.5 rounded-full flex-row items-center">
+                  <Zap size={10} color="#ef4444" className="mr-0.5" />
+                  <Text className="text-red-400 font-black text-[10px] uppercase">URGENT</Text>
+                </View>
+              ) : null}
+            </View>
             {p.customerName ? (
-              <Text className="text-textSecondary text-sm">{p.customerName}</Text>
+              <Text className="text-textSecondary text-sm" numberOfLines={1}>{p.customerName}</Text>
             ) : null}
           </View>
         </View>
-        {p.createdAt ? (
-          <View className="flex-row items-center">
-            <Clock size={13} color="#94A3B8" />
-            <Text className="text-textMuted text-xs ml-1">{timeAgo(p.createdAt)}</Text>
-          </View>
-        ) : null}
+
+        <View className="flex-row items-center gap-2">
+          {p.createdAt ? (
+            <View className="flex-row items-center">
+              <Clock size={13} color="#94A3B8" />
+              <Text className="text-textMuted text-xs ml-1">{timeAgo(p.createdAt)}</Text>
+            </View>
+          ) : null}
+
+          {isPickup && (p.onToggleUrgent || p.onEditPickupNote) ? (
+            <Pressable
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                setMenuOpen(prev => !prev);
+              }}
+              className="w-8 h-8 rounded-full items-center justify-center bg-bgDark border border-bgSurfaceLight"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <MoreVertical size={16} color="#94A3B8" />
+            </Pressable>
+          ) : null}
+        </View>
       </View>
+
+      {/* 3-Dot Dropdown Menu */}
+      {menuOpen ? (
+        <View className="mb-3 bg-bgDark border border-bgSurfaceLight rounded-xl p-2 gap-1 shadow-lg">
+          {p.onToggleUrgent && (
+            <Pressable
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                setMenuOpen(false);
+                p.onToggleUrgent?.();
+              }}
+              className="flex-row items-center p-2 rounded-lg active:bg-bgSurface"
+            >
+              <Zap size={14} color={p.isUrgent ? '#94A3B8' : '#ef4444'} className="mr-2" />
+              <Text className={`text-xs font-bold ${p.isUrgent ? 'text-textSecondary' : 'text-red-400'}`}>
+                {p.isUrgent ? 'Remove Urgent Mark' : 'Mark as Urgent'}
+              </Text>
+            </Pressable>
+          )}
+
+          {p.onEditPickupNote && (
+            <Pressable
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                setMenuOpen(false);
+                p.onEditPickupNote?.();
+              }}
+              className="flex-row items-center p-2 rounded-lg active:bg-bgSurface"
+            >
+              <Edit3 size={14} color="#f59e0b" className="mr-2" />
+              <Text className="text-amber-400 text-xs font-bold">
+                {p.pickupNote ? 'Edit Pickup Note' : 'Add Pickup Note'}
+              </Text>
+            </Pressable>
+          )}
+        </View>
+      ) : null}
+
+      {/* Pickup Note Card */}
+      {p.pickupNote ? (
+        <View className="bg-amber-500/15 border border-amber-500/40 p-3 rounded-lg mb-3">
+          <View className="flex-row items-center justify-between mb-1">
+            <Text className="text-amber-400 font-bold text-xs uppercase tracking-wide">Pickup Note</Text>
+            {p.onEditPickupNote && (
+              <Pressable
+                onPress={(e) => {
+                  e?.stopPropagation?.();
+                  p.onEditPickupNote?.();
+                }}
+              >
+                <Text className="text-amber-300 text-xs underline">Edit</Text>
+              </Pressable>
+            )}
+          </View>
+          <Text className="text-amber-200 text-sm font-medium">{p.pickupNote}</Text>
+        </View>
+      ) : null}
 
       {/* Address row */}
       {addr ? (

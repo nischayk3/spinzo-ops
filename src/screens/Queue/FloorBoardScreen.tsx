@@ -3,7 +3,7 @@ import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, L
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens } from '../../utils/orderFeed';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch } from '../../utils/orderFeed';
 import { stepLabel } from '../../utils/opsProcess';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -46,12 +46,7 @@ export function FloorBoardScreen() {
 
     // Apply Search
     if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      result = result.filter(o =>
-        o.id.toLowerCase().includes(q) ||
-        (o.customerPhone && o.customerPhone.includes(q)) ||
-        (o.customerName && o.customerName.toLowerCase().includes(q))
-      );
+      result = result.filter(o => matchOrderSearch(o, searchQuery));
     }
 
     // Apply Tab Filter
@@ -97,7 +92,7 @@ export function FloorBoardScreen() {
           <TextInput
             value={searchQuery}
             onChangeText={setSearchQuery}
-            placeholder="Search Order ID, Name or Phone..."
+            placeholder="Search by Token #, Order ID, Phone, Customer..."
             placeholderTextColor="#94a3b8"
             className="flex-1 h-full px-3 text-gray-900 font-medium"
             autoCapitalize="none"
@@ -157,6 +152,11 @@ export function FloorBoardScreen() {
                   <Text className="text-gray-900 font-bold text-lg mr-2">
                     #{item.id.slice(-6).toUpperCase()}
                   </Text>
+                  {item.isUrgent ? (
+                    <View className="bg-red-500 px-2 py-0.5 rounded-full mr-2">
+                      <Text className="text-white text-[10px] font-black uppercase">⚡ URGENT</Text>
+                    </View>
+                  ) : null}
                   <View className={`px-2 py-0.5 rounded-full ${statusColor.split(' ')[0]}`}>
                     <Text className={`text-xs font-bold ${statusColor.split(' ')[1]}`}>
                       {STATUS_LABEL[item.status] || item.status}
@@ -246,6 +246,14 @@ export function FloorBoardScreen() {
                   </View>
                 );
               })()}
+
+              {item.pickupNote ? (
+                <View className="bg-amber-50 border border-amber-200 rounded-lg p-2.5 mt-2">
+                  <Text className="text-amber-800 text-xs">
+                    <Text className="font-bold">Pickup Note: </Text>{item.pickupNote}
+                  </Text>
+                </View>
+              ) : null}
             </TouchableOpacity>
           );
         }}

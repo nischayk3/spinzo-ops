@@ -115,3 +115,63 @@ export async function clearAssignmentNotifications(): Promise<void> {
     // non-fatal
   }
 }
+
+export interface StageNudgeNotificationParams {
+  orderId: string;
+  orderShortId?: string;
+  title: string;
+  message: string;
+  step?: string;
+  phase?: string;
+}
+
+/**
+ * Show a prominent Stage Nudge Heads-Up notification on Android / Web with alarm sound.
+ */
+export async function triggerStageNudgeNotification(params: StageNudgeNotificationParams): Promise<void> {
+  const short = params.orderShortId || params.orderId.slice(-6).toUpperCase();
+  const title = `⏰ ${params.title} #${short}`;
+  const body = `${params.message}\nTap to respond now.`;
+
+  // Web browser desktop notification
+  if (Platform.OS === 'web' && typeof window !== 'undefined' && 'Notification' in window) {
+    if (Notification.permission === 'granted') {
+      try {
+        new Notification(title, { body });
+      } catch (e) {
+        console.warn('Web notification error:', e);
+      }
+    } else if (Notification.permission !== 'denied') {
+      Notification.requestPermission().then(p => {
+        if (p === 'granted') {
+          try {
+            new Notification(title, { body });
+          } catch {}
+        }
+      });
+    }
+  }
+
+  try {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title,
+        subtitle: `#${short}`,
+        body,
+        sound: 'alarm.wav',
+        priority: Notifications.AndroidNotificationPriority.MAX,
+        color: '#f59e0b',
+        data: {
+          orderId: params.orderId,
+          type: 'stage_nudge',
+          step: params.step,
+          phase: params.phase,
+        },
+      },
+      trigger: null,
+    });
+  } catch (err) {
+    console.warn('[Notifications] Failed to schedule stage nudge notification:', err);
+  }
+}
+

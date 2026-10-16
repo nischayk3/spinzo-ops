@@ -1,6 +1,20 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { taskTransition, isAwaitingPickup, checkPaymentGate } = require('./dispatch');
+const { taskTransition, isAwaitingPickup, checkPaymentGate, isIroningEligible, IRONING_PRIORITY_PHONES } = require('./dispatch');
+
+test('isIroningEligible: allows Samsul and Abdur', () => {
+  assert.strictEqual(isIroningEligible('+916369768237'), true); // Samsul
+  assert.strictEqual(isIroningEligible('6369768237'), true);
+  assert.strictEqual(isIroningEligible('+917559105832'), true); // Abdur
+  assert.strictEqual(isIroningEligible('7559105832'), true);
+});
+
+test('isIroningEligible: rejects New Helper and other phones', () => {
+  assert.strictEqual(isIroningEligible('+918888888888'), false);
+  assert.strictEqual(isIroningEligible('+919999999999'), false);
+  assert.strictEqual(isIroningEligible(''), false);
+  assert.strictEqual(isIroningEligible(null), false);
+});
 
 test('taskTransition: processing closes the pickup task', () => {
   assert.deepStrictEqual(taskTransition('pickup_completed', 'processing'), { taskStatus: 'picked_up' });

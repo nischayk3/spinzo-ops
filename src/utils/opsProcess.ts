@@ -9,6 +9,14 @@ export interface StageRecord {
   acceptedAt?: unknown;  // helper acknowledged (popup Accept or pressed Start)
   detergentAddedAt?: unknown;
   softenerAddedAt?: unknown;
+  acceptToCompleteMin?: number;
+  startToCompleteMin?: number;
+  qualityProof?: {
+    photos?: string[];
+    videoUrl?: string | null;
+    bundles?: number;
+    [key: string]: any;
+  };
 }
 export interface GarmentLabel { seq: number; qr: string; }
 export interface GarmentRegistration { seq: number; qr?: string; scannedAt?: unknown; scannedBy?: string; }

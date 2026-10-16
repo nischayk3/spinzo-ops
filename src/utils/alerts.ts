@@ -95,6 +95,22 @@ export async function dramaticChime(loop: boolean = true) {
     singleLoopTimeout = null;
   }
 
+  // Web audio chime fallback: play crisp synthesized chime on Web browsers
+  if (web) {
+    const ac = ensureAudioCtx();
+    if (ac) {
+      try {
+        ac.resume().catch(() => {});
+        const now = ac.ctx.currentTime;
+        playTone(ac.ctx, 784, 'triangle', now, 0.22, 0.3);
+        playTone(ac.ctx, 988, 'triangle', now + 0.2, 0.22, 0.3);
+        playTone(ac.ctx, 1318, 'triangle', now + 0.4, 0.35, 0.35);
+      } catch (e) {
+        // best-effort
+      }
+    }
+  }
+
   try {
     alarmSound.loop = loop;
     if (typeof alarmSound.seekTo === 'function') {

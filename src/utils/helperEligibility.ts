@@ -8,10 +8,28 @@ export interface ActiveHelperTask {
   step: string;
 }
 
-// ─── Machine Capacity (scalable: works for 1 washer or 10) ─────────────────────
+// ─── Ironing Priority Phones & Helpers ─────────────────────────────────────────
+
+export const IRONING_PRIORITY_PHONES = ['+916369768237', '+917559105832'];
+
+export function normalizePhone(raw?: string | null): string {
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
+  return raw.trim();
+}
+
+export function isIroningEligiblePhone(phone?: string | null): boolean {
+  if (!phone) return false;
+  const norm = normalizePhone(phone);
+  return IRONING_PRIORITY_PHONES.some(p => normalizePhone(p) === norm);
+}
+
+// ─── Machine Capacity & Stage Buffers ──────────────────────────────────────────
 
 /** Count how many processes globally are actively running a given step type. */
-function countRunningMachines(processes: OpsProcess[], stepType: string): number {
+export function countRunningMachines(processes: OpsProcess[], stepType: string): number {
   return processes.filter(p => {
     const cur = currentStep(p);
     if (cur !== stepType) return false;
@@ -21,21 +39,44 @@ function countRunningMachines(processes: OpsProcess[], stepType: string): number
   }).length;
 }
 
-/** Check if the required machine/resource for a step is at capacity. */
-function isMachineAtCapacity(
+/** Count total pending orders for a stage (waiting or running, not completed). */
+export function countPendingStageOrders(processes: OpsProcess[], stepType: string): number {
+  return processes.filter(p => {
+    const cur = currentStep(p);
+    if (cur !== stepType) return false;
+    const stage = p.stages[cur];
+    return !stage?.completedAt;
+  }).length;
+}
+
+/** Check if the required machine/resource or buffer for a step is at capacity. */
+export function isMachineOrBufferAtCapacity(
   processes: OpsProcess[],
   step: string,
   resources: StoreResources
 ): boolean {
   switch (step) {
-    case 'getting_washed':
-      return countRunningMachines(processes, 'getting_washed') >= resources.washers;
-    case 'getting_dried':
+    case 'getting_washed': {
+      // Running capacity: max active running washers
+      const running = countRunningMachines(processes, 'getting_washed');
+      if (running >= resources.washers) return true;
+      // Buffer rule: 2 pending orders per active washer (e.g. 2 washers -> 4 pending orders)
+      const pending = countPendingStageOrders(processes, 'getting_washed');
+      return pending >= (resources.washers * 2);
+    }
+    case 'getting_dried': {
       return countRunningMachines(processes, 'getting_dried') >= resources.dryers;
-    case 'getting_ironed':
-      return countRunningMachines(processes, 'getting_ironed') >= resources.ironingStations;
+    }
+    case 'getting_ironed': {
+      // Running capacity: max active running ironing stations
+      const running = countRunningMachines(processes, 'getting_ironed');
+      if (running >= resources.ironingStations) return true;
+      // Buffer rule: 2 pending orders per active iron station (e.g. 2 stations -> 4 pending orders)
+      const pending = countPendingStageOrders(processes, 'getting_ironed');
+      return pending >= (resources.ironingStations * 2);
+    }
     default:
-      return false; // tagging, packaging, prestain don't need machines
+      return false; // tagging, packaging, prestain don't need machine buffers
   }
 }
 
@@ -57,6 +98,22 @@ function getStepPriority(step: string | null): number {
 // Order states that mean no helper task should be offered for this order.
 function isOrderTerminal(status?: string): boolean {
   return status === 'cancelled' || status === 'ready' || status === 'out_for_delivery' || status === 'delivered';
+}
+
+function getProcessTimestamp(p: OpsProcess): number {
+  const cur = currentStep(p);
+  const stage = cur ? p.stages?.[cur] : null;
+  const queuedAt = (stage as any)?.queuedAt;
+  if (queuedAt) {
+    if (typeof queuedAt === 'number') return queuedAt;
+    if (typeof queuedAt.toMillis === 'function') return queuedAt.toMillis();
+  }
+  const created = (p as any).createdAt;
+  if (created) {
+    if (typeof created === 'number') return created;
+    if (typeof created.toMillis === 'function') return created.toMillis();
+  }
+  return 0;
 }
 
 // ─── Busy / Push Helpers ───────────────────────────────────────────────────────
@@ -91,7 +148,8 @@ function isAcceptInFlight(processes: OpsProcess[], orders: any[], task: ActiveHe
 export function isHelperEligible(
   process: OpsProcess,
   role: string,
-  machineAtCapacity: boolean
+  machineAtCapacity: boolean,
+  phone?: string | null
 ): boolean {
   if (isDone(process) || process.status === 'cancelled') return false;
 
@@ -101,11 +159,16 @@ export function isHelperEligible(
   // Already owned by someone (incl. me) → not an open offer
   if (process.stages[cur]?.assignee) return false;
 
-  // The machine for this step is full store-wide → don't offer to anyone
+  // The machine or buffer for this step is full store-wide → don't offer to anyone
   if (machineAtCapacity) return false;
 
-  // Only iron specialists (or helpers/admins)
-  if (cur === 'getting_ironed' && role !== 'admin' && role !== 'iron' && role !== 'helper') return false;
+  // Ironing Orders: Strictly gated to authorized specialists (Samsul & Abdur)
+  // New helper and other unauthorized phone numbers are blocked.
+  if (cur === 'getting_ironed') {
+    if (role === 'admin') return true;
+    if (!phone || !isIroningEligiblePhone(phone)) return false;
+  }
+
   return true;
 }
 
@@ -119,7 +182,11 @@ export function isHelperEligible(
  *   Accept → BUSY (loading) → Start machine → FREE (machine runs) → later Unload & Complete.
  *   Hands-on steps (tagging, ironing, packaging) keep the helper busy until completed.
  *
- * Scalable: works correctly whether you have 1 washer or 10, 1 helper or 20.
+ * Rules:
+ *   - Machine Priority: Washer and Dryer never sit idle.
+ *   - Packaging Overflow: If > 3 packaging orders pending, 4th triggers instant assignment of oldest packaging order.
+ *   - Machine Buffers: 2 pending orders per active washer, 2 per active iron station.
+ *   - Ironing Priority: Priority 1 Samsul (+916369768237), Priority 2 Abdur (+917559105832), block New Helper.
  */
 export function getTopEligibleTask(
   processes: OpsProcess[],
@@ -128,37 +195,57 @@ export function getTopEligibleTask(
   role: string,
   activeTask: ActiveHelperTask | null,
   resources: StoreResources = { washers: 1, dryers: 1, ironingStations: 1 },
-  onShift = true
+  onShift = true,
+  phone?: string | null
 ): OpsProcess | null {
   // Ignore processes whose order is already finished/cancelled.
   const live = processes.filter(p => !isOrderTerminal(orders.find(o => o.id === p.orderId)?.status));
 
   // ── 0. Supervisor-assigned tasks ALWAYS surface so the helper acknowledges them ──
-  // Pushed tasks take absolute precedence — even if the helper's shift status is still syncing.
   const pushed = live.find(p => isPushedToMe(p, uid));
   if (pushed) return { ...pushed, isPushedToMe: true };
 
   // ✅ SHIFT GATE: an off-shift helper (not clocked in via QR) must NOT be auto-offered
-  // generic tasks from the open queue.
   if (!onShift) return null;
 
-  // ── 1. Filter eligible processes (with global machine capacity check) ──
+  // ── RULE: Packaging Overflow Rule ──
+  // If > 3 packaging orders pending (i.e. 4 or more), 4th arrival triggers instant
+  // assignment of the 1st (oldest) packaging order to next available helper, looping continuously.
+  const pendingPackaging = live.filter(
+    p => currentStep(p) === 'packaging' && !p.stages.packaging?.assignee && !p.stages.packaging?.completedAt
+  );
+
+  if (pendingPackaging.length > 3) {
+    // Sort oldest first
+    pendingPackaging.sort((a, b) => getProcessTimestamp(a) - getProcessTimestamp(b));
+    const oldestPackaging = pendingPackaging[0];
+    if (!isHelperBusy(live, uid) && !isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
+      return oldestPackaging;
+    }
+  }
+
+  // ── 1. Filter eligible processes (with global machine capacity and buffer checks) ──
   const eligible = live.filter(p => {
     const cur = currentStep(p);
-    // A started-but-unassigned stage (supervisor unassigned it mid-run) already
-    // occupies its machine — don't count it against itself.
-    const atCapacity = !!cur && !p.stages[cur]?.startedAt && isMachineAtCapacity(live, cur, resources);
-    return isHelperEligible(p, role, atCapacity);
+    const atCapacity = !!cur && !p.stages[cur]?.startedAt && isMachineOrBufferAtCapacity(live, cur, resources);
+    return isHelperEligible(p, role, atCapacity, phone);
   });
 
-  // Sort by priority: getting_dried (1) -> getting_washed (2) -> packaging (3)...
-  eligible.sort((a, b) => getStepPriority(currentStep(a)) - getStepPriority(currentStep(b)));
+  // Sort by priority: getting_dried (1) -> getting_washed (2) -> packaging (3) -> getting_ironed (4)...
+  eligible.sort((a, b) => {
+    const pA = getStepPriority(currentStep(a));
+    const pB = getStepPriority(currentStep(b));
+    if (pA !== pB) return pA - pB;
+    // Tie-break: oldest first
+    return getProcessTimestamp(a) - getProcessTimestamp(b);
+  });
+
+  // ── Ironing Priority Ranking (Priority 1: Samsul, Priority 2: Abdur) ──
+  // If task is getting_ironed and helper is Abdur (+917559105832), Abdur is offered after Samsul
+  // If phone is Samsul (+916369768237), Samsul gets top preference for iron orders
   const topProcess = eligible[0] || null;
 
   // ── 2. Machine Priority: Washer & Dryer should NEVER remain empty! ──
-  // If an available machine (dryer or washer) needs a load, surface it on top priority.
-  // Any on-shift helper can be assigned to load the machine, UNLESS they are already
-  // actively loading another machine.
   const isTopProcessMachine = topProcess && isMachineStep(currentStep(topProcess));
   if (isTopProcessMachine) {
     if (!isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {

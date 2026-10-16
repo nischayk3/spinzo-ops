@@ -10,9 +10,21 @@ interface QRScannerProps {
   actionType: string;
   /** When true, renders camera inline (no wrapping Modal). Used when already inside a Modal. */
   inline?: boolean;
+  /** When true, camera remains open continuously across multiple scans */
+  continuous?: boolean;
+  /** Optional progress string (e.g. "3 / 5 Garments Scanned") */
+  progressText?: string;
 }
 
-export function QRScanner({ visible, onClose, onScan, actionType, inline = false }: QRScannerProps) {
+export function QRScanner({
+  visible,
+  onClose,
+  onScan,
+  actionType,
+  inline = false,
+  continuous = false,
+  progressText,
+}: QRScannerProps) {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
 
@@ -71,11 +83,11 @@ export function QRScanner({ visible, onClose, onScan, actionType, inline = false
     setScanned(true);
     onScan(data);
     
-    if (inline) {
-      // In inline mode, allow re-scanning after a short delay (for multi-bundle scanning)
-      setTimeout(() => setScanned(false), 1500);
+    if (continuous || inline) {
+      // Continuous mode: brief pause so same tag isn't re-scanned repeatedly, but camera stays open
+      setTimeout(() => setScanned(false), 900);
     } else {
-      // In modal mode, auto-close after scan
+      // In single-scan modal mode, auto-close after scan
       setTimeout(() => {
         onClose();
         setScanned(false);
@@ -102,17 +114,22 @@ export function QRScanner({ visible, onClose, onScan, actionType, inline = false
               setScanned(false);
               onClose();
             }}
-            className="absolute top-12 right-6 w-12 h-12 bg-black/50 rounded-full items-center justify-center z-50"
+            className="absolute top-12 right-6 w-12 h-12 bg-black/60 rounded-full items-center justify-center z-50 border border-white/20"
           >
             <X color="white" size={24} />
           </TouchableOpacity>
         )}
         
         {!inline && (
-          <View className="absolute top-24 items-center">
-            <Text className="text-white text-xl font-bold bg-black/50 px-4 py-2 rounded-lg">
+          <View className="absolute top-20 items-center px-4">
+            <Text className="text-white text-lg font-bold bg-black/60 px-4 py-2 rounded-xl mb-2 text-center">
               Scan {actionType.toUpperCase()} QR
             </Text>
+            {!!progressText && (
+              <View className="bg-primary px-4 py-1.5 rounded-full shadow-lg">
+                <Text className="text-white font-black text-sm">{progressText}</Text>
+              </View>
+            )}
           </View>
         )}
 

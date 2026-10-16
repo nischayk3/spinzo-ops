@@ -44,7 +44,19 @@ const orderFromDoc = (d: any): FeedOrder => {
     deliveryDate: data.deliveryDate,
     deliveryTime: data.deliveryTime,
     deliveryOTP: data.deliveryOTP,
+    riderId: data.riderId,
+    deliveryRiderId: data.deliveryRiderId || data.riderId,
     createdAt: data.createdAt,
+    isUrgent: data.opsMeta?.isUrgent ?? data.isUrgent ?? false,
+    pickupNote: data.opsMeta?.pickupNote ?? data.pickupNote ?? '',
+    opsMeta: data.opsMeta,
+    garmentCount: data.opsDetails?.garmentCount ?? data.garmentCount,
+    qualityPhotos: data.opsDetails?.qualityPhotos ?? data.qualityPhotos ?? data.qualityProof ?? data.packagingPhotos,
+    packagingPhotos: data.opsDetails?.packagingPhotos ?? data.packagingPhotos ?? data.qualityProof,
+    packagingProof: data.opsDetails?.packagingProof ?? data.packagingProof,
+    proofUrl: data.proofUrl || data.deliveryProofUrl,
+    stageTimings: data.opsDetails?.stageTimings ?? data.stageTimings,
+    opsDetails: data.opsDetails,
   };
 };
 

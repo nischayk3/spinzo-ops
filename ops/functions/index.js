@@ -2,12 +2,17 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible } = require('./dispatch');
 
-// Which steps a role may claim/start. Supervisors bypass; iron people take only
-// ironing; helpers take everything except ironing (Phase 5 wires iron dispatch).
-function stageRoleGate(step, role) {
-  if (role === 'supervisor' || role === 'helper' || role === 'iron' || role === 'admin') return true;
+// Which steps a role may claim/start. Supervisors bypass.
+// Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
+function stageRoleGate(step, role, phone) {
+  if (role === 'supervisor' || role === 'admin') return true;
+  if (step === 'getting_ironed') {
+    if (phone && isIroningEligible(phone)) return true;
+    return false;
+  }
+  if (role === 'helper' || role === 'iron') return true;
   return false;
 }
 
@@ -382,7 +387,51 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
     }
   }
 
-  // OTP is only required for pickup/store verification, not for acceptTask
+  if (action === 'updatePickupMeta') {
+    const isUrgent = typeof data.isUrgent === 'boolean' ? data.isUrgent : undefined;
+    const pickupNote = typeof data.pickupNote === 'string' ? data.pickupNote.trim() : undefined;
+
+    const taskRef = db.doc(`ops_tasks/${orderId}`);
+    const taskSnap = await taskRef.get();
+    if (!taskSnap.exists && role !== 'supervisor') return { ok: false, error: 'not_found' };
+
+    const task = taskSnap.exists ? taskSnap.data() : null;
+    if (task && role === 'rider' && task.assignee && task.assignee !== auth.uid) {
+      return { ok: false, error: 'unauthorized' };
+    }
+
+    const now = admin.firestore.Timestamp.now();
+    const taskPatch = {};
+    const orderPatch = {};
+
+    if (isUrgent !== undefined) {
+      taskPatch.isUrgent = isUrgent;
+      orderPatch['opsMeta.isUrgent'] = isUrgent;
+      orderPatch['opsMeta.urgentUpdatedAt'] = now;
+      orderPatch['opsMeta.urgentUpdatedBy'] = auth.uid;
+    }
+    if (pickupNote !== undefined) {
+      taskPatch.pickupNote = pickupNote;
+      orderPatch['opsMeta.pickupNote'] = pickupNote;
+      orderPatch['opsMeta.pickupNoteUpdatedAt'] = now;
+      orderPatch['opsMeta.pickupNoteUpdatedBy'] = auth.uid;
+    }
+
+    if (taskSnap.exists && Object.keys(taskPatch).length > 0) {
+      await taskRef.set(taskPatch, { merge: true });
+    }
+
+    const userId = task?.userId || data.userId;
+    if (userId && Object.keys(orderPatch).length > 0) {
+      const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
+      await orderRef.set(orderPatch, { merge: true });
+      const vendorId = task?.vendorId || data.vendorId || 'default';
+      await db.doc(`vendors/${vendorId}/orders/${orderId}`).set(orderPatch, { merge: true });
+    }
+    return { ok: true, isUrgent, pickupNote };
+  }
+
+  // OTP is only required for pickup/store verification, not for acceptTask or updatePickupMeta
   if ((action === 'verifyPickup' || action === 'verifyStoreOTP') && !/^\d{4}$/.test(otp)) {
     return { ok: false, error: 'invalid_input' };
   }
@@ -524,8 +573,123 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
   }
 });
 
-async function deleteProcessDocs(orderId) {
+async function persistOpsDetailsToOrder(orderId, optUserId, optVendorId) {
   try {
+    const processDocs = await db.collection('ops_process')
+      .where('parentOrderId', '==', orderId).get();
+    if (processDocs.empty) return;
+
+    let userId = optUserId;
+    let vendorId = optVendorId;
+    let combinedGarmentCount = 0;
+    let combinedRegisteredGarments = [];
+    const allQualityPhotos = [];
+    const stageTimings = {};
+    let packagingProof = null;
+
+    processDocs.forEach(d => {
+      const p = d.data();
+      if (!userId && p.userId) userId = p.userId;
+      if (!vendorId && p.vendorId) vendorId = p.vendorId;
+
+      if (p.garments) {
+        if (p.garments.count) combinedGarmentCount += (p.garments.count || 0);
+        if (Array.isArray(p.garments.registered)) {
+          combinedRegisteredGarments.push(...p.garments.registered);
+        }
+      }
+
+      if (p.stages) {
+        Object.keys(p.stages).forEach(step => {
+          const s = p.stages[step];
+          if (!s) return;
+          stageTimings[step] = {
+            ...(stageTimings[step] || {}),
+            ...s,
+          };
+          if (step === 'packaging' && s.qualityProof) {
+            packagingProof = s.qualityProof;
+            if (Array.isArray(s.qualityProof.photos)) {
+              allQualityPhotos.push(...s.qualityProof.photos);
+            }
+          }
+        });
+      }
+    });
+
+    if (!userId) {
+      const tSnap = await db.doc(`ops_tasks/${orderId}`).get();
+      if (tSnap.exists) {
+        userId = tSnap.data().userId;
+        if (!vendorId) vendorId = tSnap.data().vendorId;
+      }
+    }
+
+    if (!userId) {
+      const qSnap = await db.doc(`ops_queue/${orderId}`).get();
+      if (qSnap.exists) {
+        userId = qSnap.data().userId;
+        if (!vendorId) vendorId = qSnap.data().vendorId;
+      }
+    }
+
+    if (!userId) {
+      const cg = await db.collectionGroup('orders')
+        .where(admin.firestore.FieldPath.documentId(), '==', orderId)
+        .limit(1)
+        .get();
+      if (!cg.empty) {
+        const od = cg.docs[0].data();
+        userId = od.userId || (cg.docs[0].ref.parent && cg.docs[0].ref.parent.parent && cg.docs[0].ref.parent.parent.id);
+        if (!vendorId) vendorId = od.vendorId;
+      }
+    }
+
+    if (userId) {
+      const opsUpdate = {
+        updatedAt: TS(),
+      };
+      if (combinedGarmentCount > 0) {
+        opsUpdate.garmentCount = combinedGarmentCount;
+        opsUpdate.registeredGarmentsCount = combinedRegisteredGarments.length;
+      }
+      if (combinedRegisteredGarments.length > 0) {
+        opsUpdate.opsGarments = combinedRegisteredGarments;
+      }
+      if (allQualityPhotos.length > 0) {
+        opsUpdate.qualityPhotos = allQualityPhotos;
+        opsUpdate.packagingPhotos = allQualityPhotos;
+        opsUpdate.proofUrl = allQualityPhotos[0];
+      }
+      if (packagingProof) {
+        opsUpdate.packagingProof = packagingProof;
+      }
+      if (Object.keys(stageTimings).length > 0) {
+        opsUpdate.stageTimings = stageTimings;
+      }
+      opsUpdate.opsDetails = {
+        garmentCount: combinedGarmentCount,
+        registeredGarmentsCount: combinedRegisteredGarments.length,
+        qualityPhotos: allQualityPhotos,
+        packagingPhotos: allQualityPhotos,
+        packagingProof: packagingProof || null,
+        stageTimings,
+      };
+
+      const uOrderRef = db.doc(`users/${userId}/orders/${orderId}`);
+      await uOrderRef.set(opsUpdate, { merge: true });
+      if (vendorId) {
+        await db.doc(`vendors/${vendorId}/orders/${orderId}`).set(opsUpdate, { merge: true });
+      }
+    }
+  } catch (err) {
+    console.error(`persistOpsDetailsToOrder(${orderId}) failed:`, err);
+  }
+}
+
+async function deleteProcessDocs(orderId, userId, vendorId) {
+  try {
+    await persistOpsDetailsToOrder(orderId, userId, vendorId);
     const processDocs = await db.collection('ops_process')
       .where('parentOrderId', '==', orderId).get();
     const batch = db.batch();
@@ -605,47 +769,50 @@ exports.syncTaskFromOrder = onDocumentWritten('users/{userId}/orders/{orderId}',
     }
   }
 
-  // Clean up delivery tasks when an order is cancelled.
-  if (trans.dropQueue) {
-    try {
-      const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
-      const delSnap = await delTaskRef.get();
-      if (delSnap.exists) {
-        await delTaskRef.delete();
+    const userId = event.params.userId;
+    const vendorId = after?.vendorId || before?.vendorId;
+
+    // Clean up delivery tasks when an order is cancelled.
+    if (trans.dropQueue) {
+      try {
+        const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
+        const delSnap = await delTaskRef.get();
+        if (delSnap.exists) {
+          await delTaskRef.delete();
+        }
+      } catch (err) {
+        console.error(`syncTaskFromOrder: delivery task delete failed for ${orderId}`, err);
       }
-    } catch (err) {
-      console.error(`syncTaskFromOrder: delivery task delete failed for ${orderId}`, err);
+
+      // Also clean up any ops_process docs for this order.
+      await deleteProcessDocs(orderId, userId, vendorId);
     }
 
-    // Also clean up any ops_process docs for this order.
-    await deleteProcessDocs(orderId);
-  }
-
-  if (trans.dropProcess) {
-    try {
-      const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
-      const delSnap = await delTaskRef.get();
-      if (delSnap.exists) {
-        await delTaskRef.update({ status: 'delivered', deliveredAt: TS() });
+    if (trans.dropProcess) {
+      try {
+        const delTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
+        const delSnap = await delTaskRef.get();
+        if (delSnap.exists) {
+          await delTaskRef.update({ status: 'delivered', deliveredAt: TS() });
+        }
+      } catch (err) {
+        console.error(`syncTaskFromOrder: delivery task update failed for ${orderId}`, err);
       }
-    } catch (err) {
-      console.error(`syncTaskFromOrder: delivery task update failed for ${orderId}`, err);
+      
+      try {
+        await db.doc(`ops_queue/${orderId}`).delete();
+      } catch (err) {}
+
+      await deleteProcessDocs(orderId, userId, vendorId);
     }
-    
-    try {
-      await db.doc(`ops_queue/${orderId}`).delete();
-    } catch (err) {}
 
-    await deleteProcessDocs(orderId);
-  }
-
-  if (trans.cleanupProcess) {
-    // Order became 'ready': remove any stuck ops_process docs so helpers stop
-    // being offered tagging/processing steps for an already-finished order.
-    // Do NOT touch the delivery task — syncDeliveryTask creates it as 'pending'.
-    await deleteProcessDocs(orderId);
-  }
-});
+    if (trans.cleanupProcess) {
+      // Order became 'ready': remove any stuck ops_process docs so helpers stop
+      // being offered tagging/processing steps for an already-finished order.
+      // Do NOT touch the delivery task — syncDeliveryTask creates it as 'pending'.
+      await deleteProcessDocs(orderId, userId, vendorId);
+    }
+  });
 
 // When an order becomes 'ready', create a delivery task for rider dispatch.
 exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', async (event) => {
@@ -714,7 +881,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   const orderId = data.orderId;
   const action = data.action;
   if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-  if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded'].includes(action)) {
+  if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded', 'snoozeNudge'].includes(action)) {
     return { ok: false, error: 'invalid_input' };
   }
 
@@ -848,7 +1015,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           const processId = `${orderId}__${group.serviceType}`;
           const steps = stepsForServiceType(group.serviceType);
           
-          if (!stageRoleGate(steps[0], role)) {
+          if (!stageRoleGate(steps[0], role, phone)) {
              // Rollback/error if helper role is unauthorized for tagging
              throw new Error('unauthorized');
           }
@@ -866,7 +1033,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             status: steps[0],
             tokenNumber: tokens[group.serviceType] || data.tokenNumber || order.tokenNumber || '',
             siblingCount: serviceGroups.length,
-            stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, startedAt: now } },
+            stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, acceptedAt: now, startedAt: now, queuedAt: now } },
             garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
             claimedAt: now,
           });
@@ -899,7 +1066,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const process = processSnap.data();
     const step = process.steps[process.currentIndex];
     if (!step) return { ok: false, error: 'invalid_state' };
-    if (!stageRoleGate(step, role)) return { ok: false, error: 'unauthorized' };
+    if (!stageRoleGate(step, role, phone)) return { ok: false, error: 'unauthorized' };
 
     const stage = process.stages && process.stages[step];
     if (stage && stage.assignee && stage.assignee !== auth.uid) return { ok: false, error: 'already_claimed' };
@@ -926,6 +1093,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
               assignee: auth.uid, 
               assigneeName: name, 
               acceptedAt: now, 
+              queuedAt: s?.queuedAt || now,
               ...(isMachineTask ? {} : { startedAt: s?.startedAt || now }) 
             },
           },
@@ -946,7 +1114,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const process = processSnap.data();
     const step = process.steps[process.currentIndex];
     if (!step) return { ok: false, error: 'invalid_state' };
-    if (!stageRoleGate(step, role)) return { ok: false, error: 'unauthorized' };
+    if (!stageRoleGate(step, role, phone)) return { ok: false, error: 'unauthorized' };
 
     const stage = process.stages && process.stages[step];
     if (stage && stage.startedAt) return { ok: false, error: 'already_started' };
@@ -985,6 +1153,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
               assignee: (s && s.assignee) || auth.uid,
               assigneeName: (s && s.assignee) ? (s.assigneeName || '') : name,
               acceptedAt: (s && s.acceptedAt) || now,
+              queuedAt: s?.queuedAt || now,
               startedAt: now,
             },
           },
@@ -1031,18 +1200,80 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (stage.completedAt) return { ok: false, error: 'already_completed' };
 
         const completedAt = now;
-        const durationMs = Math.max(0, completedAt.toMillis() - stage.startedAt.toMillis());
+        const startedAtMs = stage.startedAt ? (typeof stage.startedAt.toMillis === 'function' ? stage.startedAt.toMillis() : new Date(stage.startedAt).getTime()) : completedAt.toMillis();
+        const acceptedAtMs = stage.acceptedAt ? (typeof stage.acceptedAt.toMillis === 'function' ? stage.acceptedAt.toMillis() : new Date(stage.acceptedAt).getTime()) : startedAtMs;
+
+        const durationMs = Math.max(0, completedAt.toMillis() - startedAtMs);
+        const acceptToCompleteMs = Math.max(0, completedAt.toMillis() - acceptedAtMs);
+        const acceptToCompleteMin = Math.round(acceptToCompleteMs / 60000);
+        const startToCompleteMin = Math.round(durationMs / 60000);
+
         const nextIndex = process.currentIndex + 1;
         const nextStatus = nextIndex < process.steps.length ? process.steps[nextIndex] : 'done';
 
         tx.update(processRef, {
           stages: { 
             ...(process.stages || {}), 
-            [step]: { ...stage, completedAt, durationMs } 
+            [step]: { 
+              ...stage, 
+              completedAt, 
+              durationMs,
+              acceptToCompleteMin,
+              startToCompleteMin,
+            },
+            ...(nextStatus !== 'done' ? {
+              [nextStatus]: {
+                ...(process.stages?.[nextStatus] || {}),
+                queuedAt: completedAt,
+              }
+            } : {})
           },
           currentIndex: nextIndex,
           status: nextStatus,
         });
+
+        // Dual-write to ops_stage_metrics for permanent historical tracking
+        const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
+        const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__${step}`);
+        tx.set(metricRef, {
+          processId: processRef.id,
+          orderId: process.orderId || orderId,
+          parentOrderId: process.parentOrderId || orderId,
+          step,
+          serviceType: process.serviceType || 'wash_fold',
+          serviceLabel: process.serviceLabel || '',
+          assignee: stage.assignee || auth.uid,
+          assigneeName: stage.assigneeName || name,
+          acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
+          startedAt: stage.startedAt || completedAt,
+          completedAt,
+          acceptToCompleteMin,
+          startToCompleteMin,
+          durationMs,
+          dateKey: todayStr,
+          createdAt: completedAt,
+        }, { merge: true });
+
+        // Attach step timing directly to the customer & vendor order docs
+        const stepTiming = {
+          assignee: stage.assignee || auth.uid,
+          assigneeName: stage.assigneeName || name,
+          acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
+          startedAt: stage.startedAt || completedAt,
+          completedAt,
+          acceptToCompleteMin,
+          startToCompleteMin,
+          durationMs,
+          ...(stage.detergentAddedAt ? { detergentAddedAt: stage.detergentAddedAt } : {}),
+          ...(stage.softenerAddedAt ? { softenerAddedAt: stage.softenerAddedAt } : {}),
+        };
+        const orderOpsStepUpdate = {
+          [`opsDetails.stageTimings.${step}`]: stepTiming,
+          [`stageTimings.${step}`]: stepTiming,
+          updatedAt: now,
+        };
+        tx.set(orderRef, orderOpsStepUpdate, { merge: true });
+        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), orderOpsStepUpdate, { merge: true });
 
         // Mirror to production order if needed
         if (nextStatus === 'done') {
@@ -1139,22 +1370,35 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   if (action === 'scanGarment') {
     const qr = String(data.qr || '');
-    const g = await taggingGate();
-    if (!g.ok) return g;
     const parsed = parseGarmentQr(qr, orderId);
     if (!parsed) return { ok: false, error: 'not_this_order' };
-    const garments = g.process.garments || {};
-    if (parsed.seq < 1 || parsed.seq > (garments.count || 0)) return { ok: false, error: 'not_in_count' };
-    if ((garments.registered || []).some(r => r.seq === parsed.seq)) return { ok: false, error: 'already_registered' };
-    // Belt-and-suspenders: drop any same-seq entry before appending so a concurrent
-    // double-scan (stale snapshot past the pre-check) can't create a duplicate.
-    await processRef.update({
-      garments: {
-        ...garments,
-        registered: [...(garments.registered || []).filter(r => r.seq !== parsed.seq), { ...parsed, scannedAt: now, scannedBy: auth.uid }],
-      },
-    });
-    return { ok: true, seq: parsed.seq };
+
+    try {
+      const result = await db.runTransaction(async (tx) => {
+        const ps = await tx.get(processRef);
+        if (!ps.exists) return { ok: false, error: 'not_found' };
+        const p = ps.data();
+        const tagStage = p.stages && p.stages.tagging;
+        if (!tagStage || tagStage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+        if (tagStage.completedAt) return { ok: false, error: 'already_submitted' };
+
+        const garments = p.garments || {};
+        if (parsed.seq < 1 || parsed.seq > (garments.count || 0)) return { ok: false, error: 'not_in_count' };
+        if ((garments.registered || []).some(r => r.seq === parsed.seq)) return { ok: false, error: 'already_registered' };
+
+        tx.update(processRef, {
+          garments: {
+            ...garments,
+            registered: [...(garments.registered || []).filter(r => r.seq !== parsed.seq), { ...parsed, scannedAt: now, scannedBy: auth.uid }],
+          },
+        });
+        return { ok: true, seq: parsed.seq };
+      });
+      return result;
+    } catch (err) {
+      console.error('opsProcessing scanGarment failed', err);
+      return { ok: false, error: 'server_error' };
+    }
   }
 
   if (action === 'unregisterGarment') {
@@ -1185,7 +1429,14 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (expected === 0 || got < expected) return { ok: false, error: 'not_all_registered' };
 
         const completedAt = now;
-        const durationMs = Math.max(0, completedAt.toMillis() - (tagStage.startedAt ? tagStage.startedAt.toMillis() : completedAt.toMillis()));
+        const startedAtMs = tagStage.startedAt ? (typeof tagStage.startedAt.toMillis === 'function' ? tagStage.startedAt.toMillis() : new Date(tagStage.startedAt).getTime()) : completedAt.toMillis();
+        const acceptedAtMs = tagStage.acceptedAt ? (typeof tagStage.acceptedAt.toMillis === 'function' ? tagStage.acceptedAt.toMillis() : new Date(tagStage.acceptedAt).getTime()) : startedAtMs;
+
+        const durationMs = Math.max(0, completedAt.toMillis() - startedAtMs);
+        const acceptToCompleteMs = Math.max(0, completedAt.toMillis() - acceptedAtMs);
+        const acceptToCompleteMin = Math.round(acceptToCompleteMs / 60000);
+        const startToCompleteMin = Math.round(durationMs / 60000);
+
         const nextIndex = p.currentIndex + 1;
         const nextStatus = nextIndex < p.steps.length ? p.steps[nextIndex] : 'done';
 
@@ -1193,15 +1444,72 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           garments: { ...garments, submittedAt: now },
           stages: { 
             ...(p.stages || {}), 
-            tagging: { ...tagStage, completedAt, durationMs } 
+            tagging: { 
+              ...tagStage, 
+              completedAt, 
+              durationMs,
+              acceptToCompleteMin,
+              startToCompleteMin,
+            },
+            ...(nextStatus !== 'done' ? {
+              [nextStatus]: {
+                ...(p.stages?.[nextStatus] || {}),
+                queuedAt: completedAt,
+              }
+            } : {})
           },
           currentIndex: nextIndex,
           status: nextStatus,
         });
 
+        // Dual-write to ops_stage_metrics for permanent historical tracking
+        const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
+        const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__tagging`);
+        tx.set(metricRef, {
+          processId: processRef.id,
+          orderId: p.orderId || orderId,
+          parentOrderId: p.parentOrderId || orderId,
+          step: 'tagging',
+          serviceType: p.serviceType || 'wash_fold',
+          serviceLabel: p.serviceLabel || '',
+          assignee: tagStage.assignee || auth.uid,
+          assigneeName: tagStage.assigneeName || name,
+          acceptedAt: tagStage.acceptedAt || tagStage.startedAt || completedAt,
+          startedAt: tagStage.startedAt || completedAt,
+          completedAt,
+          acceptToCompleteMin,
+          startToCompleteMin,
+          durationMs,
+          dateKey: todayStr,
+          createdAt: completedAt,
+        }, { merge: true });
+
+        // Attach garment count and tagging stage timing directly to customer & vendor order docs
+        const taggingTiming = {
+          assignee: tagStage.assignee || auth.uid,
+          assigneeName: tagStage.assigneeName || name,
+          acceptedAt: tagStage.acceptedAt || tagStage.startedAt || completedAt,
+          startedAt: tagStage.startedAt || completedAt,
+          completedAt,
+          acceptToCompleteMin,
+          startToCompleteMin,
+          durationMs,
+        };
+        const orderOpsTaggingUpdate = {
+          garmentCount: expected,
+          registeredGarmentsCount: got,
+          'opsDetails.garmentCount': expected,
+          'opsDetails.registeredGarmentsCount': got,
+          'opsDetails.stageTimings.tagging': taggingTiming,
+          'stageTimings.tagging': taggingTiming,
+          updatedAt: now,
+        };
+        tx.set(orderRef, orderOpsTaggingUpdate, { merge: true });
+        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), orderOpsTaggingUpdate, { merge: true });
+
         // Mirror to production order if needed
         if (nextStatus === 'done') {
-          const siblingCount = p.siblingCount || 1; // note: p is the process in submitTagging
+          const siblingCount = p.siblingCount || 1;
           
           if (siblingCount <= 1) {
             const deliveryOTP = generateOTP();
@@ -1260,7 +1568,14 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (stage.completedAt) return { ok: false, error: 'already_completed' };
 
         const completedAt = now;
-        const durationMs = Math.max(0, completedAt.toMillis() - stage.startedAt.toMillis());
+        const startedAtMs = stage.startedAt ? (typeof stage.startedAt.toMillis === 'function' ? stage.startedAt.toMillis() : new Date(stage.startedAt).getTime()) : completedAt.toMillis();
+        const acceptedAtMs = stage.acceptedAt ? (typeof stage.acceptedAt.toMillis === 'function' ? stage.acceptedAt.toMillis() : new Date(stage.acceptedAt).getTime()) : startedAtMs;
+
+        const durationMs = Math.max(0, completedAt.toMillis() - startedAtMs);
+        const acceptToCompleteMs = Math.max(0, completedAt.toMillis() - acceptedAtMs);
+        const acceptToCompleteMin = Math.round(acceptToCompleteMs / 60000);
+        const startToCompleteMin = Math.round(durationMs / 60000);
+
         const nextIndex = process.currentIndex + 1;
         const nextStatus = nextIndex < process.steps.length ? process.steps[nextIndex] : 'done';
 
@@ -1285,11 +1600,69 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         tx.update(processRef, {
           stages: {
             ...(process.stages || {}),
-            packaging: { ...stage, completedAt, durationMs, qualityProof: qualityMedia },
+            packaging: { 
+              ...stage, 
+              completedAt, 
+              durationMs, 
+              acceptToCompleteMin,
+              startToCompleteMin,
+              qualityProof: qualityMedia 
+            },
           },
           currentIndex: nextIndex,
           status: nextStatus,
         });
+
+        // Dual-write to ops_stage_metrics for permanent historical tracking
+        const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
+        const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__packaging`);
+        tx.set(metricRef, {
+          processId: processRef.id,
+          orderId: process.orderId || orderId,
+          parentOrderId: process.parentOrderId || orderId,
+          step: 'packaging',
+          serviceType: process.serviceType || 'wash_fold',
+          serviceLabel: process.serviceLabel || '',
+          assignee: stage.assignee || auth.uid,
+          assigneeName: stage.assigneeName || name,
+          acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
+          startedAt: stage.startedAt || completedAt,
+          completedAt,
+          acceptToCompleteMin,
+          startToCompleteMin,
+          durationMs,
+          dateKey: todayStr,
+          createdAt: completedAt,
+        }, { merge: true });
+
+        // Attach packaging photos, packagingProof, and stage timing directly to customer & vendor order docs
+        const packagingPhotosList = Array.isArray(qualityMedia.photos) ? qualityMedia.photos : [];
+        const packagingTiming = {
+          assignee: stage.assignee || auth.uid,
+          assigneeName: stage.assigneeName || name,
+          acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
+          startedAt: stage.startedAt || completedAt,
+          completedAt,
+          acceptToCompleteMin,
+          startToCompleteMin,
+          durationMs,
+          ...(qualityMedia.bundles ? { bundles: qualityMedia.bundles } : {}),
+        };
+
+        const orderOpsPackagingUpdate = {
+          qualityPhotos: packagingPhotosList,
+          packagingPhotos: packagingPhotosList,
+          ...(packagingPhotosList.length > 0 ? { proofUrl: packagingPhotosList[0] } : {}),
+          packagingProof: qualityMedia,
+          'opsDetails.qualityPhotos': packagingPhotosList,
+          'opsDetails.packagingPhotos': packagingPhotosList,
+          'opsDetails.packagingProof': qualityMedia,
+          'opsDetails.stageTimings.packaging': packagingTiming,
+          'stageTimings.packaging': packagingTiming,
+          updatedAt: now,
+        };
+        tx.set(orderRef, orderOpsPackagingUpdate, { merge: true });
+        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), orderOpsPackagingUpdate, { merge: true });
 
         if (nextStatus === 'done') {
           const siblingCount = process.siblingCount || 1;
@@ -1325,6 +1698,28 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     return { ok: true, chemical };
   }
 
+  if (action === 'snoozeNudge') {
+    const { phase, step } = data; // phase: 'accepted' | 'started'
+    if (!phase || !step) return { ok: false, error: 'invalid_input' };
+    const ps = await processRef.get();
+    if (!ps.exists) return { ok: false, error: 'not_found' };
+    const p = ps.data();
+    const cur = p.steps && p.steps[p.currentIndex];
+    if (cur !== step) return { ok: false, error: 'invalid_state' };
+
+    const stageData = (p.stages && p.stages[step]) || {};
+    if (stageData.assignee && stageData.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') {
+      return { ok: false, error: 'unauthorized' };
+    }
+
+    const fieldPrefix = `stages.${step}.nudge.${phase}`;
+    await processRef.update({
+      [`${fieldPrefix}.lastSnoozedAt`]: now,
+      [`${fieldPrefix}.snoozeCount`]: admin.firestore.FieldValue.increment(1),
+    });
+    return { ok: true, phase, step };
+  }
+
   return { ok: false, error: 'invalid_input' };
 });
 
@@ -1345,7 +1740,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   }
 
   const data = request.data || {};
-  const { action, orderId, userId, vendorId: reqVendorId } = data;
+  const { action, orderId, vendorId: reqVendorId } = data;
+  let userId = data.userId;
   
   if (role !== 'supervisor' && role !== 'admin' && !(role === 'rider' && action === 'verifyDeliveryOTP')) {
     return { ok: false, error: 'unauthorized' };
@@ -1398,8 +1794,41 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
     }
     return { ok: true, updatedCount };
   }
-  
-  if (!orderId || !userId || !action) return { ok: false, error: 'invalid_input' };
+
+  if (!orderId || !action) return { ok: false, error: 'invalid_input' };
+
+  if (!userId) {
+    const delSnap = await db.doc(`ops_delivery_tasks/${orderId}`).get();
+    if (delSnap.exists && delSnap.data().userId) userId = delSnap.data().userId;
+  }
+  if (!userId) {
+    const taskSnap = await db.doc(`ops_tasks/${orderId}`).get();
+    if (taskSnap.exists && taskSnap.data().userId) userId = taskSnap.data().userId;
+  }
+  if (!userId) {
+    const qSnap = await db.doc(`ops_queue/${orderId}`).get();
+    if (qSnap.exists && qSnap.data().userId) userId = qSnap.data().userId;
+  }
+  if (!userId) {
+    const procSnap = await db.doc(`ops_process/${orderId}`).get();
+    if (procSnap.exists && procSnap.data().userId) userId = procSnap.data().userId;
+  }
+  if (!userId) {
+    try {
+      const cgSnap = await db.collectionGroup('orders')
+        .where(admin.firestore.FieldPath.documentId(), '==', orderId)
+        .limit(1)
+        .get();
+      if (!cgSnap.empty) {
+        const od = cgSnap.docs[0].data();
+        userId = od.userId || (cgSnap.docs[0].ref.parent && cgSnap.docs[0].ref.parent.parent && cgSnap.docs[0].ref.parent.parent.id);
+      }
+    } catch (e) {
+      console.warn('collectionGroup fallback in supervisorActions failed:', e);
+    }
+  }
+
+  if (!userId) return { ok: false, error: 'invalid_input' };
   
   const orderRef = db.doc(`users/${userId}/orders/${orderId}`);
   const now = admin.firestore.Timestamp.now();
@@ -1611,7 +2040,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (!riderId) return { ok: false, error: 'invalid_input' };
 
         if (isDelivery) {
-          if (order.status !== 'ready') return { ok: false, error: 'invalid_state' };
+          if (order.status !== 'ready' && order.status !== 'out_for_delivery') {
+            return { ok: false, error: 'invalid_state' };
+          }
           const deliveryDate = order.deliveryDate || new Date().toISOString().split('T')[0];
           const deliveryTime = order.deliveryTime || 'Immediate';
           
@@ -1619,10 +2050,14 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             status: 'out_for_delivery',
             outForDeliveryAt: now,
             updatedAt: now,
+            deliveryRiderId: riderId,
+            riderId: riderId,
             ...(!order.deliveryDate || !order.deliveryTime ? { deliveryDate, deliveryTime, deliveryScheduledAt: now } : {}),
           };
           tx.update(orderRef, updateData);
           tx.set(vendorRef, updateData, { merge: true });
+
+          const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
 
           if (delTaskSnap.exists) {
             tx.update(delTaskRef, {
@@ -1632,14 +2067,27 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               deliveryDate,
               deliveryTime,
               acceptedAt: admin.firestore.FieldValue.delete(),
+              customerName: order.customerName || order.userName || delTaskSnap.data().customerName || '',
+              customerPhone: order.customerPhone || order.userPhone || delTaskSnap.data().customerPhone || '',
+              deliveryAddress: pickupAddressFromOrder(order) || delTaskSnap.data().deliveryAddress || '',
+              totalAmount: total || delTaskSnap.data().totalAmount || 0,
+              items: (order && order.items) || delTaskSnap.data().items || [],
+              tokenNumber: order.tokenNumber || delTaskSnap.data().tokenNumber || null,
+              tokens: order.tokens || delTaskSnap.data().tokens || null,
             });
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
               assignee: riderId, deliveryAddress: pickupAddressFromOrder(order),
               deliveryDate, deliveryTime,
-              deliveryOTP: order.deliveryOTP || null, customerName: order.customerName || order.userName || '',
-              customerPhone: order.customerPhone || order.userPhone || '', assignedAt: now, createdAt: now
+              deliveryOTP: order.deliveryOTP || null,
+              customerName: order.customerName || order.userName || '',
+              customerPhone: order.customerPhone || order.userPhone || '',
+              totalAmount: total,
+              items: (order && order.items) || [],
+              tokenNumber: order.tokenNumber || null,
+              tokens: order.tokens || null,
+              assignedAt: now, createdAt: now,
             });
           }
           return { ok: true, status: 'out_for_delivery' };
@@ -1649,6 +2097,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             return { ok: false, error: 'invalid_state' };
           }
           
+          tx.update(orderRef, { riderId: riderId, updatedAt: now });
+          tx.set(vendorRef, { riderId: riderId, updatedAt: now }, { merge: true });
+
           if (taskSnap.exists) {
             tx.update(db.doc(`ops_tasks/${orderId}`), {
               assignee: riderId,
@@ -1691,6 +2142,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (order.status !== 'placed' && order.status !== 'confirmed') {
           return { ok: false, error: 'invalid_state' };
         }
+        tx.update(orderRef, { riderId: admin.firestore.FieldValue.delete(), updatedAt: now });
+        tx.set(vendorRef, { riderId: admin.firestore.FieldValue.delete(), updatedAt: now }, { merge: true });
+
         // Move the pickup out of a rider's queue and park it for later assignment.
         if (taskSnap.exists) {
           tx.delete(db.doc(`ops_tasks/${orderId}`));
@@ -1706,6 +2160,33 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           });
         }
         return { ok: true, status: 'parked' };
+      }
+
+      if (action === 'unassignDelivery') {
+        if (order.status !== 'ready' && order.status !== 'out_for_delivery') {
+          return { ok: false, error: 'invalid_state' };
+        }
+        // Move the delivery out of the rider's queue and return order to 'ready'
+        const updateData = {
+          status: 'ready',
+          updatedAt: now,
+          outForDeliveryAt: admin.firestore.FieldValue.delete(),
+          deliveryRiderId: admin.firestore.FieldValue.delete(),
+          riderId: admin.firestore.FieldValue.delete(),
+        };
+        tx.update(orderRef, updateData);
+        tx.set(vendorRef, updateData, { merge: true });
+
+        if (delTaskSnap.exists) {
+          tx.update(delTaskRef, {
+            assignee: null,
+            status: 'pending',
+            assignedAt: admin.firestore.FieldValue.delete(),
+            acceptedAt: admin.firestore.FieldValue.delete(),
+            pickedUpAt: admin.firestore.FieldValue.delete(),
+          });
+        }
+        return { ok: true, status: 'unassigned' };
       }
 
       // ── Helper step assignment (mirror of rider assign/unassign, per process step) ──
@@ -1778,11 +2259,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
     // it requires a collection query by parentOrderId).
     if (result.ok && action === 'cancelOrder') {
       try {
-        const processDocs = await db.collection('ops_process')
-          .where('parentOrderId', '==', orderId).get();
-        const batch = db.batch();
-        processDocs.forEach((d) => batch.delete(d.ref));
-        if (!processDocs.empty) await batch.commit();
+        await deleteProcessDocs(orderId, order?.userId, order?.vendorId);
       } catch (err) {
         console.error(`supervisorActions: process cleanup failed for ${orderId}`, err);
       }
