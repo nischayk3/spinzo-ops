@@ -52,7 +52,13 @@ export function PickupsScreen() {
   const pending = myTasks.filter(t => {
     if (!isPending(t)) return false;
     const order = orders.find(o => o.id === t.orderId || o.id === t.id);
-    if (!order) return true;
+    if (!order) {
+      // Ignore orphaned tasks without customer name, address, or items
+      if (!t.customerName && !t.pickupAddress && (!t.items || t.items.length === 0)) {
+        return false;
+      }
+      return true;
+    }
     if (order.status === 'cancelled') return false;
     if (order.status !== 'placed' && order.status !== 'confirmed' && order.status !== 'in_transit_to_store') return false;
     return true;
