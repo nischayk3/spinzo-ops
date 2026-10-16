@@ -175,3 +175,73 @@ export async function triggerStageNudgeNotification(params: StageNudgeNotificati
   }
 }
 
+export interface ScheduleStageNudgeParams {
+  orderId: string;
+  processId: string;
+  step: 'getting_washed' | 'getting_dried';
+  phase: 'accepted' | 'started';
+  delaySeconds: number;
+  title: string;
+  message: string;
+}
+
+/**
+ * Schedule future background notification via Android OS AlarmManager / NotificationManager.
+ * This fires exactly at the delay even when app is closed or device is locked.
+ */
+export async function scheduleStageNudgeTimer(params: ScheduleStageNudgeParams): Promise<string | null> {
+  const identifier = `nudge_${params.processId}_${params.step}_${params.phase}`;
+  const short = params.orderId.slice(-6).toUpperCase();
+  const title = `⏰ ${params.title} #${short}`;
+  const body = `${params.message}\nTap to respond now.`;
+
+  try {
+    await Notifications.cancelScheduledNotificationAsync(identifier).catch(() => {});
+
+    await Notifications.scheduleNotificationAsync({
+      identifier,
+      content: {
+        title,
+        subtitle: `#${short}`,
+        body,
+        sound: 'alarm.wav',
+        priority: Notifications.AndroidNotificationPriority.MAX,
+        color: '#f59e0b',
+        data: {
+          type: 'stage_nudge',
+          orderId: params.orderId,
+          processId: params.processId,
+          step: params.step,
+          phase: params.phase,
+        },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        seconds: Math.max(1, Math.floor(params.delaySeconds)),
+      },
+    });
+    return identifier;
+  } catch (err) {
+    console.warn('[Notifications] Failed to schedule future stage nudge timer:', err);
+    return null;
+  }
+}
+
+/**
+ * Cancel any pending scheduled stage nudge notifications.
+ */
+export async function cancelStageNudgeTimer(processId: string, step?: string): Promise<void> {
+  try {
+    const phases = ['accepted', 'started'];
+    const steps = step ? [step] : ['getting_washed', 'getting_dried'];
+    for (const s of steps) {
+      for (const p of phases) {
+        await Notifications.cancelScheduledNotificationAsync(`nudge_${processId}_${s}_${p}`).catch(() => {});
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
+

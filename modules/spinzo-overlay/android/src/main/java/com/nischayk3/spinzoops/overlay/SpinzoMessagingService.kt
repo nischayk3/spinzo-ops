@@ -25,7 +25,7 @@ class SpinzoMessagingService : FirebaseMessagingService() {
 
         Log.d("SpinzoOverlay", "1. FCM received: type=$type, orderId=$orderId, data=$data")
 
-        if (type == "order_assignment") {
+        if (type == "order_assignment" || type == "stage_nudge") {
             val prefs = getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
             val onShift = prefs.getBoolean("on_shift", false)
             Log.d("SpinzoOverlay", "2. Helper on-shift: $onShift")

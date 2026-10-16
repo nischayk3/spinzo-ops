@@ -69,17 +69,30 @@ object SpinzoOverlayManager {
         val btnAccept = overlayView.findViewById<Button>(R.id.btnAccept)
         val btnClose = overlayView.findViewById<TextView>(R.id.btnClose)
 
-        if (isInstant) {
+        val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
+
+        if (isNudge) {
+            tvTitle.text = if (stepName.isNotEmpty()) "⏰ $stepName" else "⏰ Operations Check"
+            tvSubtitle.text = "#$shortId • Status Check"
+            btnAccept.text = "OPEN & RESPOND"
+        } else if (isInstant) {
             tvTitle.text = "⚡ Instant Pickup!"
+            tvSubtitle.text = "#$shortId • Instant Pickup"
+            btnAccept.text = "ACCEPT ORDER"
         } else if (isDelivery) {
             tvTitle.text = "📦 Delivery Assigned!"
+            tvSubtitle.text = "#$shortId • Delivery"
+            btnAccept.text = "ACCEPT ORDER"
         } else if (stepName.isNotEmpty()) {
             tvTitle.text = "⚙️ $stepName Assigned!"
+            tvSubtitle.text = "#$shortId • Process Stage"
+            btnAccept.text = "ACCEPT ORDER"
         } else {
             tvTitle.text = "📦 Order Assigned!"
+            tvSubtitle.text = "#$shortId • Pickup"
+            btnAccept.text = "ACCEPT ORDER"
         }
 
-        tvSubtitle.text = "#$shortId • ${if (isDelivery) "Delivery" else "Pickup"}"
         tvAddress.text = address
         if (slot.isNotEmpty()) {
             tvSlot.visibility = View.VISIBLE
@@ -231,6 +244,10 @@ object SpinzoOverlayManager {
 
         val orderId = data["orderId"] ?: ""
         val shortId = if (orderId.length >= 6) orderId.takeLast(6).uppercase() else orderId.uppercase()
+        val isNudge = (data["taskType"] ?: "").equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
+        val notifTitle = if (isNudge) "⏰ Status Check: #$shortId" else "New Order Assigned: #$shortId"
+        val notifBody = data["address"] ?: (if (isNudge) "Tap to open and respond" else "Tap to accept order")
+
         val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("acceptedOrderId", orderId)
@@ -244,8 +261,8 @@ object SpinzoOverlayManager {
 
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle("New Order Assigned: #$shortId")
-            .setContentText(data["address"] ?: "Tap to accept order")
+            .setContentTitle(notifTitle)
+            .setContentText(notifBody)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setFullScreenIntent(pendingIntent, true)
