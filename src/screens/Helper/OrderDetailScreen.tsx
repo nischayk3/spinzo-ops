@@ -612,16 +612,21 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           onPress: async () => {
             setBusy(true);
             try {
-              const res = await useOpsProcessStore.getState().unassignDelivery(orderId, order?.userId || '');
+              const targetUserId = order?.userId || orderProcesses[0]?.userId || '';
+              const res = await useOpsProcessStore.getState().unassignDelivery(orderId, targetUserId);
               setBusy(false);
               if (!res.ok) {
-                setActionError(friendlyActionError(res.error || 'unknown'));
+                const msg = friendlyActionError(res.error || 'unknown');
+                setActionError(msg);
+                Alert.alert('Unassign Failed', msg);
               } else {
                 Alert.alert('Success', 'Order unassigned and returned to ready state.');
               }
             } catch (e: any) {
               setBusy(false);
-              setActionError(friendlyActionError(e?.message || 'request_failed'));
+              const msg = friendlyActionError(e?.message || 'request_failed');
+              setActionError(msg);
+              Alert.alert('Unassign Failed', msg);
             }
           },
         },
@@ -1119,71 +1124,85 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       );
     }
 
-    if (done) {
+    // Handle out_for_delivery state directly (independent of process existence)
+    if (order?.status === 'out_for_delivery') {
       if (isSupervisor) {
-        if (order?.status === 'ready') {
-          return null; // Handled above
-        } else if (order?.status === 'out_for_delivery') {
-          return (
-            <View className="bg-white rounded-xl p-5 mb-4 border border-gray-200">
-              <View className="flex-row items-center justify-between mb-2">
-                <Text className="text-gray-900 font-bold text-base">Out for Delivery</Text>
-                <View className="bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-full">
-                  <Text className="text-blue-700 text-xs font-bold">Rider Dispatched</Text>
-                </View>
-              </View>
-              
-              <Text className="text-gray-500 text-xs mb-3">
-                Order is currently out for delivery. You can reassign to another rider or unassign and return order to ready status.
-              </Text>
-
-              <View className="flex-row gap-2 mb-4">
-                <TouchableOpacity
-                  onPress={() => setShowAssignRiderModal(true)}
-                  disabled={busy}
-                  className="flex-1 h-11 rounded-xl items-center justify-center bg-blue-50 border border-blue-200"
-                >
-                  <Text className="font-bold text-xs text-blue-700">Reassign Rider</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={handleUnassignDelivery}
-                  disabled={busy}
-                  className="flex-1 h-11 rounded-xl items-center justify-center bg-amber-50 border border-amber-200"
-                >
-                  <Text className="font-bold text-xs text-amber-700">Unassign / Return</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View className="border-t border-gray-100 pt-3">
-                <Text className="text-gray-900 font-bold mb-2 text-sm">Verify Delivery OTP</Text>
-                <TextInput
-                  value={otp}
-                  onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
-                  keyboardType="number-pad"
-                  maxLength={4}
-                  placeholder="••••"
-                  placeholderTextColor="#94a3b8"
-                  className="bg-gray-50 border border-gray-200 rounded-xl h-14 px-4 text-center text-xl tracking-[0.5em] text-gray-900 font-bold mb-4"
-                />
-                <TouchableOpacity
-                  onPress={handleVerifyDeliveryOTP}
-                  disabled={busy || otp.length !== 4}
-                  className={`h-14 rounded-xl items-center justify-center flex-row ${busy || otp.length !== 4 ? 'bg-gray-200' : 'bg-green-500'}`}
-                >
-                  {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Verify Delivery</Text>}
-                </TouchableOpacity>
+        return (
+          <View className="bg-white rounded-xl p-5 mb-4 border border-gray-200">
+            <View className="flex-row items-center justify-between mb-2">
+              <Text className="text-gray-900 font-bold text-base">Out for Delivery</Text>
+              <View className="bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-full">
+                <Text className="text-blue-700 text-xs font-bold">Rider Dispatched</Text>
               </View>
             </View>
-          );
-        } else if (order?.status === 'delivered') {
-          return (
-            <View className="bg-green-50 rounded-xl p-5 mb-4 border border-green-200 items-center">
-              <Text className="text-green-700 font-bold text-lg">Order Delivered</Text>
+            
+            <Text className="text-gray-500 text-xs mb-3">
+              Order is currently out for delivery. You can reassign to another rider or unassign and return order to ready status.
+            </Text>
+
+            <View className="flex-row gap-2 mb-4">
+              <TouchableOpacity
+                onPress={() => setShowAssignRiderModal(true)}
+                disabled={busy}
+                className="flex-1 h-11 rounded-xl items-center justify-center bg-blue-50 border border-blue-200"
+              >
+                <Text className="font-bold text-xs text-blue-700">Reassign Rider</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={handleUnassignDelivery}
+                disabled={busy}
+                className="flex-1 h-11 rounded-xl items-center justify-center bg-amber-50 border border-amber-200"
+              >
+                <Text className="font-bold text-xs text-amber-700">Unassign / Return</Text>
+              </TouchableOpacity>
             </View>
-          );
-        }
+
+            <View className="border-t border-gray-100 pt-3">
+              <Text className="text-gray-900 font-bold mb-2 text-sm">Verify Delivery OTP</Text>
+              <TextInput
+                value={otp}
+                onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
+                keyboardType="number-pad"
+                maxLength={4}
+                placeholder="••••"
+                placeholderTextColor="#94a3b8"
+                className="bg-gray-50 border border-gray-200 rounded-xl h-14 px-4 text-center text-xl tracking-[0.5em] text-gray-900 font-bold mb-4"
+              />
+              <TouchableOpacity
+                onPress={handleVerifyDeliveryOTP}
+                disabled={busy || otp.length !== 4}
+                className={`h-14 rounded-xl items-center justify-center flex-row ${busy || otp.length !== 4 ? 'bg-gray-200' : 'bg-green-500'}`}
+              >
+                {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Verify Delivery</Text>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        );
       }
+      return (
+        <View className="bg-blue-50 rounded-xl p-5 mb-4 border border-blue-200 items-center">
+          <Text className="text-blue-700 font-bold text-lg">Out for Delivery</Text>
+        </View>
+      );
+    }
 
+    if (order?.status === 'delivered') {
+      return (
+        <View className="bg-green-50 rounded-xl p-5 mb-4 border border-green-200 items-center">
+          <Text className="text-green-700 font-bold text-lg">Order Delivered</Text>
+        </View>
+      );
+    }
+
+    if (order?.status === 'ready' && !isSupervisor) {
+      return (
+        <View className="bg-green-50 rounded-xl p-5 mb-4 border border-green-200 items-center">
+          <Text className="text-green-700 font-bold text-lg">Order Ready for Delivery</Text>
+        </View>
+      );
+    }
+
+    if (done) {
       return (
         <View className="bg-green-50 rounded-xl p-5 mb-4 border border-green-200 items-center">
           <Text className="text-green-700 font-bold text-lg">Order Processing Complete</Text>

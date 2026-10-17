@@ -2029,17 +2029,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (request) => {
   const auth = request.auth;
   if (!auth) return { ok: false, error: 'unauthorized' };
-  const phone = normalizePhone(auth.token && auth.token.phone_number);
-  if (!phone) return { ok: false, error: 'unauthorized' };
+  let phone = normalizePhone(auth.token && auth.token.phone_number);
+  let role = null;
+
+  const staffDoc = await db.doc(`ops_staff/${auth.uid}`).get();
+  if (staffDoc.exists) {
+    const sd = staffDoc.data();
+    if (sd.role) role = sd.role;
+    if (!phone && sd.phone) phone = normalizePhone(sd.phone);
+  }
 
   const rosterSnap = await db.doc('config/opsStaff').get();
   const rosterPhones = rosterSnap.exists && rosterSnap.data().phones ? rosterSnap.data().phones : {};
-  let role = rosterPhones[phone];
-  if (!role) {
-    const staffDoc = await db.doc(`ops_staff/${auth.uid}`).get();
-    if (staffDoc.exists) {
-      role = staffDoc.data().role;
-    }
+  if (phone && rosterPhones[phone]) {
+    role = rosterPhones[phone];
   }
 
   const data = request.data || {};
@@ -2567,7 +2570,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
     // it requires a collection query by parentOrderId).
     if (result.ok && action === 'cancelOrder') {
       try {
-        await deleteProcessDocs(orderId, order?.userId, order?.vendorId);
+        await deleteProcessDocs(orderId, userId, reqVendorId || 'default');
       } catch (err) {
         console.error(`supervisorActions: process cleanup failed for ${orderId}`, err);
       }
