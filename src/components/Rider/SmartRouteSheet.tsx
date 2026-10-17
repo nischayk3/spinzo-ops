@@ -4,7 +4,7 @@ import { Navigation, Bike, Package, Zap, ChevronRight, Phone, MapPin, X, CheckCi
 import { buildSmartRoute, SmartRouteStop, safeShortId } from '../../utils/smartRoute';
 import { DeliveryTask } from '../../store/opsStaffStore';
 import { OpsTask } from '../../utils/opsTasks';
-import { FeedOrder } from '../../utils/orderFeed';
+import { FeedOrder, formatDisplayPhone } from '../../utils/orderFeed';
 import { SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from '../../utils/storeGeo';
 
 interface SmartRouteSheetProps {
@@ -239,10 +239,10 @@ export function SmartRouteSheet({
                       {stop.customerPhone && (
                         <TouchableOpacity
                           onPress={() => callCustomer(stop.customerPhone)}
-                          className="bg-emerald-600 active:bg-emerald-700 py-2.5 px-4 rounded-xl flex-row items-center justify-center gap-1.5 shadow-sm"
+                          className="bg-emerald-600 active:bg-emerald-700 py-2.5 px-3 rounded-xl flex-row items-center justify-center gap-1.5 shadow-sm"
                         >
                           <Phone size={13} color="#FFFFFF" />
-                          <Text className="text-white text-xs font-black">Call</Text>
+                          <Text className="text-white text-xs font-black">{formatDisplayPhone(stop.customerPhone)}</Text>
                         </TouchableOpacity>
                       )}
 

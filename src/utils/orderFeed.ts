@@ -488,3 +488,29 @@ export function matchOrderSearch(o: FeedOrder, query: string): boolean {
 
   return false;
 }
+
+/**
+ * Formats a phone number for quick readability by delivery riders.
+ * Indian 10-digit mobile numbers are formatted as `XXXXX XXXXX` (e.g. `98765 43210`),
+ * ensuring the last 4 digits are distinct and easy to read at apartment gates / intercoms.
+ */
+export function formatDisplayPhone(phone?: string | null): string {
+  if (!phone) return '';
+  const trimmed = String(phone).trim();
+  const digits = trimmed.replace(/\D/g, '');
+
+  if (digits.length === 10) {
+    return `${digits.slice(0, 5)} ${digits.slice(5)}`;
+  }
+  if (digits.length === 12 && digits.startsWith('91')) {
+    const main = digits.slice(2);
+    return `${main.slice(0, 5)} ${main.slice(5)}`;
+  }
+  if (digits.length === 11 && digits.startsWith('0')) {
+    const main = digits.slice(1);
+    return `${main.slice(0, 5)} ${main.slice(5)}`;
+  }
+
+  return trimmed;
+}
+

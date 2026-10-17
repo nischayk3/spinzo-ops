@@ -13,6 +13,7 @@ import {
   formatOrderItems,
   parseOrderTokens,
   matchOrderSearch,
+  formatDisplayPhone,
   FeedOrder,
 } from '../orderFeed';
 
@@ -342,4 +343,34 @@ describe('matchOrderSearch', () => {
     expect(matchOrderSearch(sampleOrder, 'Priya')).toBe(false);
     expect(matchOrderSearch(sampleOrder, '#99')).toBe(false);
   });
+
+  describe('formatDisplayPhone', () => {
+    it('returns empty string for null or undefined or empty', () => {
+      expect(formatDisplayPhone(null)).toBe('');
+      expect(formatDisplayPhone(undefined)).toBe('');
+      expect(formatDisplayPhone('')).toBe('');
+      expect(formatDisplayPhone('   ')).toBe('');
+    });
+
+    it('formats standard 10-digit Indian phone with 5-5 split for easy last 4 digit verification', () => {
+      expect(formatDisplayPhone('9876543210')).toBe('98765 43210');
+      expect(formatDisplayPhone('8376821934')).toBe('83768 21934');
+    });
+
+    it('strips +91 prefix and formats 10-digit number for riders', () => {
+      expect(formatDisplayPhone('+919876543210')).toBe('98765 43210');
+      expect(formatDisplayPhone('+91 83768 21934')).toBe('83768 21934');
+      expect(formatDisplayPhone('918376821934')).toBe('83768 21934');
+    });
+
+    it('strips leading 0 if present', () => {
+      expect(formatDisplayPhone('09876543210')).toBe('98765 43210');
+    });
+
+    it('falls back to trimmed string for unusual numbers', () => {
+      expect(formatDisplayPhone('12345')).toBe('12345');
+      expect(formatDisplayPhone('+1-555-0192')).toBe('+1-555-0192');
+    });
+  });
 });
+

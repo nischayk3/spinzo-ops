@@ -14,7 +14,7 @@ import {
   CheckCircle2,
   Store,
 } from 'lucide-react-native';
-import { timeAgo, formatItemSummary, parseOrderTokens } from '../../utils/orderFeed';
+import { timeAgo, formatItemSummary, parseOrderTokens, formatDisplayPhone } from '../../utils/orderFeed';
 import { SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from '../../utils/storeGeo';
 
 export interface RiderTaskCardProps {
@@ -191,6 +191,10 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
               <Text className="text-slate-950 font-black text-base" numberOfLines={1}>
                 {p.customerName}
               </Text>
+            ) : p.customerPhone ? (
+              <Text className="text-slate-950 font-black text-base" numberOfLines={1}>
+                {formatDisplayPhone(p.customerPhone)}
+              </Text>
             ) : null}
           </View>
         </View>
@@ -339,10 +343,13 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
               e?.stopPropagation?.();
               Linking.openURL(`tel:${p.customerPhone}`);
             }}
-            className="flex-1 h-11 bg-emerald-50 active:bg-emerald-100 border-2 border-emerald-500 rounded-xl flex-row items-center justify-center shadow-xs"
+            accessibilityLabel={`Call ${p.customerPhone}`}
+            className="flex-1 h-11 bg-emerald-50 active:bg-emerald-100 border-2 border-emerald-500 rounded-xl flex-row items-center justify-center shadow-xs px-2"
           >
-            <Phone size={15} color="#047857" className="mr-1.5" />
-            <Text className="text-emerald-950 font-black text-xs">Call Customer</Text>
+            <Phone size={14} color="#047857" className="mr-1.5 shrink-0" />
+            <Text className="text-emerald-950 font-black text-xs tracking-wider" numberOfLines={1}>
+              {formatDisplayPhone(p.customerPhone)}
+            </Text>
           </Pressable>
         ) : null}
 
@@ -352,10 +359,10 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
               e?.stopPropagation?.();
               openDirections(targetAddress, targetLat, targetLng);
             }}
-            className="flex-1 h-11 bg-blue-600 active:bg-blue-700 rounded-xl flex-row items-center justify-center shadow-xs"
+            className="flex-1 h-11 bg-blue-600 active:bg-blue-700 rounded-xl flex-row items-center justify-center shadow-xs px-2"
           >
-            <Navigation size={14} color="#FFFFFF" className="mr-1.5" />
-            <Text className="text-white font-black text-xs">Directions</Text>
+            <Navigation size={14} color="#FFFFFF" className="mr-1.5 shrink-0" />
+            <Text className="text-white font-black text-xs" numberOfLines={1}>Directions</Text>
           </Pressable>
         ) : null}
       </View>
