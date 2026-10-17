@@ -265,12 +265,18 @@ function SupervisorFeed() {
     const startMs = curStage?.startedAt ? (typeof (curStage.startedAt as any).toMillis === 'function' ? (curStage.startedAt as any).toMillis() : new Date((curStage.startedAt as any) || Date.now()).getTime()) : 0;
     const isCycleDone = isMachine && !!curStage?.startedAt && startMs > 0 && (Date.now() - startMs) >= 1800000; // >= 30 mins
 
+    const isAcceptedWaitingStart = isMachine && !!curStage?.acceptedAt && !curStage?.startedAt;
+    const acceptMs = curStage?.acceptedAt ? (typeof (curStage.acceptedAt as any).toMillis === 'function' ? (curStage.acceptedAt as any).toMillis() : new Date((curStage.acceptedAt as any) || Date.now()).getTime()) : 0;
+    const elapsedAcceptMin = acceptMs > 0 ? Math.floor((Date.now() - acceptMs) / 60000) : 0;
+    const isOverdueAccepted = isAcceptedWaitingStart && elapsedAcceptMin >= 2;
+
     const sla = cur && curStage?.startedAt ? STAGE_SLA_MINUTES[cur] : undefined;
     const remaining = sla != null ? slaRemainingMinutes(curStage?.startedAt, sla) : undefined;
     const tone = sla != null && remaining != null ? slaTone(remaining, sla, done) : 'muted';
     const badge = p ? (
       done ? 'Complete' :
       isCycleDone ? 'Ready to Unload' :
+      isOverdueAccepted ? `⚠️ Not Started (${elapsedAcceptMin}m)` :
       (isMachine && !curStage?.startedAt) ? 'Queued' :
       stepLabel(cur || '')
     ) : 'Ready to tag';
@@ -335,12 +341,14 @@ function SupervisorFeed() {
             <View className={`px-2 py-1 rounded-md ${
               done ? 'bg-green-500/15' :
               isCycleDone ? 'bg-emerald-500/20 border border-emerald-500/40' :
+              isOverdueAccepted ? 'bg-rose-500/20 border border-rose-500/50' :
               (isMachine && !curStage?.startedAt) ? 'bg-amber-500/15 border border-amber-500/30' :
               'bg-primary/10'
             }`}>
               <Text className={`text-xs font-bold ${
                 done ? 'text-green-700' :
                 isCycleDone ? 'text-emerald-700' :
+                isOverdueAccepted ? 'text-rose-700' :
                 (isMachine && !curStage?.startedAt) ? 'text-amber-800' :
                 'text-primary'
               }`}>{badge}</Text>
@@ -377,12 +385,36 @@ function SupervisorFeed() {
             </View>
 
             {/* Assigned Helper Chip / Alert */}
-            {curStage?.assignee ? (
-              <TouchableOpacity
-                disabled={role !== 'supervisor' && role !== 'admin'}
-                onPress={(e) => {
-                  e?.stopPropagation?.();
-                  if (p) {
+            {/* Assigned Helper Chip / Alert & Machine Chip */}
+            <View className="flex-row items-center flex-wrap">
+              {curStage?.assignee ? (
+                <TouchableOpacity
+                  disabled={role !== 'supervisor' && role !== 'admin'}
+                  onPress={(e) => {
+                    e?.stopPropagation?.();
+                    if (p) {
+                      setAssignModalData({
+                        visible: true,
+                        processId: p.id,
+                        stepName: cur ? stepLabel(cur) : undefined,
+                        orderId: item.orderId,
+                        userId: order?.userId || '',
+                      });
+                    }
+                  }}
+                  className="flex-row items-center bg-[#994bff]/10 px-2.5 py-1 rounded-full self-start mt-2 border border-[#994bff]/25 active:opacity-70"
+                >
+                  <User size={12} color="#994bff" className="mr-1.5" />
+                  <Text className="text-[#994bff] font-bold text-xs">
+                    Assigned: {curStage.assigneeName ? (curStage.assigneeName.charAt(0).toUpperCase() + curStage.assigneeName.slice(1)) : 'Staff'}
+                    {(role === 'supervisor' || role === 'admin') ? ' • Reassign' : ''}
+                  </Text>
+                </TouchableOpacity>
+              ) : p ? (
+                <TouchableOpacity
+                  disabled={role !== 'supervisor' && role !== 'admin'}
+                  onPress={(e) => {
+                    e?.stopPropagation?.();
                     setAssignModalData({
                       visible: true,
                       processId: p.id,
@@ -390,57 +422,44 @@ function SupervisorFeed() {
                       orderId: item.orderId,
                       userId: order?.userId || '',
                     });
-                  }
-                }}
-                className="flex-row items-center bg-[#994bff]/10 px-2.5 py-1 rounded-full self-start mt-2 border border-[#994bff]/25 active:opacity-70"
-              >
-                <User size={12} color="#994bff" className="mr-1.5" />
-                <Text className="text-[#994bff] font-bold text-xs">
-                  Assigned: {curStage.assigneeName ? (curStage.assigneeName.charAt(0).toUpperCase() + curStage.assigneeName.slice(1)) : 'Staff'}
-                  {(role === 'supervisor' || role === 'admin') ? ' • Reassign' : ''}
-                </Text>
-              </TouchableOpacity>
-            ) : p ? (
-              <TouchableOpacity
-                disabled={role !== 'supervisor' && role !== 'admin'}
-                onPress={(e) => {
-                  e?.stopPropagation?.();
-                  setAssignModalData({
-                    visible: true,
-                    processId: p.id,
-                    stepName: cur ? stepLabel(cur) : undefined,
-                    orderId: item.orderId,
-                    userId: order?.userId || '',
-                  });
-                }}
-                className="flex-row items-center bg-amber-500/15 px-2.5 py-1 rounded-full self-start mt-2 border border-amber-500/30 active:opacity-70"
-              >
-                <AlertTriangle size={12} color="#d97706" className="mr-1.5" />
-                <Text className="text-amber-800 font-bold text-xs">
-                  ⚠️ Unassigned {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
-                </Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                disabled={role !== 'supervisor' && role !== 'admin'}
-                onPress={(e) => {
-                  e?.stopPropagation?.();
-                  setAssignModalData({
-                    visible: true,
-                    processId: item.orderId,
-                    stepName: 'Tagging',
-                    orderId: item.orderId,
-                    userId: order?.userId || '',
-                  });
-                }}
-                className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full self-start mt-2 border border-purple-200 active:opacity-70"
-              >
-                <AlertTriangle size={12} color="#994bff" className="mr-1.5" />
-                <Text className="text-[#994bff] font-bold text-xs">
-                  New Inbound • Ready for Tagging {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
-                </Text>
-              </TouchableOpacity>
-            )}
+                  }}
+                  className="flex-row items-center bg-amber-500/15 px-2.5 py-1 rounded-full self-start mt-2 border border-amber-500/30 active:opacity-70"
+                >
+                  <AlertTriangle size={12} color="#d97706" className="mr-1.5" />
+                  <Text className="text-amber-800 font-bold text-xs">
+                    ⚠️ Unassigned {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  disabled={role !== 'supervisor' && role !== 'admin'}
+                  onPress={(e) => {
+                    e?.stopPropagation?.();
+                    setAssignModalData({
+                      visible: true,
+                      processId: item.orderId,
+                      stepName: 'Tagging',
+                      orderId: item.orderId,
+                      userId: order?.userId || '',
+                    });
+                  }}
+                  className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full self-start mt-2 border border-purple-200 active:opacity-70"
+                >
+                  <AlertTriangle size={12} color="#994bff" className="mr-1.5" />
+                  <Text className="text-[#994bff] font-bold text-xs">
+                    New Inbound • Ready for Tagging {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
+                  </Text>
+                </TouchableOpacity>
+              )}
+              {!!curStage?.machineName && (
+                <View className="flex-row items-center bg-teal-500/10 px-2.5 py-1 rounded-full self-start mt-2 ml-2 border border-teal-500/30">
+                  <Text className="text-teal-700 font-bold text-xs">
+                    {curStage.machineName.includes('Washer') ? '🫧 ' : curStage.machineName.includes('Dryer') ? '💨 ' : '👔 '}
+                    {curStage.machineName}
+                  </Text>
+                </View>
+              )}
+            </View>
           </View>
           <View className="items-end">
             <Text className="text-textPrimary font-medium">{p ? p.serviceLabel : (order ? serviceSummary(order) : '—')}</Text>

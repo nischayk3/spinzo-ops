@@ -274,12 +274,173 @@ function checkPaymentGate(order, options = {}) {
  * 2. Abdur (+917559105832)
  * No ironing orders to new helper!
  */
-const IRONING_PRIORITY_PHONES = ['+916369768237', '+917559105832'];
+const ABDUL_PHONE = '+916900311761';
+const SAMSUL_PHONE = '+916369768237';
+const ABDUR_PHONE = '+917559105832';
+
+const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE];
 
 function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
   if (!phone) return false;
   const p = normalizePhone(phone);
   return allowedList.map(normalizePhone).includes(p);
+}
+
+/**
+ * Check if a helper is currently hands-on busy.
+ * A helper is hands-on busy if:
+ * 1. They are doing tagging, ironing, packaging, or
+ * 2. They have accepted washing/drying but haven't started it yet (startedAt is null).
+ * Once a washer or dryer cycle is started, the helper is FREE.
+ */
+function isHelperHandsOnBusy(helperUid, liveProcesses) {
+  if (!liveProcesses || liveProcesses.length === 0) return false;
+  return liveProcesses.some(p => {
+    const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+    if (!cur || p.status === 'done' || p.status === 'cancelled') return false;
+    const stage = p.stages && p.stages[cur];
+    if (!stage || stage.assignee !== helperUid || stage.completedAt) return false;
+
+    // If machine step and already started, helper is FREE for other tasks
+    if ((cur === 'getting_washed' || cur === 'getting_dried') && stage.startedAt) {
+      return false;
+    }
+    // Any other assigned, uncompleted stage (including loading a machine) is hands-on busy
+    return true;
+  });
+}
+
+function getRunningMachines(step, liveProcesses) {
+  if (!liveProcesses || liveProcesses.length === 0) return [];
+  return liveProcesses.filter(p => {
+    const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+    if (cur !== step) return false;
+    const stage = p.stages && p.stages[cur];
+    return !!stage?.startedAt && !stage?.completedAt;
+  });
+}
+
+function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
+  const prefix = step === 'getting_washed' ? 'Washer' : step === 'getting_dried' ? 'Dryer' : 'Iron Station';
+  const running = getRunningMachines(step, liveProcesses);
+  const usedNames = new Set(running.map(p => p.stages?.[step]?.machineName).filter(Boolean));
+
+  for (let i = 1; i <= totalCapacity; i++) {
+    const candidate = `${prefix} ${i}`;
+    if (!usedNames.has(candidate)) {
+      return candidate;
+    }
+  }
+  return `${prefix} 1`;
+}
+
+/**
+ * Deterministic helper selection for store operations stages:
+ * - Tagging: 1st Abdul, fallback Abdur or Samsul
+ * - Washing: Any free helper (requires available washer)
+ * - Drying: Any free helper / previousAssignee (requires available dryer)
+ * - Ironing: 1st Samsul (Station 1), 2nd Abdur (Station 2)
+ * - Packaging: 1st Abdul, fallback Abdur or Samsul
+ */
+function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}) {
+  const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
+  const helpers = (onShiftHelpers || []).filter(h => h && h.onShift === true);
+  if (helpers.length === 0) {
+    return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
+  }
+
+  const freeHelpers = helpers.filter(h => !isHelperHandsOnBusy(h.uid, liveProcesses));
+
+  const abdul = helpers.find(h => normalize(h.phone) === '6900311761');
+  const samsul = helpers.find(h => normalize(h.phone) === '6369768237');
+  const abdur = helpers.find(h => normalize(h.phone) === '7559105832');
+
+  const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
+  const freeSamsul = freeHelpers.find(h => normalize(h.phone) === '6369768237');
+  const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
+
+  // 1. TAGGING
+  if (stage === 'tagging') {
+    if (freeAbdul) return { ok: true, helper: freeAbdul };
+    if (freeAbdur) return { ok: true, helper: freeAbdur };
+    if (freeSamsul) return { ok: true, helper: freeSamsul };
+    if (freeHelpers.length > 0) return { ok: true, helper: freeHelpers[0] };
+    return { ok: true, helper: abdul || abdur || samsul || helpers[0] };
+  }
+
+  // 2. WASHING
+  if (stage === 'getting_washed') {
+    const maxWashers = resources.washers || 2;
+    const runningWashers = getRunningMachines('getting_washed', liveProcesses);
+    if (runningWashers.length >= maxWashers) {
+      return { ok: false, error: 'washers_at_capacity', shouldQueue: true };
+    }
+    const machineName = allocateMachineName('getting_washed', liveProcesses, maxWashers);
+    if (freeHelpers.length > 0) {
+      return { ok: true, helper: freeHelpers[0], machineName };
+    }
+    return { ok: false, error: 'helpers_busy', shouldQueue: true };
+  }
+
+  // 3. DRYING
+  if (stage === 'getting_dried') {
+    const maxDryers = resources.dryers || 2;
+    const runningDryers = getRunningMachines('getting_dried', liveProcesses);
+    if (runningDryers.length >= maxDryers) {
+      return { ok: false, error: 'dryers_at_capacity', shouldQueue: true };
+    }
+    const machineName = allocateMachineName('getting_dried', liveProcesses, maxDryers);
+    if (options.previousAssignee) {
+      const prev = freeHelpers.find(h => h.uid === options.previousAssignee);
+      if (prev) return { ok: true, helper: prev, machineName };
+    }
+    if (freeHelpers.length > 0) {
+      return { ok: true, helper: freeHelpers[0], machineName };
+    }
+    return { ok: false, error: 'helpers_busy', shouldQueue: true };
+  }
+
+  // 4. IRONING
+  if (stage === 'getting_ironed') {
+    const maxIrons = resources.ironingStations || 2;
+    const runningIrons = getRunningMachines('getting_ironed', liveProcesses);
+    if (runningIrons.length >= maxIrons) {
+      return { ok: false, error: 'iron_stations_at_capacity', shouldQueue: true };
+    }
+    const isSamsulIroning = runningIrons.some(p => {
+      const s = p.stages?.getting_ironed;
+      return s && (s.assignee === samsul?.uid || normalize(s.assigneePhone) === '6369768237');
+    });
+    const isAbdurIroning = runningIrons.some(p => {
+      const s = p.stages?.getting_ironed;
+      return s && (s.assignee === abdur?.uid || normalize(s.assigneePhone) === '7559105832');
+    });
+
+    if (samsul && !isSamsulIroning && freeSamsul) {
+      return { ok: true, helper: samsul, machineName: 'Iron Station 1' };
+    }
+    if (abdur && !isAbdurIroning && freeAbdur) {
+      return { ok: true, helper: abdur, machineName: 'Iron Station 2' };
+    }
+    if (samsul && !isSamsulIroning) {
+      return { ok: true, helper: samsul, machineName: 'Iron Station 1' };
+    }
+    if (abdur && !isAbdurIroning) {
+      return { ok: true, helper: abdur, machineName: 'Iron Station 2' };
+    }
+    return { ok: false, error: 'iron_specialists_busy', shouldQueue: true };
+  }
+
+  // 5. PACKAGING
+  if (stage === 'packaging') {
+    if (freeAbdul) return { ok: true, helper: freeAbdul };
+    if (freeAbdur) return { ok: true, helper: freeAbdur };
+    if (freeSamsul) return { ok: true, helper: freeSamsul };
+    if (freeHelpers.length > 0) return { ok: true, helper: freeHelpers[0] };
+    return { ok: true, helper: abdul || abdur || samsul || helpers[0] };
+  }
+
+  return { ok: false, error: 'unknown_stage', shouldQueue: true };
 }
 
 module.exports = {
@@ -299,6 +460,13 @@ module.exports = {
   stepsForServiceType,
   splitOrderIntoServices,
   SERVICE_LABELS,
+  ABDUL_PHONE,
+  SAMSUL_PHONE,
+  ABDUR_PHONE,
   IRONING_PRIORITY_PHONES,
   isIroningEligible,
+  isHelperHandsOnBusy,
+  getRunningMachines,
+  allocateMachineName,
+  selectHelperForStage,
 };

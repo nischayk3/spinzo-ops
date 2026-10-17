@@ -692,6 +692,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   }, [cur, processes, resources, orderId]);
 
   const machineBadge = useMemo(() => {
+    if (curStage?.machineName) return curStage.machineName;
     if (!cur || (cur !== 'getting_washed' && cur !== 'getting_dried')) return null;
     const isWash = cur === 'getting_washed';
     const names = isWash

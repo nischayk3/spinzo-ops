@@ -10,6 +10,7 @@ import { SpinzoOverlay } from 'spinzo-overlay';
 
 export function StageNudgeModal() {
   const user = useAuthStore(s => s.user);
+  const activeRole = useAuthStore(s => s.activeRole);
   const { processes, snoozeNudge, startStep, completeStep } = useOpsProcessStore();
   const [activeNudge, setActiveNudge] = useState<ActiveStageNudge | null>(null);
   const [busy, setBusy] = useState(false);
@@ -23,14 +24,14 @@ export function StageNudgeModal() {
     }
 
     const check = () => {
-      const nudge = getActiveStageNudge(processes, user.id);
+      const nudge = getActiveStageNudge(processes, user.id, Date.now(), activeRole || undefined);
       setActiveNudge(nudge);
     };
 
     check();
     const interval = setInterval(check, 10000);
     return () => clearInterval(interval);
-  }, [processes, user?.id]);
+  }, [processes, user?.id, activeRole]);
 
   // Alert triggers: Alarm sound + system heads-up notification + Android over-the-app overlay
   useEffect(() => {

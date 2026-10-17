@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -215,40 +215,13 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const wentOnShift = before && before.onShift !== true && after.onShift === true;
   if (!wentOnShift) return;
 
-  // Helper went on shift: auto-assign oldest unassigned tagging task to this helper
+  // Helper went on shift: drain all waiting stage queues
   if (after.role === 'helper') {
     const helperUid = event.params.staffId;
     const helperName = after.name || '';
     try {
-      const unassignedSnap = await db.collection('ops_process')
-        .where('status', '==', 'tagging')
-        .where('stages.tagging.assignee', '==', null)
-        .orderBy('createdAt', 'asc')
-        .limit(1)
-        .get();
-
-      if (!unassignedSnap.empty) {
-        const pDoc = unassignedSnap.docs[0];
-        const p = pDoc.data();
-        const now = TS();
-        await pDoc.ref.update({
-          'stages.tagging.assignee': helperUid,
-          'stages.tagging.assigneeName': helperName,
-          'stages.tagging.assignedAt': now,
-          'stages.tagging.assignedBy': 'system_catchup',
-        });
-        await db.doc(`ops_staff/${helperUid}`).update({
-          activeHelperTask: { orderId: p.orderId, step: 'tagging' }
-        });
-        await sendFCMOrderAssignment({
-          staffId: helperUid,
-          orderId: p.orderId,
-          taskType: 'step',
-          customerName: p.customerName || '',
-          stepName: 'tagging',
-        });
-        console.log(`[onShiftCatchUp] Assigned unassigned tagging task ${p.orderId} to newly on-shift helper ${helperName}`);
-      }
+      await drainWaitingOpsQueues();
+      console.log(`[onShiftCatchUp] Drained waiting ops queues for newly on-shift helper ${helperName}`);
     } catch (hErr) {
       console.error(`[onShiftCatchUp] Failed for helper ${helperUid}:`, hErr);
     }
@@ -350,6 +323,37 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
     } catch (err) {
       console.error(`catch-up failed for ${orderId}`, err);
     }
+  }
+
+  // Also catch up any pending unassigned outbound delivery tasks
+  try {
+    const pendingDelSnap = await db.collection('ops_delivery_tasks')
+      .where('status', '==', 'pending')
+      .limit(20)
+      .get();
+
+    for (const delDoc of pendingDelSnap.docs) {
+      const delData = delDoc.data();
+      if (!delData.assignee) {
+        await delDoc.ref.update({
+          assignee: newRiderUid,
+          status: 'assigned',
+          assignedAt: TS(),
+        });
+        await sendFCMOrderAssignment({
+          staffId: newRiderUid,
+          orderId: delDoc.id,
+          taskType: 'delivery',
+          customerName: delData.customerName || '',
+          address: delData.deliveryAddress || '',
+          slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim(),
+          isInstant: false,
+        });
+        console.log(`[onShiftCatchUp] Assigned pending delivery ${delDoc.id} to newly on-shift rider ${newRiderUid}`);
+      }
+    }
+  } catch (delErr) {
+    console.error('[onShiftCatchUp] Failed assigning pending deliveries:', delErr);
   }
 });
 
@@ -933,6 +937,142 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
   }
 }
 
+/**
+ * Auto-assign an ops_process stage to an eligible on-shift helper based on store preferences.
+ * - Tagging: Abdul (Primary) -> Abdur / Samsul fallback
+ * - Washing: Any free helper (requires available washer) + sets machineName ('Washer 1' / 'Washer 2')
+ * - Drying: Any free helper / previousAssignee (requires available dryer) + sets machineName ('Dryer 1' / 'Dryer 2')
+ * - Ironing: Samsul (Station 1) -> Abdur (Station 2) parallel
+ * - Packaging: Abdul (Primary) -> Abdur / Samsul fallback
+ */
+async function autoAssignStage(processId, targetStage, options = {}) {
+  try {
+    if (!processId || !targetStage || targetStage === 'done') return { ok: false };
+
+    const procRef = db.doc(`ops_process/${processId}`);
+    const procSnap = await procRef.get();
+    if (!procSnap.exists) return { ok: false, error: 'process_not_found' };
+    const pData = procSnap.data();
+
+    // If stage already has an assignee, do not overwrite
+    if (pData.stages?.[targetStage]?.assignee) {
+      return { ok: true, alreadyAssigned: true, assignee: pData.stages[targetStage].assignee };
+    }
+
+    // 1. Fetch store resources
+    const resSnap = await db.doc('config/storeResources').get();
+    const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
+
+    // 2. Fetch on-shift helpers
+    const staffSnap = await db.collection('ops_staff')
+      .where('onShift', '==', true)
+      .where('role', '==', 'helper')
+      .get();
+    const onShiftHelpers = [];
+    staffSnap.forEach(d => onShiftHelpers.push({ uid: d.id, ...d.data() }));
+
+    if (onShiftHelpers.length === 0) {
+      console.log(`[AutoAssignStage] No helpers on shift for ${processId} (${targetStage})`);
+      return { ok: false, error: 'no_helpers_on_shift' };
+    }
+
+    // 3. Fetch all active live processes to determine running machines and hands-on busyness
+    const liveSnap = await db.collection('ops_process')
+      .where('status', 'in', ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'])
+      .get();
+    const liveProcesses = [];
+    liveSnap.forEach(d => liveProcesses.push({ id: d.id, ...d.data() }));
+
+    // 4. Select helper using pure dispatch rules
+    const decision = selectHelperForStage(targetStage, onShiftHelpers, liveProcesses, resources, options);
+    if (!decision.ok || !decision.helper) {
+      console.log(`[AutoAssignStage] Could not auto-assign ${processId} (${targetStage}): ${decision.error || 'queued'}`);
+      return decision;
+    }
+
+    const selectedHelper = decision.helper;
+    const machineName = decision.machineName || null;
+    const now = TS();
+
+    const stageUpdate = {
+      [`stages.${targetStage}.assignee`]: selectedHelper.uid,
+      [`stages.${targetStage}.assigneeName`]: selectedHelper.name || '',
+      [`stages.${targetStage}.assignedAt`]: now,
+      [`stages.${targetStage}.assignedBy`]: 'system_auto',
+    };
+    if (machineName) {
+      stageUpdate[`stages.${targetStage}.machineName`] = machineName;
+    }
+
+    const batch = db.batch();
+    batch.update(procRef, stageUpdate);
+
+    // Update staff activeHelperTask for hands-on tasks or active loading
+    batch.update(db.doc(`ops_staff/${selectedHelper.uid}`), {
+      activeHelperTask: { orderId: pData.orderId || processId, step: targetStage }
+    });
+
+    await batch.commit();
+    console.log(`[AutoAssignStage] Auto-assigned ${processId} (${targetStage}) to ${selectedHelper.name}${machineName ? ` on ${machineName}` : ''}`);
+
+    await sendFCMOrderAssignment({
+      staffId: selectedHelper.uid,
+      orderId: pData.orderId || processId,
+      taskType: 'step',
+      customerName: pData.customerName || '',
+      stepName: targetStage,
+    });
+
+    return { ok: true, helper: selectedHelper, machineName };
+  } catch (err) {
+    console.error(`[AutoAssignStage] Error assigning ${processId} (${targetStage}):`, err);
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * Drain waiting unassigned ops queues across washing, drying, ironing, and packaging.
+ * Automatically triggered whenever a machine cycle completes, a task is completed,
+ * or a helper clocks on shift.
+ */
+async function drainWaitingOpsQueues() {
+  try {
+    const stagesToCheck = ['getting_washed', 'getting_dried', 'getting_ironed', 'packaging', 'tagging'];
+
+    for (const stg of stagesToCheck) {
+      const queuedSnap = await db.collection('ops_process')
+        .where('status', '==', stg)
+        .limit(20)
+        .get();
+
+      if (!queuedSnap.empty) {
+        // Filter in memory to avoid needing composite Firestore indexes
+        const unassigned = [];
+        queuedSnap.forEach(d => {
+          const data = d.data();
+          if (!data.stages?.[stg]?.assignee) {
+            const queuedAt = data.stages?.[stg]?.queuedAt;
+            const qMs = queuedAt ? (typeof queuedAt.toMillis === 'function' ? queuedAt.toMillis() : new Date(queuedAt).getTime()) : 0;
+            unassigned.push({ id: d.id, qMs });
+          }
+        });
+
+        unassigned.sort((a, b) => a.qMs - b.qMs);
+
+        for (const item of unassigned.slice(0, 2)) {
+          const res = await autoAssignStage(item.id, stg);
+          if (!res.ok) {
+            // Machine capacity reached or specialists busy, stop trying further in this stage queue
+            break;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[drainWaitingOpsQueues] Error draining queues:', err);
+  }
+}
+
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
 // (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync),
 // or when an order is deleted entirely from the main Livfresh admin panel.
@@ -1074,13 +1214,17 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     const bundleCount = processSnap.exists ? processSnap.data().stages?.packaging?.bundleCount || 1 : 1;
     const bundleLabels = processSnap.exists ? processSnap.data().stages?.packaging?.bundleLabels || [] : [];
 
+    // Select an on-shift rider automatically
+    const riderUid = await selectRider();
+
     await db.doc(`ops_delivery_tasks/${orderId}`).set({
       orderId,
       userId,
       vendorId: after.vendorId || 'default',
       type: 'delivery',
-      status: 'pending', // waiting for supervisor to dispatch
-      assignee: null,
+      status: riderUid ? 'assigned' : 'pending',
+      assignee: riderUid || null,
+      assignedAt: riderUid ? TS() : null,
       deliveryAddress,
       deliveryDate: after.deliveryDate || null,
       deliveryTime: after.deliveryTime || null,
@@ -1093,6 +1237,21 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       tokens: after.tokens || null,
       createdAt: TS(),
     });
+
+    if (riderUid) {
+      await sendFCMOrderAssignment({
+        staffId: riderUid,
+        orderId,
+        taskType: 'delivery',
+        customerName: after.customerName || after.userName || '',
+        address: deliveryAddress,
+        slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim(),
+        isInstant: false,
+      });
+      console.log(`[syncDeliveryTask] Outbound delivery for order ${orderId} auto-assigned to rider ${riderUid}`);
+    } else {
+      console.log(`[syncDeliveryTask] No rider on-shift for delivery ${orderId}. Created as pending.`);
+    }
   } catch (err) {
     console.error(`syncDeliveryTask failed for ${orderId}`, err);
   }
@@ -1663,6 +1822,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
       });
+
+      if (result && result.ok && result.status && result.status !== 'done') {
+        try {
+          await autoAssignStage(processRef.id, result.status, { previousAssignee: auth.uid });
+        } catch (autoErr) {
+          console.error(`[completeStep] autoAssignStage failed:`, autoErr);
+        }
+      }
+      try {
+        await drainWaitingOpsQueues();
+      } catch (drainErr) {
+        console.error(`[completeStep] drainWaitingOpsQueues failed:`, drainErr);
+      }
+
       return result;
     } catch (err) {
       console.error('opsProcessing completeStep failed', err);
@@ -1952,6 +2125,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
       });
+
+      if (result && result.ok && result.status && result.status !== 'done') {
+        try {
+          await autoAssignStage(processRef.id, result.status);
+        } catch (autoErr) {
+          console.error(`[submitTagging] autoAssignStage failed:`, autoErr);
+        }
+      }
+      try {
+        await drainWaitingOpsQueues();
+      } catch (drainErr) {
+        console.error(`[submitTagging] drainWaitingOpsQueues failed:`, drainErr);
+      }
+
       return result;
     } catch (err) {
       console.error('opsProcessing submitTagging failed', err);
@@ -2097,6 +2284,13 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
       });
+
+      try {
+        await drainWaitingOpsQueues();
+      } catch (drainErr) {
+        console.error(`[completePackaging] drainWaitingOpsQueues failed:`, drainErr);
+      }
+
       return result;
     } catch (err) {
       console.error('opsProcessing completePackaging failed', err);

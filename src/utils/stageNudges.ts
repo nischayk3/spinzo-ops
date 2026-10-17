@@ -15,11 +15,11 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_washed_accepted: {
     step: 'getting_washed',
     phase: 'accepted',
-    initialDelayMs: 10 * 60 * 1000, // 10 minutes
-    repeatIntervalMs: 5 * 60 * 1000,  // 5 minutes snooze
+    initialDelayMs: 2 * 60 * 1000, // 2 minutes (immediate reminder)
+    repeatIntervalMs: 2 * 60 * 1000, // 2 minutes repeating loop
     title: 'Washing Status Check',
-    message: 'It has been 10+ minutes since you accepted this wash. Are you still doing pre-stain or ready to start?',
-    snoozeLabel: 'Still doing pre-stain',
+    message: 'It has been 2+ minutes since this wash was accepted. Did you start the machine or are you still doing pre-stain?',
+    snoozeLabel: 'Still doing pre-stain (+2m)',
     actionLabel: 'Start Washing',
   },
   getting_washed_started: {
@@ -35,11 +35,11 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_dried_accepted: {
     step: 'getting_dried',
     phase: 'accepted',
-    initialDelayMs: 5 * 60 * 1000,  // 5 minutes
-    repeatIntervalMs: 3 * 60 * 1000,  // 3 minutes snooze
+    initialDelayMs: 2 * 60 * 1000,  // 2 minutes (immediate reminder)
+    repeatIntervalMs: 2 * 60 * 1000, // 2 minutes repeating loop
     title: 'Drying Status Check',
-    message: 'It has been 5+ minutes since you accepted this drying task. Are you still loading or ready to start?',
-    snoozeLabel: 'Still loading',
+    message: 'It has been 2+ minutes since this drying task was accepted. Did you start the dryer or are you still loading?',
+    snoozeLabel: 'Still loading (+2m)',
     actionLabel: 'Start Drying',
   },
   getting_dried_started: {
@@ -91,7 +91,8 @@ export function clearLocalSnooze(key: string) {
 export function getProcessNudge(
   process: OpsProcess,
   uid: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  role?: string
 ): ActiveStageNudge | null {
   const cur = currentStep(process);
   if (cur !== 'getting_washed' && cur !== 'getting_dried') return null;
@@ -99,8 +100,10 @@ export function getProcessNudge(
   const stage = process.stages?.[cur] as any;
   if (!stage) return null;
 
-  // Must be assigned to this user (or allow check for active step)
-  if (stage.assignee && stage.assignee !== uid) return null;
+  const isSupervisor = role === 'supervisor' || role === 'admin';
+
+  // Must be assigned to this user (or allow supervisor/admin to monitor hub unstarted tasks)
+  if (stage.assignee && stage.assignee !== uid && !isSupervisor) return null;
 
   // If already completed, no nudge
   if (stage.completedAt) return null;
@@ -123,12 +126,13 @@ export function getProcessNudge(
       : now >= startMs + rule.initialDelayMs;
 
     if (isDue) {
+      const helperTag = (isSupervisor && stage.assignee !== uid && stage.assigneeName) ? ` (${stage.assigneeName})` : '';
       return {
         processId: process.id,
         orderId: process.orderId,
         step: cur,
         phase: 'started',
-        title: rule.title,
+        title: `${rule.title}${helperTag}`,
         message: rule.message,
         snoozeLabel: rule.snoozeLabel,
         actionLabel: rule.actionLabel,
@@ -156,13 +160,18 @@ export function getProcessNudge(
       : now >= acceptMs + rule.initialDelayMs;
 
     if (isDue) {
+      const helperTag = (isSupervisor && stage.assignee !== uid && stage.assigneeName) ? ` (${stage.assigneeName})` : '';
+      const customMsg = (isSupervisor && stage.assignee !== uid && stage.assigneeName)
+        ? `It has been 2+ minutes since ${stage.assigneeName} accepted this task. Did they start the machine?`
+        : rule.message;
+
       return {
         processId: process.id,
         orderId: process.orderId,
         step: cur,
         phase: 'accepted',
-        title: rule.title,
-        message: rule.message,
+        title: `${rule.title}${helperTag}`,
+        message: customMsg,
         snoozeLabel: rule.snoozeLabel,
         actionLabel: rule.actionLabel,
         elapsedMinutes: Math.max(1, Math.round((now - acceptMs) / 60000)),
@@ -175,15 +184,16 @@ export function getProcessNudge(
 }
 
 /**
- * Returns the first active nudge among all processes belonging to a user.
+ * Returns the first active nudge among all processes belonging to a user (or all processes for supervisors).
  */
 export function getActiveStageNudge(
   processes: OpsProcess[],
   uid: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  role?: string
 ): ActiveStageNudge | null {
   for (const process of processes) {
-    const nudge = getProcessNudge(process, uid, now);
+    const nudge = getProcessNudge(process, uid, now, role);
     if (nudge) return nudge;
   }
   return null;
