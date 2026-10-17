@@ -13,6 +13,7 @@ export interface StoreResources {
   ironingStations: number;
   washerNames?: string[];
   dryerNames?: string[];
+  ironingStationNames?: string[];
 }
 
 // Sensible defaults for a single-store operation
@@ -22,6 +23,7 @@ const DEFAULTS: StoreResources = {
   ironingStations: 1,
   washerNames: ['Washer 1'],
   dryerNames: ['Dryer 1'],
+  ironingStationNames: ['Iron 1'],
 };
 
 interface StoreResourcesState {
@@ -47,17 +49,21 @@ export const useStoreResourcesStore = create<StoreResourcesState>((set) => ({
           const data = snap.data();
           const washers = data.washers ?? DEFAULTS.washers;
           const dryers = data.dryers ?? DEFAULTS.dryers;
+          const ironingStations = data.ironingStations ?? DEFAULTS.ironingStations;
           set({
             resources: {
               washers,
               dryers,
-              ironingStations: data.ironingStations ?? DEFAULTS.ironingStations,
+              ironingStations,
               washerNames: Array.isArray(data.washerNames) && data.washerNames.length > 0
                 ? data.washerNames
                 : Array.from({ length: washers }, (_, i) => `Washer ${i + 1}`),
               dryerNames: Array.isArray(data.dryerNames) && data.dryerNames.length > 0
                 ? data.dryerNames
                 : Array.from({ length: dryers }, (_, i) => `Dryer ${i + 1}`),
+              ironingStationNames: Array.isArray(data.ironingStationNames) && data.ironingStationNames.length > 0
+                ? data.ironingStationNames
+                : Array.from({ length: ironingStations }, (_, i) => `Iron ${i + 1}`),
             },
             isLoaded: true,
           });

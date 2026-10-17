@@ -358,13 +358,17 @@ export const dayRevenue = (orders: FeedOrder[]): DayStats => {
   const stats: DayStats = { revenue: 0, orderCount: 0, orderRevenue: 0, placedCount: 0, readyCount: 0, outForDelivery: 0, activeCount: 0, cancelledCount: 0 };
   for (const o of orders) {
     if (!o.createdAt || !isToday(o.createdAt)) continue;
+    if (o.status === 'cancelled') {
+      stats.cancelledCount += 1;
+      continue;
+    }
     const amt = orderTotal(o);
     stats.revenue += amt;
     stats.orderCount += 1;
     if (amt > 0) stats.orderRevenue += amt;
+    if (o.status === 'placed') stats.placedCount += 1;
     if (o.status === 'ready') stats.readyCount += 1;
     if (o.status === 'out_for_delivery') stats.outForDelivery += 1;
-    if (o.status === 'cancelled') stats.cancelledCount += 1;
   }
   stats.activeCount = orders.length;
   return stats;

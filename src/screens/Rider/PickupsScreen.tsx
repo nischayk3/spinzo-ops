@@ -11,6 +11,8 @@ import { timeAgo, orderTotal, slotLabel, FeedOrder } from '../../utils/orderFeed
 import { verifyPickupOTP, verifyStoreOTP, updatePickupMeta } from '../../utils/opsPickup';
 import { EditOrderModal } from '../../components/EditOrderModal';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
+import { SmartRouteSheet } from '../../components/Rider/SmartRouteSheet';
+import { buildSmartRoute, SmartRouteStop, extractLocality, safeShortId } from '../../utils/smartRoute';
 
 // Proper state sync: a pickup task is only actionable while the ORDER is still waiting
 // for pickup (placed/confirmed) or mid-handover (in_transit_to_store). Once the order
@@ -25,11 +27,6 @@ export function PickupsScreen() {
   const { myTasks, isLoading, initialize } = useOpsStaffStore();
   const myDeliveries = useOpsStaffStore(state => state.myDeliveries);
   const orders = useOrderFeedStore(state => state.orders);
-
-  const activeDeliveriesCount = myDeliveries.filter(
-    d => (d.status === 'out_for_delivery' || d.status === 'assigned') &&
-      orders.find(o => o.id === d.orderId)?.status !== 'cancelled'
-  ).length;
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeStoreTaskId, setActiveStoreTaskId] = useState<string | null>(null);
@@ -49,20 +46,76 @@ export function PickupsScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const pending = myTasks.filter(t => {
-    if (!isPending(t)) return false;
-    const order = orders.find(o => o.id === t.orderId || o.id === t.id);
-    if (!order) {
-      // Ignore orphaned tasks without customer name, address, or items
-      if (!t.customerName && !t.pickupAddress && (!t.items || t.items.length === 0)) {
-        return false;
+  const pending = useMemo(() => {
+    return myTasks.filter(t => {
+      if (!isPending(t)) return false;
+      const order = orders.find(o => o.id === t.orderId || o.id === t.id);
+      if (!order) {
+        if (!t.customerName && !t.pickupAddress && (!t.items || t.items.length === 0)) {
+          return false;
+        }
+        return true;
+      }
+      if (order.status === 'cancelled') return false;
+      if (order.status !== 'placed' && order.status !== 'confirmed' && order.status !== 'in_transit_to_store') return false;
+      return true;
+    });
+  }, [myTasks, orders]);
+
+  // Compute live smart route sequence
+  const smartRouteStops = useMemo(() => {
+    return buildSmartRoute({
+      myTasks,
+      myDeliveries,
+      orders,
+    });
+  }, [myTasks, myDeliveries, orders]);
+
+  const stopMap = useMemo(() => {
+    const map = new Map<string, SmartRouteStop>();
+    smartRouteStops.forEach(s => {
+      if (s.orderId) map.set(s.orderId, s);
+      if (s.taskId) map.set(s.taskId, s);
+    });
+    return map;
+  }, [smartRouteStops]);
+
+  // Only count live deliveries (ready / out_for_delivery)
+  const activeDeliveriesCount = useMemo(() => {
+    return myDeliveries.filter(d => {
+      if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
+      const order = orders.find(o => o.id === d.orderId || o.id === d.id);
+      if (orders.length > 0) {
+        if (!order) return false;
+        if (order.status === 'cancelled' || order.status === 'delivered') return false;
+        if (order.status !== 'ready' && order.status !== 'out_for_delivery') return false;
       }
       return true;
-    }
-    if (order.status === 'cancelled') return false;
-    if (order.status !== 'placed' && order.status !== 'confirmed' && order.status !== 'in_transit_to_store') return false;
-    return true;
-  });
+    }).length;
+  }, [myDeliveries, orders]);
+
+  // Group and sort pickups by Smart Route stop sequence
+  const actionable = useMemo(() => {
+    const list = pending.filter(t => t.status === 'pending' || t.status === 'assigned');
+    return list.sort((a, b) => {
+      const stopA = stopMap.get(a.orderId || a.id);
+      const stopB = stopMap.get(b.orderId || b.id);
+      const numA = stopA?.stopNumber ?? 999;
+      const numB = stopB?.stopNumber ?? 999;
+      return numA - numB;
+    });
+  }, [pending, stopMap]);
+
+  const inTransit = useMemo(() => {
+    const list = pending.filter(t => t.status === 'in_transit_to_store');
+    return list.sort((a, b) => {
+      const stopA = stopMap.get(a.orderId || a.id);
+      const stopB = stopMap.get(b.orderId || b.id);
+      const numA = stopA?.stopNumber ?? 999;
+      const numB = stopB?.stopNumber ?? 999;
+      return numA - numB;
+    });
+  }, [pending, stopMap]);
 
   const getOrder = (task: OpsTask): FeedOrder | undefined =>
     orders.find(o => o.id === task.orderId || o.id === task.id);
@@ -179,9 +232,6 @@ export function PickupsScreen() {
 
   const editOrder = editOrderId ? orders.find(o => o.id === editOrderId) : null;
 
-  // Group pickups: actionable (pending/assigned), then in-transit (on the way to store)
-  const actionable = pending.filter(t => t.status === 'pending' || t.status === 'assigned');
-  const inTransit = pending.filter(t => t.status === 'in_transit_to_store');
 
   if (isLoading && pending.length === 0) {
     return (
@@ -230,6 +280,7 @@ export function PickupsScreen() {
 
   const renderCard = (t: OpsTask, isInTransit?: boolean) => {
     const order = getOrder(t);
+    const stop = stopMap.get(t.orderId || t.id);
     const pickupSlotText = pickupLabel(t) !== '—'
       ? pickupLabel(t)
       : (order && slotLabel(order) !== '—' ? slotLabel(order) : undefined);
@@ -238,11 +289,13 @@ export function PickupsScreen() {
     const totalAmount = order ? orderTotal(order) : (typeof t.totalAmount === 'number' ? t.totalAmount : undefined);
     const paymentStatus = order?.paymentStatus || t.paymentStatus;
     const notes = order?.notes || t.notes;
+    const rawAddr = t.pickupAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined));
+    const locality = isInTransit ? 'STORE DROP' : (stop?.locality || extractLocality(rawAddr));
 
     return (
       <RiderTaskCard
         type="pickup"
-        orderNumber={t.orderId.slice(-6).toUpperCase()}
+        orderNumber={safeShortId(t.orderId)}
         customerName={order?.customerName || t.customerName}
         customerPhone={order?.customerPhone || t.customerPhone}
         status={t.status}
@@ -250,7 +303,7 @@ export function PickupsScreen() {
         items={items}
         totalAmount={totalAmount}
         paymentStatus={paymentStatus}
-        pickupAddress={t.pickupAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined))}
+        pickupAddress={rawAddr}
         pickupSlot={pickupSlotText}
         notes={notes}
         tokenNumber={t.tokenNumber || order?.tokenNumber}
@@ -259,6 +312,9 @@ export function PickupsScreen() {
         lng={order?.longitude || order?.address?.longitude || t.longitude}
         isUrgent={t.isUrgent ?? order?.isUrgent}
         pickupNote={t.pickupNote || order?.pickupNote}
+        stopNumber={stop?.stopNumber}
+        locality={locality}
+        loadUnits={stop?.loadUnits}
         onToggleUrgent={() => handleToggleUrgent(t)}
         onEditPickupNote={() => handleOpenNoteModal(t)}
         onPrimary={
@@ -281,128 +337,237 @@ export function PickupsScreen() {
     );
   };
 
+  const [filterTab, setFilterTab] = useState<'route' | 'pickup' | 'in_bag'>('route');
+
+  // Unified Smart Route sequence (Stop 1, Stop 2, Stop 3, Stop 4, Stop 5)
+  const routeSorted = useMemo(() => {
+    return [...pending].sort((a, b) => {
+      const stopA = stopMap.get(a.orderId || a.id);
+      const stopB = stopMap.get(b.orderId || b.id);
+      const numA = stopA?.stopNumber ?? 999;
+      const numB = stopB?.stopNumber ?? 999;
+      return numA - numB;
+    });
+  }, [pending, stopMap]);
+
   return (
     <SafeAreaView className="flex-1 bg-bgDark">
-      <View className="px-4 pt-4 pb-2">
-        <Text className="text-2xl font-bold text-textPrimary">My Pickups</Text>
-        <Text className="text-textSecondary">
-          {pending.length} pending pickup{pending.length === 1 ? '' : 's'}
-        </Text>
+      {/* Header */}
+      <View className="px-4 pt-4 pb-2.5 flex-row items-center justify-between">
+        <View>
+          <Text className="text-2xl font-black text-slate-950 tracking-tight">My Pickups</Text>
+          <Text className="text-slate-600 text-xs font-bold mt-0.5">
+            {pending.length} task{pending.length === 1 ? '' : 's'} on circuit • SpinZo BTM Hub
+          </Text>
+        </View>
+        <View className="bg-emerald-100 border border-emerald-400 px-3 py-1 rounded-full flex-row items-center">
+          <View className="w-2 h-2 rounded-full bg-emerald-600 mr-1.5" />
+          <Text className="text-emerald-950 text-xs font-black">ON DUTY</Text>
+        </View>
       </View>
 
+      {/* Smart Route Mission Bar */}
+      <SmartRouteSheet
+        myTasks={myTasks}
+        myDeliveries={myDeliveries}
+        orders={orders}
+        onSelectTask={(stop) => {
+          if (stop.type === 'delivery') {
+            navigation.navigate('Deliveries');
+          } else {
+            const task = pending.find(t => t.id === stop.taskId || t.orderId === stop.orderId);
+            if (task) {
+              if (task.status === 'in_transit_to_store') {
+                setOtp('');
+                setActiveStoreTaskId(task.id);
+              } else {
+                setOtp('');
+                const order = getOrder(task);
+                const existingTokens = order?.tokens || (task as any).tokens || (task.tokenNumber ? { general: task.tokenNumber } : {});
+                setTokens(existingTokens);
+                setActiveTaskId(task.id);
+              }
+            }
+          }
+        }}
+      />
+
+      {/* Active Deliveries Quick Switcher */}
       {activeDeliveriesCount > 0 ? (
         <TouchableOpacity
-          activeOpacity={0.8}
+          activeOpacity={0.85}
           onPress={() => navigation.navigate('Deliveries')}
-          className="mx-4 mb-3 p-3.5 bg-blue-500/10 border border-blue-500/30 rounded-xl flex-row items-center justify-between"
+          className="mx-4 mb-3.5 px-4 py-3 bg-blue-600 rounded-2xl flex-row items-center justify-between shadow-md shadow-blue-500/25"
         >
           <View className="flex-row items-center flex-1 mr-2">
-            <View className="w-8 h-8 rounded-lg bg-blue-500/20 items-center justify-center mr-3">
-              <Package size={18} color="#3B82F6" />
+            <View className="w-8 h-8 rounded-xl bg-white/20 items-center justify-center mr-2.5">
+              <Package size={16} color="#FFFFFF" />
             </View>
-            <View className="flex-1">
-              <Text className="text-white font-bold text-sm">
-                {activeDeliveriesCount} Active Delivery Task{activeDeliveriesCount > 1 ? 's' : ''}
+            <View>
+              <Text className="text-white font-black text-xs uppercase tracking-wide">
+                {activeDeliveriesCount} Active Deliver{activeDeliveriesCount > 1 ? 'ies' : 'y'}
               </Text>
-              <Text className="text-textSecondary text-xs">
-                Tap to view orders ready for delivery
+              <Text className="text-blue-100 text-[11px] font-bold">
+                Ready for dispatch on your route
               </Text>
             </View>
           </View>
-          <ChevronRight size={18} color="#94A3B8" />
+          <View className="flex-row items-center bg-white px-3 py-1.5 rounded-xl shadow-xs">
+            <Text className="text-blue-700 font-black text-xs mr-1">Switch</Text>
+            <ChevronRight size={13} color="#1D4ED8" />
+          </View>
         </TouchableOpacity>
       ) : null}
+
+      {/* 3-Way Segmented Tabs */}
+      <View className="flex-row bg-slate-200 p-1 rounded-2xl mx-4 mb-3 border border-slate-300">
+        <TouchableOpacity
+          onPress={() => setFilterTab('route')}
+          className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
+            filterTab === 'route' ? 'bg-slate-950 shadow-xs' : ''
+          }`}
+        >
+          <Text
+            className={`text-xs font-black ${
+              filterTab === 'route' ? 'text-white' : 'text-slate-700'
+            }`}
+          >
+            ⚡ Route ({routeSorted.length})
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => setFilterTab('pickup')}
+          className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
+            filterTab === 'pickup' ? 'bg-slate-950 shadow-xs' : ''
+          }`}
+        >
+          <Text
+            className={`text-xs font-black ${
+              filterTab === 'pickup' ? 'text-white' : 'text-slate-700'
+            }`}
+          >
+            📦 Pick Up ({actionable.length})
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => setFilterTab('in_bag')}
+          className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
+            filterTab === 'in_bag' ? 'bg-slate-950 shadow-xs' : ''
+          }`}
+        >
+          <Text
+            className={`text-xs font-black ${
+              filterTab === 'in_bag' ? 'text-white' : 'text-slate-700'
+            }`}
+          >
+            🎒 In Bag ({inTransit.length})
+          </Text>
+        </TouchableOpacity>
+      </View>
 
       <FlatList
         data={pending.length ? [0] : []}
         keyExtractor={() => 'list'}
         renderItem={() => null}
         className="flex-1 px-4"
-        contentContainerStyle={{ paddingBottom: 24 }}
+        contentContainerStyle={{ paddingBottom: 28 }}
         ListEmptyComponent={
           <View className="items-center justify-center mt-20">
             <Bike size={36} color="#64748B" />
-            <Text className="text-textSecondary text-lg font-bold mt-3">No pickups assigned yet</Text>
-            <Text className="text-textMuted text-center mt-2">Assigned pickups appear here instantly.</Text>
+            <Text className="text-slate-800 text-lg font-bold mt-3">No pickups assigned yet</Text>
+            <Text className="text-slate-500 text-center mt-2">Assigned pickups appear here instantly.</Text>
           </View>
         }
         ListHeaderComponent={
           <>
-            {inTransit.length > 0 ? (
-              <View className="mt-2 mb-1">
-                <Text className="text-xs font-bold text-textMuted uppercase tracking-wider mb-2">On the way to store ({inTransit.length})</Text>
-                {inTransit.map(t => (
+            {filterTab === 'route' && routeSorted.map(t => (
+              <View key={t.id}>{renderCard(t, t.status === 'in_transit_to_store')}</View>
+            ))}
+
+            {filterTab === 'pickup' && (
+              actionable.length > 0 ? (
+                actionable.map(t => (
+                  <View key={t.id}>{renderCard(t, false)}</View>
+                ))
+              ) : (
+                <View className="py-12 items-center">
+                  <Text className="text-slate-500 font-bold text-sm">All pickups collected! Drop them at the store.</Text>
+                </View>
+              )
+            )}
+
+            {filterTab === 'in_bag' && (
+              inTransit.length > 0 ? (
+                inTransit.map(t => (
                   <View key={t.id}>{renderCard(t, true)}</View>
-                ))}
-              </View>
-            ) : null}
-            {actionable.length > 0 ? (
-              <View className="mt-2 mb-1">
-                <Text className="text-xs font-bold text-textMuted uppercase tracking-wider mb-2">To pick up ({actionable.length})</Text>
-                {actionable.map(t => (
-                  <View key={t.id}>{renderCard(t)}</View>
-                ))}
-              </View>
-            ) : null}
+                ))
+              ) : (
+                <View className="py-12 items-center">
+                  <Text className="text-slate-500 font-bold text-sm">No collected bags in bag. Complete a pickup first.</Text>
+                </View>
+              )
+            )}
           </>
         }
       />
 
       {/* Pickup OTP + Token Modal */}
       <Modal visible={activeTaskId !== null} transparent animationType="slide" onRequestClose={() => setActiveTaskId(null)}>
-        <View className="flex-1 justify-center items-center bg-black/70 p-5">
-          <View className="w-full max-h-[88%] bg-bgSurface rounded-2xl p-5 border border-bgSurfaceLight shadow-2xl">
+        <View className="flex-1 justify-center items-center bg-black/75 p-5">
+          <View className="w-full max-h-[88%] bg-white rounded-3xl p-5 border-2 border-slate-300 shadow-2xl">
             {/* Header */}
-            <View className="flex-row items-center justify-between mb-1">
+            <View className="flex-row items-center justify-between mb-1 pb-2 border-b-2 border-slate-200">
               <View>
-                <Text className="text-textPrimary text-xl font-bold">Verify Pickup</Text>
+                <Text className="text-slate-950 text-xl font-black">Verify Pickup</Text>
                 {activeTask?.orderId ? (
-                  <Text className="text-textSecondary text-xs">Order #{activeTask.orderId.slice(-6).toUpperCase()}</Text>
+                  <Text className="text-slate-600 text-xs font-bold">Order #{safeShortId(activeTask.orderId)}</Text>
                 ) : null}
               </View>
-              <TouchableOpacity onPress={() => setActiveTaskId(null)} className="w-8 h-8 rounded-full bg-bgDark items-center justify-center">
-                <Text className="text-textMuted text-base font-bold">✕</Text>
+              <TouchableOpacity onPress={() => setActiveTaskId(null)} className="w-9 h-9 rounded-full bg-slate-100 border border-slate-300 items-center justify-center">
+                <Text className="text-slate-950 text-base font-black">✕</Text>
               </TouchableOpacity>
             </View>
-            <Text className="text-textMuted text-xs mb-3">
+            <Text className="text-slate-600 text-xs mb-3 font-semibold">
               Enter customer 4-digit OTP and assign token numbers for bags.
             </Text>
 
             <ScrollView showsVerticalScrollIndicator={false} className="flex-grow-0">
               {/* Customer OTP */}
-              <View className="mb-4 bg-bgDark/80 p-3.5 rounded-xl border border-bgSurfaceLight">
+              <View className="mb-4 bg-slate-50 p-4 rounded-2xl border-2 border-slate-300">
                 <View className="flex-row items-center justify-between mb-1">
-                  <Text className="text-textPrimary text-sm font-bold">Customer OTP</Text>
-                  <Text className="text-info text-xs font-semibold">4 Digits</Text>
+                  <Text className="text-slate-950 text-sm font-black">Customer OTP</Text>
+                  <Text className="text-purple-700 text-xs font-black">4 Digits</Text>
                 </View>
-                <Text className="text-textMuted text-xs mb-2">Ask the customer for their pickup verification OTP</Text>
+                <Text className="text-slate-600 text-xs mb-2.5 font-medium">Ask customer for their 4-digit verification OTP</Text>
                 <TextInput
                   value={otp}
                   onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
                   keyboardType="number-pad"
                   maxLength={4}
                   placeholder="••••"
-                  placeholderTextColor="#64748B"
+                  placeholderTextColor="#94A3B8"
                   autoFocus
-                  className="bg-bgDark border border-bgSurfaceLight rounded-xl h-14 text-center text-2xl tracking-[0.5em] text-textPrimary font-bold"
+                  className="bg-white border-2 border-slate-400 rounded-2xl h-15 text-center text-3xl tracking-[0.4em] text-slate-950 font-black shadow-xs"
                 />
               </View>
 
               {/* Token Inputs */}
               <View className="mb-2">
                 <View className="flex-row items-center justify-between mb-1">
-                  <Text className="text-textPrimary text-sm font-bold">Assign Bag Tokens</Text>
-                  <Text className="text-textMuted text-xs font-medium">Tag on physical bag</Text>
+                  <Text className="text-slate-950 text-sm font-black">Assign Bag Tokens</Text>
+                  <Text className="text-amber-800 text-xs font-black">Tag on physical bag</Text>
                 </View>
-                <Text className="text-textMuted text-xs mb-2">Enter the physical token number attached to each service bag</Text>
+                <Text className="text-slate-600 text-xs mb-2.5 font-medium">Enter the physical token number attached to each service bag</Text>
 
                 {servicesToTag.map((s) => (
-                  <View key={s.key} className="mb-3 bg-bgDark/60 p-3 rounded-xl border border-bgSurfaceLight">
+                  <View key={s.key} className="mb-3 bg-slate-50 p-3.5 rounded-2xl border-2 border-slate-300">
                     <View className="flex-row items-center justify-between mb-1.5">
-                      <Text className="text-textPrimary text-sm font-bold">{s.label}</Text>
+                      <Text className="text-slate-950 text-sm font-black">{s.label}</Text>
                       {s.details ? (
-                        <View className="bg-primary/10 border border-primary/30 px-2 py-0.5 rounded">
-                          <Text className="text-primary text-xs font-bold">{s.details}</Text>
+                        <View className="bg-blue-600 px-2 py-0.5 rounded shadow-xs">
+                          <Text className="text-white text-xs font-black">{s.details}</Text>
                         </View>
                       ) : null}
                     </View>
@@ -410,9 +575,9 @@ export function PickupsScreen() {
                       value={tokens[s.key] || ''}
                       onChangeText={(v) => setTokens(prev => ({ ...prev, [s.key]: v }))}
                       placeholder={`Token number for ${s.label}`}
-                      placeholderTextColor="#64748B"
+                      placeholderTextColor="#94A3B8"
                       keyboardType="default"
-                      className="bg-bgDark border border-bgSurfaceLight rounded-lg h-11 px-3 text-textPrimary font-bold text-base"
+                      className="bg-white border-2 border-slate-300 rounded-xl h-12 px-3 text-slate-950 font-black text-base shadow-xs"
                     />
                   </View>
                 ))}
@@ -421,18 +586,18 @@ export function PickupsScreen() {
 
             {/* Actions */}
             {verifying ? (
-              <View className="mt-4 py-3"><ActivityIndicator size="small" color="#22c55e" /></View>
+              <View className="mt-4 py-3"><ActivityIndicator size="small" color="#7C3AED" /></View>
             ) : (
-              <View className="flex-row gap-3 mt-4 pt-3 border-t border-bgSurfaceLight/60">
-                <TouchableOpacity onPress={() => setActiveTaskId(null)} className="flex-1 bg-bgSurfaceLight rounded-xl h-12 items-center justify-center">
-                  <Text className="text-textSecondary font-bold">Cancel</Text>
+              <View className="flex-row gap-3 mt-4 pt-3 border-t-2 border-slate-200">
+                <TouchableOpacity onPress={() => setActiveTaskId(null)} className="flex-1 bg-slate-100 border border-slate-300 rounded-2xl h-13 items-center justify-center">
+                  <Text className="text-slate-700 font-black text-sm">Cancel</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={handleVerify}
                   disabled={!canVerify}
-                  className={`flex-1 rounded-xl h-12 items-center justify-center ${canVerify ? 'bg-primary' : 'bg-primary/30 border border-primary/20'}`}
+                  className={`flex-1 rounded-2xl h-13 items-center justify-center shadow-md ${canVerify ? 'bg-purple-600 active:bg-purple-700' : 'bg-slate-300'}`}
                 >
-                  <Text className={`font-bold ${canVerify ? 'text-white' : 'text-textMuted'}`}>
+                  <Text className={`font-black text-sm uppercase tracking-wide ${canVerify ? 'text-white' : 'text-slate-500'}`}>
                     {!isOtpValid ? 'Enter 4-Digit OTP' : !areTokensValid ? 'Enter All Tokens' : 'Verify & Pickup'}
                   </Text>
                 </TouchableOpacity>
@@ -444,9 +609,12 @@ export function PickupsScreen() {
 
       {/* Store Handover Modal */}
       <Modal visible={activeStoreTaskId !== null} transparent animationType="slide" onRequestClose={() => setActiveStoreTaskId(null)}>
-        <View className="flex-1 justify-center items-center bg-black/60 p-6">
-          <View className="w-full bg-bgSurface rounded-2xl p-5 border border-bgSurfaceLight">
-            <Text className="text-textPrimary text-lg font-bold mb-4">Store Handover</Text>
+        <View className="flex-1 justify-center items-center bg-black/75 p-6">
+          <View className="w-full bg-white rounded-3xl p-5 border-2 border-slate-300 shadow-2xl">
+            <Text className="text-slate-950 text-xl font-black mb-1">Store Handover</Text>
+            <Text className="text-slate-600 text-xs mb-3 font-semibold">
+              Enter the 4-digit store operator OTP to confirm delivery to SpinZo BTM Store.
+            </Text>
             <TextInput
               value={otp}
               onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
@@ -455,17 +623,23 @@ export function PickupsScreen() {
               placeholder="••••"
               placeholderTextColor="#94A3B8"
               autoFocus
-              className="bg-bgDark border border-bgSurfaceLight rounded-xl h-14 text-center text-2xl tracking-[0.5em] text-textPrimary font-bold"
+              className="bg-slate-50 border-2 border-slate-400 rounded-2xl h-15 text-center text-3xl tracking-[0.4em] text-slate-950 font-black mb-4 shadow-xs"
             />
             {verifying ? (
-              <View className="mt-4"><ActivityIndicator size="small" color="#9333ea" /></View>
+              <View className="mt-4"><ActivityIndicator size="small" color="#059669" /></View>
             ) : (
-              <View className="flex-row gap-3 mt-4">
-                <TouchableOpacity onPress={() => setActiveStoreTaskId(null)} className="flex-1 bg-bgSurfaceLight rounded-xl h-12 items-center justify-center">
-                  <Text className="text-textSecondary font-bold">Cancel</Text>
+              <View className="flex-row gap-3 mt-2">
+                <TouchableOpacity onPress={() => setActiveStoreTaskId(null)} className="flex-1 bg-slate-100 border border-slate-300 rounded-2xl h-13 items-center justify-center">
+                  <Text className="text-slate-700 font-black text-sm">Cancel</Text>
                 </TouchableOpacity>
-                <TouchableOpacity onPress={handleVerifyStore} disabled={otp.length !== 4} className="flex-1 bg-purple-600 rounded-xl h-12 items-center justify-center">
-                  <Text className="text-white font-bold">Verify</Text>
+                <TouchableOpacity
+                  onPress={handleVerifyStore}
+                  disabled={otp.length !== 4}
+                  className={`flex-1 rounded-2xl h-13 items-center justify-center shadow-md ${otp.length === 4 ? 'bg-emerald-600 active:bg-emerald-700' : 'bg-slate-300'}`}
+                >
+                  <Text className={`font-black text-sm uppercase tracking-wide ${otp.length === 4 ? 'text-white' : 'text-slate-500'}`}>
+                    Confirm Handover
+                  </Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -477,40 +651,34 @@ export function PickupsScreen() {
 
       {/* Pickup Note Modal */}
       <Modal visible={noteModalTask !== null} transparent animationType="fade" onRequestClose={() => setNoteModalTask(null)}>
-        <View className="flex-1 bg-black/60 items-center justify-center p-4">
-          <View className="bg-bgSurface w-full max-w-sm rounded-2xl p-5 border border-bgSurfaceLight shadow-2xl">
-            <Text className="text-textPrimary font-bold text-lg mb-1">Pickup Note</Text>
-            <Text className="text-textSecondary text-xs mb-3">
-              Add any special request or observation for Order #{noteModalTask?.orderId.slice(-6).toUpperCase()}
+        <View className="flex-1 bg-black/75 items-center justify-center p-4">
+          <View className="bg-white w-full max-w-sm rounded-3xl p-5 border-2 border-slate-300 shadow-2xl">
+            <Text className="text-slate-950 font-black text-lg mb-1">Pickup Note</Text>
+            <Text className="text-slate-600 text-xs font-semibold mb-3">
+              Add any special request or observation for Order #{safeShortId(noteModalTask?.orderId)}
             </Text>
             <TextInput
               value={noteText}
               onChangeText={setNoteText}
-              placeholder="e.g. Silk garments, special stain treatment, gate code..."
+              placeholder="e.g. Customer requested delicate handling, extra dirty shirts..."
               placeholderTextColor="#94A3B8"
               multiline
-              numberOfLines={4}
-              className="bg-bgDark text-textPrimary p-3 rounded-xl border border-bgSurfaceLight mb-4 text-sm min-h-[90px]"
-              style={{ textAlignVertical: 'top' }}
+              numberOfLines={3}
+              className="bg-slate-50 border-2 border-slate-300 rounded-2xl p-3.5 text-slate-950 text-sm font-semibold mb-4 min-h-[90px] shadow-xs"
             />
-            <View className="flex-row gap-2">
+            <View className="flex-row gap-3">
               <TouchableOpacity
                 onPress={() => setNoteModalTask(null)}
-                disabled={savingNote}
-                className="flex-1 h-11 bg-bgDark border border-bgSurfaceLight rounded-xl items-center justify-center"
+                className="flex-1 bg-slate-100 border border-slate-300 rounded-2xl h-12 items-center justify-center"
               >
-                <Text className="text-textSecondary font-semibold">Cancel</Text>
+                <Text className="text-slate-700 font-black text-sm">Cancel</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={handleSaveNote}
                 disabled={savingNote}
-                className="flex-1 h-11 bg-primary rounded-xl items-center justify-center flex-row"
+                className="flex-1 bg-amber-500 active:bg-amber-600 rounded-2xl h-12 items-center justify-center shadow-md"
               >
-                {savingNote ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
-                  <Text className="text-white font-bold">Save Note</Text>
-                )}
+                <Text className="text-slate-950 font-black text-sm uppercase">Save Note</Text>
               </TouchableOpacity>
             </View>
           </View>

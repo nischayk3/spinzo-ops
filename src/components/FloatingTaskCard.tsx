@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { View, Text, TouchableOpacity } from 'react-native';
-import { WashingMachine, Wind, CheckCircle2 } from 'lucide-react-native';
+import { View, Text, TouchableOpacity, Alert } from 'react-native';
+import { WashingMachine, Wind, CheckCircle2, Lock } from 'lucide-react-native';
 import { OpsProcess, currentStep, myInProgress, stepLabel } from '../utils/opsProcess';
 
 interface FloatingTaskCardProps {
@@ -75,6 +75,10 @@ export const FloatingTaskCard = ({ process, processes, onComplete, onPressCard }
   const orderShort = activeProcess.orderId.slice(-6).toUpperCase();
   const token = activeProcess.tokenNumber;
 
+  // Accidental completion guard: Lock completion button until 30 minutes (1800s) have passed
+  const isMachineCycleLocked = (step === 'getting_washed' || step === 'getting_dried') && elapsedSec < 1800;
+  const lockMinutesLeft = Math.max(1, Math.ceil((1800 - elapsedSec) / 60));
+
   return (
     <View className="absolute bottom-[80px] left-4 right-4 bg-white rounded-2xl shadow-lg border-2 border-[#994bff] p-3.5 z-30">
       {/* Multi-machine tab pills if more than 1 machine is running */}
@@ -133,13 +137,30 @@ export const FloatingTaskCard = ({ process, processes, onComplete, onPressCard }
           </View>
         </TouchableOpacity>
 
-        <TouchableOpacity 
-          onPress={() => onComplete(activeProcess.orderId)}
-          className="w-12 h-12 rounded-full bg-[#10b981] items-center justify-center active:scale-95 shrink-0"
-        >
-          <CheckCircle2 color="white" size={24} />
-        </TouchableOpacity>
+        {isMachineCycleLocked ? (
+          <TouchableOpacity 
+            onPress={() => {
+              Alert.alert(
+                'Cycle in Progress',
+                `The ${step === 'getting_washed' ? 'washing' : 'drying'} cycle requires at least 30 minutes. ${lockMinutesLeft} minute${lockMinutesLeft > 1 ? 's' : ''} remaining before unload is enabled.`
+              );
+            }}
+            className="px-3 py-2 rounded-2xl bg-gray-100 border border-gray-200 items-center justify-center shrink-0 flex-row gap-1.5"
+            activeOpacity={0.7}
+          >
+            <Lock color="#94a3b8" size={16} />
+            <Text className="text-gray-500 font-bold text-xs">{lockMinutesLeft}m left</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity 
+            onPress={() => onComplete(activeProcess.orderId)}
+            className="w-12 h-12 rounded-full bg-[#10b981] items-center justify-center active:scale-95 shrink-0 shadow-md"
+          >
+            <CheckCircle2 color="white" size={24} />
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
 };
+

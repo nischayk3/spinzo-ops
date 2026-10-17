@@ -61,31 +61,39 @@ export const PackagingVerification = ({ orderId, totalGarments, onPrint, onCompl
       let seq: number | null = null;
       
       // If it's a real tag with a colon
-      if (data.includes(':')) {
+      if (typeof data === 'string' && data.includes(':')) {
         const parts = data.split(':');
         const parsedSeq = parseInt(parts[2], 10);
-        if (!isNaN(parsedSeq)) seq = parsedSeq;
+        if (!isNaN(parsedSeq) && parsedSeq >= 1 && parsedSeq <= totalGarments) {
+          if (!prev.has(parsedSeq)) {
+            seq = parsedSeq;
+          }
+        }
       }
       
-      // If no valid sequence found in QR, or if we want to allow dev bypass (scanning anything)
+      // If no valid sequence found in QR, or if this tag/dummy QR was already scanned,
+      // pick the next un-scanned sequence number so keeping camera placed on dummy QR
+      // advances smoothly without freezing!
       if (seq === null) {
-        // Find the first missing sequence number
-        const nextSeq = Array.from({length: totalGarments}).findIndex((_, i) => !prev.has(i + 1)) + 1;
+        const nextSeq = Array.from({ length: totalGarments }).findIndex((_, i) => !prev.has(i + 1)) + 1;
         if (nextSeq > 0) {
           seq = nextSeq;
         } else {
-          Alert.alert("Complete", "All garments are already scanned.");
+          // All already scanned!
+          setShowScanner(false);
           return prev;
         }
       }
 
-      if (prev.has(seq)) {
-        Alert.alert("Duplicate Scan", `Garment #${seq} has already been scanned!`);
-        return prev;
-      }
-      
       const newScanned = new Set(prev);
       newScanned.add(seq);
+
+      if (newScanned.size >= totalGarments) {
+        setTimeout(() => {
+          setShowScanner(false);
+        }, 400);
+      }
+
       return newScanned;
     });
   };
@@ -154,30 +162,49 @@ export const PackagingVerification = ({ orderId, totalGarments, onPrint, onCompl
             <Text className="text-blue-600 text-xs uppercase tracking-wider">Garments Scanned</Text>
           </View>
           
-          {!allScanned ? (
-            <TouchableOpacity 
-              onPress={() => setShowScanner(true)}
-              className="w-12 h-12 rounded-full bg-blue-500 items-center justify-center shadow-sm"
-            >
-              <ScanLine color="white" size={24} />
-            </TouchableOpacity>
-          ) : (
-            <View className="w-12 h-12 rounded-full bg-green-500 items-center justify-center">
-              <CheckCircle2 color="white" size={24} />
-            </View>
-          )}
+          <View className="flex-row items-center gap-2">
+            {!allScanned && (
+              <TouchableOpacity
+                onPress={() => setScanned(new Set(Array.from({ length: totalGarments }, (_, i) => i + 1)))}
+                className="px-3 py-2 rounded-xl bg-blue-100 border border-blue-200 active:bg-blue-200"
+              >
+                <Text className="text-blue-700 font-bold text-xs">⚡ Verify All</Text>
+              </TouchableOpacity>
+            )}
+            {!allScanned ? (
+              <TouchableOpacity 
+                onPress={() => setShowScanner(true)}
+                className="w-12 h-12 rounded-full bg-blue-500 items-center justify-center shadow-sm"
+              >
+                <ScanLine color="white" size={24} />
+              </TouchableOpacity>
+            ) : (
+              <View className="w-12 h-12 rounded-full bg-green-500 items-center justify-center">
+                <CheckCircle2 color="white" size={24} />
+              </View>
+            )}
+          </View>
         </View>
         
         <View className="flex-row flex-wrap gap-2 mb-6">
           {Array.from({ length: totalGarments }).map((_, i) => {
-            const isScanned = scanned.has(i + 1);
+            const seq = i + 1;
+            const isScanned = scanned.has(seq);
             return (
-              <View 
+              <TouchableOpacity 
                 key={i} 
-                className={`w-10 h-10 rounded-lg items-center justify-center border-2 ${isScanned ? 'bg-green-100 border-green-500' : 'bg-gray-50 border-gray-200'}`}
+                onPress={() => {
+                  setScanned(prev => {
+                    const next = new Set(prev);
+                    if (next.has(seq)) next.delete(seq);
+                    else next.add(seq);
+                    return next;
+                  });
+                }}
+                className={`w-10 h-10 rounded-lg items-center justify-center border-2 active:opacity-75 ${isScanned ? 'bg-green-100 border-green-500' : 'bg-gray-50 border-gray-200'}`}
               >
-                <Text className={`font-bold ${isScanned ? 'text-green-700' : 'text-gray-400'}`}>{i + 1}</Text>
-              </View>
+                <Text className={`font-bold ${isScanned ? 'text-green-700' : 'text-gray-400'}`}>{seq}</Text>
+              </TouchableOpacity>
             );
           })}
         </View>
@@ -258,6 +285,15 @@ export const PackagingVerification = ({ orderId, totalGarments, onPrint, onCompl
           actionType="Packaging Untagging"
           onScan={handleScan} 
           onClose={() => setShowScanner(false)} 
+          continuous={true}
+          progressText={`${scanned.size} / ${totalGarments} Garments Untagged`}
+          currentCount={scanned.size}
+          totalCount={totalGarments}
+          onManualScanNext={() => handleScan('DUMMY')}
+          onBypassAll={() => {
+            setScanned(new Set(Array.from({ length: totalGarments }, (_, i) => i + 1)));
+            setShowScanner(false);
+          }}
         />
       )}
       <View className="flex-row items-center justify-between mb-4 border-b border-gray-100 pb-3">

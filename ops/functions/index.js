@@ -358,28 +358,44 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
 
   // --- Route by action ---
   if (action === 'acceptTask') {
+    const rawId = String(orderId || '');
+    const cleanId = rawId.includes('__') ? rawId.split('__')[0] : rawId;
+    const taskId = String(data.taskId || '');
+
+    const candidateIds = Array.from(new Set([rawId, cleanId, taskId].filter(Boolean)));
+    const collections = isDelivery ? ['ops_delivery_tasks', 'ops_tasks'] : ['ops_tasks', 'ops_delivery_tasks'];
+
+    let targetDocRef = null;
     let targetTask = null;
-    let collection = isDelivery ? 'ops_delivery_tasks' : 'ops_tasks';
-    
-    let docSnap = await db.doc(`${collection}/${orderId}`).get();
-    if (docSnap.exists) {
-      targetTask = docSnap.data();
-    } else {
-      // Fallback check to the other collection if not found
-      const otherCollection = isDelivery ? 'ops_tasks' : 'ops_delivery_tasks';
-      const otherSnap = await db.doc(`${otherCollection}/${orderId}`).get();
-      if (otherSnap.exists) {
-        targetTask = otherSnap.data();
-        collection = otherCollection;
+
+    for (const coll of collections) {
+      for (const id of candidateIds) {
+        const snap = await db.doc(`${coll}/${id}`).get();
+        if (snap.exists) {
+          targetDocRef = db.doc(`${coll}/${id}`);
+          targetTask = snap.data();
+          break;
+        }
       }
+      if (targetDocRef) break;
     }
-    
-    if (!targetTask) return { ok: false, error: 'not_found' };
-    if (targetTask.assignee !== auth.uid && role !== 'supervisor') return { ok: false, error: 'unauthorized' };
+
+    if (!targetDocRef || !targetTask) return { ok: false, error: 'not_found' };
+
+    if (targetTask.assignee && targetTask.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') {
+      return { ok: false, error: 'unauthorized' };
+    }
+
     if (targetTask.acceptedAt) return { ok: true, alreadyDone: true };
 
     try {
-      await db.doc(`${collection}/${orderId}`).update({ acceptedAt: admin.firestore.Timestamp.now() });
+      const updatePayload = {
+        acceptedAt: admin.firestore.Timestamp.now(),
+      };
+      if (!targetTask.assignee) {
+        updatePayload.assignee = auth.uid;
+      }
+      await targetDocRef.update(updatePayload);
       return { ok: true };
     } catch (err) {
       console.error('opsStatusSync acceptTask failed', err);
@@ -700,6 +716,119 @@ async function deleteProcessDocs(orderId, userId, vendorId) {
   }
 }
 
+async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
+  try {
+    let serviceGroups = splitOrderIntoServices(order);
+    if (!serviceGroups || serviceGroups.length === 0) {
+      const sType = order.serviceType || 'wash_fold';
+      serviceGroups = [{ serviceType: sType, label: SERVICE_LABELS[sType] || 'Wash & Fold' }];
+    }
+
+    // Check if ops_process already exists
+    const existingSnap = await db.collection('ops_process')
+      .where('orderId', '==', orderId)
+      .limit(1)
+      .get();
+
+    if (!existingSnap.empty) {
+      console.log(`[AutoAssignTagging] Process docs already exist for ${orderId}`);
+      return;
+    }
+
+    // Find on-shift helpers from ops_staff
+    const staffSnap = await db.collection('ops_staff')
+      .where('onShift', '==', true)
+      .where('role', '==', 'helper')
+      .get();
+
+    const onShiftHelpers = [];
+    staffSnap.forEach(d => {
+      onShiftHelpers.push({ uid: d.id, ...d.data() });
+    });
+
+    // Helper selection with preferences:
+    // Primary for tagging: Abdul (+916900311761)
+    // Fallback 1: Abdur (+917559105832)
+    // Fallback 2: Samsul (+916369768237)
+    let selectedHelper = null;
+    const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
+
+    const abdul = onShiftHelpers.find(h => normalize(h.phone) === '6900311761');
+    const abdur = onShiftHelpers.find(h => normalize(h.phone) === '7559105832');
+    const samsul = onShiftHelpers.find(h => normalize(h.phone) === '6369768237');
+
+    if (abdul) {
+      selectedHelper = abdul;
+    } else if (abdur) {
+      selectedHelper = abdur;
+    } else if (samsul) {
+      selectedHelper = samsul;
+    } else if (onShiftHelpers.length > 0) {
+      selectedHelper = onShiftHelpers[0];
+    }
+
+    const now = TS();
+    const tokens = order.tokens || {};
+
+    // Create process docs for all services
+    const batch = db.batch();
+    for (const group of serviceGroups) {
+      const processId = `${orderId}__${group.serviceType}`;
+      const steps = stepsForServiceType(group.serviceType);
+      const pRef = db.doc(`ops_process/${processId}`);
+
+      batch.set(pRef, {
+        id: processId,
+        orderId,
+        parentOrderId: orderId,
+        serviceType: group.serviceType,
+        serviceLabel: group.label,
+        userId: userId || order.userId || '',
+        vendorId: vendorId || order.vendorId || 'default',
+        steps,
+        currentIndex: 0,
+        status: steps[0],
+        tokenNumber: tokens[group.serviceType] || order.tokenNumber || '',
+        siblingCount: serviceGroups.length,
+        stages: {
+          tagging: {
+            assignee: selectedHelper ? selectedHelper.uid : null,
+            assigneeName: selectedHelper ? (selectedHelper.name || '') : '',
+            queuedAt: now,
+            assignedAt: selectedHelper ? now : null,
+            assignedBy: selectedHelper ? 'system_auto' : null,
+          }
+        },
+        garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
+        createdAt: now,
+        customerName: order.customerName || '',
+      });
+    }
+
+    if (selectedHelper) {
+      const staffRef = db.doc(`ops_staff/${selectedHelper.uid}`);
+      batch.update(staffRef, {
+        activeHelperTask: { orderId, step: 'tagging' }
+      });
+    }
+
+    await batch.commit();
+    console.log(`[AutoAssignTagging] Auto-created ops_process and assigned ${orderId} to ${selectedHelper ? selectedHelper.name : 'unassigned'}`);
+
+    if (selectedHelper) {
+      await sendFCMOrderAssignment({
+        staffId: selectedHelper.uid,
+        orderId,
+        taskType: 'step',
+        customerName: order.customerName || '',
+        stepName: 'tagging',
+      });
+    }
+  } catch (err) {
+    console.error(`[AutoAssignTagging] Failed for ${orderId}:`, err);
+  }
+}
+
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
 // (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync),
 // or when an order is deleted entirely from the main Livfresh admin panel.
@@ -769,8 +898,13 @@ exports.syncTaskFromOrder = onDocumentWritten('users/{userId}/orders/{orderId}',
     }
   }
 
-    const userId = event.params.userId;
-    const vendorId = after?.vendorId || before?.vendorId;
+  const userId = event.params.userId;
+  const vendorId = after?.vendorId || before?.vendorId;
+
+  // Auto-assign tagging order to helpers on reaching pickup_completed
+  if (trans.taskStatus === 'picked_up' || (after.status === 'pickup_completed' && before.status !== 'pickup_completed')) {
+    await autoAssignTaggingOnPickup(orderId, after, userId, vendorId);
+  }
 
     // Clean up delivery tasks when an order is cancelled.
     if (trans.dropQueue) {
@@ -882,7 +1016,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const orderId = data.orderId;
     const action = data.action;
     if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-    if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded', 'snoozeNudge'].includes(action)) {
+    if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'tagAllGarments', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded', 'snoozeNudge'].includes(action)) {
       return { ok: false, error: 'invalid_input' };
     }
 
@@ -1167,6 +1301,39 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           }
         }
 
+        // Machine capacity guard: washers, dryers, and irons cannot exceed physical store limits
+        if (['getting_washed', 'getting_dried', 'getting_ironed'].includes(step)) {
+          const resSnap = await tx.get(db.doc('config/storeResources'));
+          const resData = resSnap.exists ? resSnap.data() : {};
+          const maxCapacity = step === 'getting_washed'
+            ? (resData.washers ?? 2)
+            : step === 'getting_dried'
+              ? (resData.dryers ?? 2)
+              : (resData.ironingStations ?? 2);
+
+          const activeSnap = await tx.get(
+            db.collection('ops_process').where('status', '==', step)
+          );
+          let runningCount = 0;
+          activeSnap.forEach((doc) => {
+            if (doc.id === processRef.id) return;
+            const d = doc.data();
+            const st = d.stages && d.stages[step];
+            if (st && st.startedAt && !st.completedAt) {
+              runningCount += 1;
+            }
+          });
+
+          if (runningCount >= maxCapacity && role !== 'admin') {
+            const stepTitle = step === 'getting_washed' ? 'washers' : step === 'getting_dried' ? 'dryers' : 'ironing stations';
+            return {
+              ok: false,
+              error: 'machine_capacity_reached',
+              message: `All ${maxCapacity} ${stepTitle} are currently running. Wait for an active cycle to complete before starting another.`
+            };
+          }
+        }
+
         // Keep the existing owner (a supervisor pressing Start for a helper must not steal it).
         tx.update(processRef, {
           stages: {
@@ -1221,8 +1388,16 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (!stage.startedAt) return { ok: false, error: 'invalid_state' };
         if (stage.completedAt) return { ok: true, status: 'already_completed', step };
 
-        const completedAt = now;
+        const isMachine = step === 'getting_washed' || step === 'getting_dried';
         const startedAtMs = stage.startedAt ? (typeof stage.startedAt.toMillis === 'function' ? stage.startedAt.toMillis() : new Date(stage.startedAt).getTime()) : completedAt.toMillis();
+        const durationSec = Math.max(0, (now.toMillis() - startedAtMs) / 1000);
+
+        // Accidental completion guard: minimum 30 minutes (1800s) for wash/dry cycles
+        if (isMachine && durationSec < 1800 && role !== 'supervisor' && role !== 'admin' && !data.forceOverride) {
+          return { ok: false, error: 'cycle_in_progress', message: 'Machine cycle is still running. Minimum 30 minutes required before unload.' };
+        }
+
+        const completedAt = now;
         const acceptedAtMs = stage.acceptedAt ? (typeof stage.acceptedAt.toMillis === 'function' ? stage.acceptedAt.toMillis() : new Date(stage.acceptedAt).getTime()) : startedAtMs;
 
         const durationMs = Math.max(0, completedAt.toMillis() - startedAtMs);
@@ -1265,6 +1440,17 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           currentIndex: nextIndex,
           status: nextStatus,
         });
+
+        // Clear activeHelperTask for the helper who completed this step
+        if (stage.assignee) {
+          try {
+            tx.update(db.doc(`ops_staff/${stage.assignee}`), {
+              activeHelperTask: admin.firestore.FieldValue.delete()
+            });
+          } catch (e) {
+            console.warn('Could not clear activeHelperTask on staff doc', e);
+          }
+        }
 
         // Dual-write to ops_stage_metrics for permanent historical tracking
         const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
@@ -1411,7 +1597,9 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         const garments = p.garments || {};
         if (parsed.seq < 1 || parsed.seq > (garments.count || 0)) return { ok: false, error: 'not_in_count' };
-        if ((garments.registered || []).some(r => r.seq === parsed.seq)) return { ok: false, error: 'already_registered' };
+        if ((garments.registered || []).some(r => r.seq === parsed.seq)) {
+          return { ok: true, seq: parsed.seq, alreadyRegistered: true };
+        }
 
         tx.update(processRef, {
           garments: {
@@ -1424,6 +1612,50 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       return result;
     } catch (err) {
       console.error('opsProcessing scanGarment failed', err);
+      return { ok: false, error: 'server_error' };
+    }
+  }
+
+  if (action === 'tagAllGarments') {
+    try {
+      const result = await db.runTransaction(async (tx) => {
+        const ps = await tx.get(processRef);
+        if (!ps.exists) return { ok: false, error: 'not_found' };
+        const p = ps.data();
+        const tagStage = p.stages && p.stages.tagging;
+        if (!tagStage || tagStage.assignee !== auth.uid) return { ok: false, error: 'unauthorized' };
+        if (tagStage.completedAt) return { ok: false, error: 'already_submitted' };
+
+        const garments = p.garments || {};
+        const count = garments.count || 0;
+        if (count < 1) return { ok: false, error: 'no_count' };
+
+        const existing = garments.registered || [];
+        const existingSeqs = new Set(existing.map(r => r.seq));
+        const allRegistered = [...existing];
+        for (let seq = 1; seq <= count; seq++) {
+          if (!existingSeqs.has(seq)) {
+            allRegistered.push({
+              orderId,
+              seq,
+              qr: `SPNZ:${orderId}:${seq}`,
+              scannedAt: now,
+              scannedBy: auth.uid,
+            });
+          }
+        }
+
+        tx.update(processRef, {
+          garments: {
+            ...garments,
+            registered: allRegistered,
+          },
+        });
+        return { ok: true, count: allRegistered.length };
+      });
+      return result;
+    } catch (err) {
+      console.error('opsProcessing tagAllGarments failed', err);
       return { ok: false, error: 'server_error' };
     }
   }
@@ -1488,6 +1720,17 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           currentIndex: nextIndex,
           status: nextStatus,
         });
+
+        // Clear activeHelperTask for the helper who completed tagging
+        if (tagStage.assignee) {
+          try {
+            tx.update(db.doc(`ops_staff/${tagStage.assignee}`), {
+              activeHelperTask: admin.firestore.FieldValue.delete()
+            });
+          } catch (e) {
+            console.warn('Could not clear activeHelperTask on staff doc', e);
+          }
+        }
 
         // Dual-write to ops_stage_metrics for permanent historical tracking
         const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
@@ -1639,6 +1882,17 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           currentIndex: nextIndex,
           status: nextStatus,
         });
+
+        // Clear activeHelperTask for the helper who completed packaging
+        if (stage.assignee) {
+          try {
+            tx.update(db.doc(`ops_staff/${stage.assignee}`), {
+              activeHelperTask: admin.firestore.FieldValue.delete()
+            });
+          } catch (e) {
+            console.warn('Could not clear activeHelperTask on staff doc', e);
+          }
+        }
 
         // Dual-write to ops_stage_metrics for permanent historical tracking
         const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
@@ -2257,16 +2511,21 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         const { assignee, assigneeName, assignedBy, assignedAt, acceptedAt, ...progress } = s;
 
         if (action === 'unassignStep') {
-          if (!assignee) return { ok: true, status: 'unassigned' };
-          const isMachine = step === 'getting_washed' || step === 'getting_dried';
-          const updateStage = isMachine ? progress : (({ startedAt, ...rest }) => rest)(progress);
+          if (!assignee && !s.startedAt) return { ok: true, status: 'unassigned' };
+          const isMachine = step === 'getting_washed' || step === 'getting_dried' || step === 'getting_ironed';
+          const shouldClearStart = Boolean(data.clearStartedAt) || !isMachine;
+          const updateStage = shouldClearStart
+            ? (({ startedAt, detergentAddedAt, softenerAddedAt, ...rest }) => rest)(progress)
+            : progress;
           tx.update(pRef, { [`stages.${step}`]: updateStage });
 
-          try {
-            const hRef = db.doc(`ops_staff/${assignee}`);
-            tx.update(hRef, { activeHelperTask: admin.firestore.FieldValue.delete() });
-          } catch (e) {
-            console.warn('Could not clear activeHelperTask on staff doc', e);
+          if (assignee) {
+            try {
+              const hRef = db.doc(`ops_staff/${assignee}`);
+              tx.update(hRef, { activeHelperTask: admin.firestore.FieldValue.delete() });
+            } catch (e) {
+              console.warn('Could not clear activeHelperTask on staff doc', e);
+            }
           }
           return { ok: true, status: 'unassigned' };
         }

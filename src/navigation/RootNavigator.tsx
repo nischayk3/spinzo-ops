@@ -249,15 +249,6 @@ export function RootNavigator() {
       if (!isLoggedIn || activeRole === 'supervisor') return;
       if (staffDoc === null || staffDoc === undefined) return;
 
-      // Server-enforced logout: the daily scheduler (scheduleForceLogout) set
-      // onShift:false on all staff. If our live staff doc explicitly shows off-shift,
-      // sign out so the app reflects the forced clock-out even if we missed it locally.
-      if (staffDoc.onShift === false) {
-        logout();
-        return;
-      }
-      if (!staffDoc.onShift) return;
-
       const now = new Date();
       // 1. Check if past 11:30 PM
       if (now.getHours() === 23 && now.getMinutes() >= 30) {
@@ -284,13 +275,19 @@ export function RootNavigator() {
     };
 
     const intervalId = setInterval(checkExpiry, 60000);
-    // Run immediately on mount or role change
     checkExpiry();
     
     return () => clearInterval(intervalId);
   }, [isLoggedIn, activeRole]);
 
-  if (!authInitialized) {
+  // Loading safety escape: never keep staff stuck on black screen if network hangs
+  const [initTimeoutPassed, setInitTimeoutPassed] = React.useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setInitTimeoutPassed(true), 3500);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (!authInitialized && !initTimeoutPassed) {
     return (
       <View style={{ flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center' }}>
         <ActivityIndicator size="large" color="#3B82F6" />
@@ -306,7 +303,7 @@ export function RootNavigator() {
           <Stack.Screen name="Login" component={LoginScreen} />
         ) : !activeRole ? (
           <Stack.Screen name="NotInRoster" component={NotInRosterScreen} />
-        ) : !permissionsLoaded ? (
+        ) : (!permissionsLoaded && !initTimeoutPassed) ? (
           <Stack.Screen name="Permissions">
             {() => (
               <View style={{ flex: 1, backgroundColor: '#0F172A', justifyContent: 'center', alignItems: 'center' }}>

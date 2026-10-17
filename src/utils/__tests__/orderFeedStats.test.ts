@@ -34,6 +34,17 @@ describe('dayRevenue', () => {
     expect(s.outForDelivery).toBe(1);
     expect(s.orderRevenue).toBe(150);
   });
+
+  it('excludes cancelled orders from revenue and orderCount', () => {
+    const orders = [
+      mk({ id: '1', billDetails: { total: 100 }, status: 'ready' }),
+      mk({ id: '2', billDetails: { total: 50 }, status: 'cancelled' }),
+    ];
+    const s = dayRevenue(orders);
+    expect(s.revenue).toBe(100);
+    expect(s.orderCount).toBe(1);
+    expect(s.cancelledCount).toBe(1);
+  });
 });
 
 describe('customerIndex', () => {

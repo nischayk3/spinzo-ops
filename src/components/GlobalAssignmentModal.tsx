@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
-import { BellRing, MapPin, Zap, Clock } from 'lucide-react-native';
+import { BellRing, MapPin, Zap, Clock, X } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { acceptTask } from '../utils/opsPickup';
@@ -10,26 +10,44 @@ import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
 
+const safeShortId = (id?: string | null): string => {
+  if (!id || typeof id !== 'string') return '------';
+  return id.slice(-6).toUpperCase();
+};
+
+const safeAddress = (addr: any): string => {
+  if (!addr) return 'Customer Address';
+  if (typeof addr === 'string') return addr;
+  return addr.formattedAddress || addr.address || addr.fullAddress || addr.line1 || 'Customer Address';
+};
+
 export function GlobalAssignmentModal() {
   const { myTasks, myDeliveries } = useOpsStaffStore();
   const orders = useOrderFeedStore(state => state.orders);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [locallyAcceptedIds, setLocallyAcceptedIds] = useState<Set<string>>(new Set());
 
   // Only alert for pickup tasks whose ORDER is still awaiting pickup
-  // (placed/confirmed/in_transit_to_store). The order status is the source of truth;
-  // a task for an order that's already pickup_completed/processing/ready is stale.
-  const isOrderAwaitingPickup = (orderId: string) => {
+  const isOrderAwaitingPickup = (orderId?: string) => {
+    if (!orderId) return true;
     const order = orders.find(o => o.id === orderId);
     if (!order) return true;
     return order.status === 'placed' || order.status === 'confirmed' || order.status === 'in_transit_to_store';
   };
 
   const unacceptedPickup = myTasks.find(t =>
-    (t.status === 'pending' || t.status === 'assigned') && !t.acceptedAt && isOrderAwaitingPickup(t.orderId)
+    (t.status === 'pending' || t.status === 'assigned') &&
+    !t.acceptedAt &&
+    !locallyAcceptedIds.has(t.id) &&
+    !locallyAcceptedIds.has(t.orderId) &&
+    isOrderAwaitingPickup(t.orderId)
   );
 
   const unacceptedDelivery = myDeliveries.find(t =>
-    (t.status === 'pending' || t.status === 'assigned' || t.status === 'out_for_delivery') && !t.acceptedAt
+    (t.status === 'pending' || t.status === 'assigned' || t.status === 'out_for_delivery') &&
+    !t.acceptedAt &&
+    !locallyAcceptedIds.has(t.id) &&
+    !locallyAcceptedIds.has(t.orderId)
   );
 
   const activeTask = unacceptedPickup || unacceptedDelivery;
@@ -43,16 +61,19 @@ export function GlobalAssignmentModal() {
     ? (matchedOrder ? slotLabel(matchedOrder) : pickupLabel(activeTask as any))
     : '';
 
-  const address = activeTask
+  const rawAddress = activeTask
     ? (isDelivery ? (activeTask as any).deliveryAddress : (activeTask as any).pickupAddress)
     : '';
+  const address = safeAddress(rawAddress);
+  const orderId = activeTask?.orderId || activeTask?.id || '';
+  const shortId = safeShortId(orderId);
 
-  React.useEffect(() => {
-    if (activeTask && !acceptingId) {
+  useEffect(() => {
+    if (activeTask && !acceptingId && !locallyAcceptedIds.has(activeTask.id)) {
       dramaticChime();
       triggerAssignmentNotification({
-        orderId: activeTask.orderId,
-        orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
+        orderId,
+        orderShortId: shortId,
         taskType: isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup'),
         address,
         slotText,
@@ -60,48 +81,79 @@ export function GlobalAssignmentModal() {
       });
 
       if (Platform.OS === 'android') {
-        SpinzoOverlay.showOverlay({
-          orderId: activeTask.orderId,
-          taskType: isDelivery ? 'delivery' : (isInstant ? 'instant_pickup' : 'pickup'),
-          customerName: matchedOrder?.customerName || '',
-          address: address || 'Customer Address',
-          slot: slotText,
-          isInstant: isInstant ? 'true' : 'false',
-        });
+        try {
+          SpinzoOverlay.showOverlay({
+            orderId,
+            taskType: isDelivery ? 'delivery' : (isInstant ? 'instant_pickup' : 'pickup'),
+            customerName: matchedOrder?.customerName || '',
+            address,
+            slot: slotText,
+            isInstant: isInstant ? 'true' : 'false',
+          });
+        } catch (e) {
+          console.warn('[GlobalAssignmentModal] SpinzoOverlay.showOverlay error:', e);
+        }
       }
     } else if (!activeTask) {
       stopAlarm();
       clearAssignmentNotifications();
       if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+        try {
+          SpinzoOverlay.dismissOverlay();
+        } catch {}
       }
     }
     return () => {
       stopAlarm();
       if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+        try {
+          SpinzoOverlay.dismissOverlay();
+        } catch {}
       }
     };
   }, [activeTask?.id]);
 
   const handleAccept = async () => {
     if (!activeTask) return;
-    setAcceptingId(activeTask.id);
+    const taskId = activeTask.id;
+    const targetOrderId = activeTask.orderId || taskId;
+
+    // 1. Immediately silence alerts and native overlay
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
-      SpinzoOverlay.dismissOverlay();
+      try {
+        SpinzoOverlay.dismissOverlay();
+      } catch {}
     }
+
+    // 2. Optimistically dismiss modal immediately so rider is never trapped
+    setLocallyAcceptedIds(prev => new Set([...prev, taskId, targetOrderId]));
+    setAcceptingId(taskId);
+
+    // 3. Dispatch backend call with both targetOrderId and taskId
     try {
-      const res = await acceptTask(activeTask.id, isDelivery);
-      if (!res.ok) {
-        Alert.alert('Unable to Accept', res.error || 'Failed to accept task');
+      const res = await acceptTask(targetOrderId, isDelivery, taskId);
+      if (!res.ok && res.error !== 'alreadyDone') {
+        console.warn('[GlobalAssignmentModal] acceptTask warning:', res.error);
       }
     } catch (err: any) {
-      console.warn("Failed to accept task:", err);
-      Alert.alert('Error', err?.message || 'Network error while accepting task');
+      console.warn('[GlobalAssignmentModal] acceptTask network error:', err);
     } finally {
       setAcceptingId(null);
+    }
+  };
+
+  const handleDismiss = () => {
+    stopAlarm();
+    clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      try {
+        SpinzoOverlay.dismissOverlay();
+      } catch {}
+    }
+    if (activeTask) {
+      setLocallyAcceptedIds(prev => new Set([...prev, activeTask.id, activeTask.orderId]));
     }
   };
 
@@ -110,8 +162,15 @@ export function GlobalAssignmentModal() {
   return (
     <Modal visible={true} animationType="fade" transparent>
       <View className="flex-1 bg-black/80 justify-center p-6">
-        <View className="bg-bgSurface rounded-3xl p-6 items-center border border-bgSurfaceLight shadow-lg">
-          <View className={`w-20 h-20 rounded-full items-center justify-center mb-6 ${isInstant ? 'bg-amber-500/15' : 'bg-primary/15'}`}>
+        <View className="bg-bgSurface rounded-3xl p-6 items-center border border-bgSurfaceLight shadow-lg relative">
+          <TouchableOpacity 
+            onPress={handleDismiss}
+            className="absolute top-4 right-4 w-9 h-9 rounded-full bg-bgDark items-center justify-center border border-bgSurfaceLight active:opacity-75"
+          >
+            <X size={18} color="#94A3B8" />
+          </TouchableOpacity>
+
+          <View className={`w-20 h-20 rounded-full items-center justify-center mb-5 ${isInstant ? 'bg-amber-500/15' : 'bg-primary/15'}`}>
             {isInstant ? <Zap size={40} color="#f59e0b" /> : <BellRing size={40} color="#994BFF" />}
           </View>
 
@@ -119,10 +178,10 @@ export function GlobalAssignmentModal() {
             {isInstant ? '⚡ Instant Pickup!' : 'New Order Assigned!'}
           </Text>
           <Text className="text-lg text-textSecondary font-medium mb-6 text-center">
-            {isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup')} • #{activeTask.orderId.slice(-6).toUpperCase()}
+            {isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup')} • #{shortId}
           </Text>
 
-          <View className="w-full bg-bgDark rounded-2xl p-5 mb-8 border border-bgSurfaceLight">
+          <View className="w-full bg-bgDark rounded-2xl p-5 mb-6 border border-bgSurfaceLight">
             <View className="flex-row items-start mb-4">
               <MapPin size={20} color="#94A3B8" className="mr-3 mt-0.5" />
               <Text className="flex-1 text-textSecondary font-medium leading-relaxed">{address}</Text>
@@ -140,7 +199,7 @@ export function GlobalAssignmentModal() {
           <TouchableOpacity
             onPress={handleAccept}
             disabled={!!acceptingId}
-            className="w-full h-16 bg-primary rounded-2xl items-center justify-center flex-row"
+            className="w-full h-16 bg-primary rounded-2xl items-center justify-center flex-row active:opacity-90 shadow-md"
           >
             {acceptingId ? (
               <ActivityIndicator color="#fff" size="large" />

@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Image } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
@@ -21,6 +21,7 @@ import type { RootStackParamList } from '../../navigation/RootNavigator';
 import { PackagingVerification } from '../../components/PackagingVerification';
 import { WorkflowSteps } from '../../components/WorkflowSteps';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
+import { useResponsive } from '../../utils/useResponsive';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
 
@@ -246,9 +247,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const user = useAuthStore(s => s.user);
   const activeRole = useAuthStore(s => s.activeRole);
   const orders = useOrderFeedStore(s => s.orders);
-  const { processes, claim, startStep, completeStep, printLabels, scanGarment, unregisterGarment, submitTagging, cancelOrder, reschedulePickup, scheduleDelivery, markOutForDelivery, verifyDeliveryOTP } = useOpsProcessStore();
+  const { processes, claim, startStep, completeStep, printLabels, scanGarment, tagAllGarments, unregisterGarment, submitTagging, cancelOrder, reschedulePickup, scheduleDelivery, markOutForDelivery, verifyDeliveryOTP } = useOpsProcessStore();
   const { clearActiveHelperTask } = useOpsStaffStore();
   const resources = useStoreResourcesStore(s => s.resources);
+  const { isDesktop, modalContainerStyle } = useResponsive();
 
   const [countText, setCountText] = useState('');
   const [printError, setPrintError] = useState<string | null>(null);
@@ -305,8 +307,21 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const taggingStage = process?.stages?.tagging;
   const garments = process?.garments || {};
   const registered = garments.registered || [];
-  const registeredSeqs = registered.map((r: any) => typeof r === 'number' ? r : r.seq);
-  const registeredCount = registered.length;
+  const registeredSeqs = useMemo(() => registered.map((r: any) => typeof r === 'number' ? r : r.seq), [registered]);
+  const [optimisticSeqs, setOptimisticSeqs] = useState<number[]>([]);
+  const optimisticSeqsRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    setOptimisticSeqs(prev => {
+      const merged = Array.from(new Set([...registeredSeqs, ...prev]));
+      optimisticSeqsRef.current = merged;
+      return merged;
+    });
+  }, [registeredSeqs]);
+
+  const effectiveRegisteredSeqs = useMemo(() => Array.from(new Set([...registeredSeqs, ...optimisticSeqs])), [registeredSeqs, optimisticSeqs]);
+  const effectiveCount = effectiveRegisteredSeqs.length;
+  const registeredCount = effectiveCount;
 
   const packagingPhotos = useMemo(() => {
     const list: string[] = [];
@@ -420,42 +435,96 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   };
 
   const handleScan = async (data: string) => {
-    setBusy(true);
     setScanError(null);
     setActionError(null);
-    try {
-      let targetSeq: number | undefined;
-      if (typeof data === 'string' && data.startsWith(`SPNZ:${orderId}:`)) {
-        const parts = data.split(':');
-        const parsed = parseInt(parts[2], 10);
-        if (!isNaN(parsed) && parsed >= 1 && parsed <= (garments.count || 0)) {
+
+    const totalCount = garments.count || 0;
+    if (totalCount === 0) return;
+
+    const currentAssigned = optimisticSeqsRef.current;
+    if (currentAssigned.length >= totalCount) {
+      setScannerVisible(false);
+      return;
+    }
+
+    let targetSeq: number | undefined;
+    if (typeof data === 'string' && data.startsWith(`SPNZ:${orderId}:`)) {
+      const parts = data.split(':');
+      const parsed = parseInt(parts[2], 10);
+      if (!isNaN(parsed) && parsed >= 1 && parsed <= totalCount) {
+        if (!currentAssigned.includes(parsed)) {
           targetSeq = parsed;
+        } else {
+          return;
         }
       }
+    }
 
-      if (!targetSeq) {
-        targetSeq = Array.from({ length: garments.count || 0 })
-          .map((_, i) => i + 1)
-          .find(seq => !registeredSeqs.includes(seq));
-      }
+    // Dummy QR fallback: pick the first un-assigned sequence number
+    if (!targetSeq) {
+      targetSeq = Array.from({ length: totalCount })
+        .map((_, i) => i + 1)
+        .find(seq => !currentAssigned.includes(seq));
+    }
 
-      if (!targetSeq) {
-        setScannerVisible(false);
-        return;
-      }
+    if (!targetSeq) {
+      setScannerVisible(false);
+      return;
+    }
 
-      const expectedQr = `SPNZ:${orderId}:${targetSeq}`;
-      const res = await scanGarment(orderId, expectedQr, process?.id);
-      if (!res.ok) {
+    // Optimistically update immediately
+    const nextAssigned = [...currentAssigned, targetSeq];
+    optimisticSeqsRef.current = nextAssigned;
+    setOptimisticSeqs(nextAssigned);
+
+    if (nextAssigned.length >= totalCount) {
+      setTimeout(() => setScannerVisible(false), 500);
+    }
+
+    // Dispatch scanGarment in background without blocking camera frame rate
+    const expectedQr = `SPNZ:${orderId}:${targetSeq}`;
+    scanGarment(orderId, expectedQr, process?.id).then(res => {
+      if (!res.ok && res.error !== 'already_registered') {
+        optimisticSeqsRef.current = optimisticSeqsRef.current.filter((s: number) => s !== targetSeq);
+        setOptimisticSeqs(optimisticSeqsRef.current);
         setScanError(friendlyScanError(res.error));
-      } else {
-        const newCount = registeredSeqs.includes(targetSeq) ? registeredSeqs.length : registeredSeqs.length + 1;
-        if (newCount >= (garments.count || 0)) {
-          setScannerVisible(false);
+      }
+    }).catch(err => {
+      console.warn('scanGarment error:', err);
+    });
+  };
+
+  const handleTagAll = async () => {
+    const totalCount = garments.count || 0;
+    if (totalCount === 0) return;
+    const all = Array.from({ length: totalCount }, (_, i) => i + 1);
+    optimisticSeqsRef.current = all;
+    setOptimisticSeqs(all);
+    setScannerVisible(false);
+
+    try {
+      const res = await tagAllGarments(orderId, process?.id);
+      if (!res.ok) {
+        const missing = all.filter((s: number) => !registeredSeqs.includes(s));
+        for (const seq of missing) {
+          await scanGarment(orderId, `SPNZ:${orderId}:${seq}`, process?.id);
         }
       }
-    } finally {
-      setBusy(false);
+    } catch (e) {
+      console.warn('tagAllGarments failed', e);
+    }
+  };
+
+  const handleToggleGarment = async (seq: number) => {
+    if (effectiveRegisteredSeqs.includes(seq)) {
+      optimisticSeqsRef.current = optimisticSeqsRef.current.filter((s: number) => s !== seq);
+      setOptimisticSeqs(optimisticSeqsRef.current);
+      await unregisterGarment(orderId, seq, process?.id);
+    } else {
+      const nextAssigned = [...optimisticSeqsRef.current, seq];
+      optimisticSeqsRef.current = nextAssigned;
+      setOptimisticSeqs(nextAssigned);
+      await scanGarment(orderId, `SPNZ:${orderId}:${seq}`, process?.id);
     }
   };
 
@@ -560,17 +629,33 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     );
   };
 
-  const handleUnassignHelper = async () => {
+  const handleUnassignHelper = async (clearStartedAt = false) => {
     if (!process || !order) return;
     setBusy(true);
     try {
-      const res = await useOpsProcessStore.getState().unassignStep(order.id, process.id, order.userId || '');
+      const res = await useOpsProcessStore.getState().unassignStep(order.id, process.id, order.userId || '', clearStartedAt);
       setBusy(false);
       if (!res.ok) setActionError(friendlyActionError(res.error || 'unknown'));
     } catch (e: any) {
       setBusy(false);
       setActionError(friendlyActionError(e?.message || 'request_failed'));
     }
+  };
+
+  const handleUndoMachineStart = () => {
+    if (!process || !order) return;
+    Alert.alert(
+      'Reset Machine Cycle?',
+      'Confirm that this order is NOT physically in a machine. This will reset the stage back to waiting outside the machine.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset to Queue',
+          style: 'destructive',
+          onPress: () => handleUnassignHelper(true),
+        },
+      ]
+    );
   };
 
   const handleWhatsApp = () => {
@@ -589,6 +674,17 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const started = !!curStage?.startedAt;
   const completed = !!curStage?.completedAt;
+
+  const isMachineCapacityFull = useMemo(() => {
+    if (!cur || (cur !== 'getting_washed' && cur !== 'getting_dried' && cur !== 'getting_ironed')) return false;
+    const isWash = cur === 'getting_washed';
+    const isDry = cur === 'getting_dried';
+    const maxCapacity = isWash ? resources.washers : isDry ? resources.dryers : resources.ironingStations;
+    const running = processes.filter(
+      p => currentStep(p) === cur && !!p.stages?.[cur]?.startedAt && !p.stages?.[cur]?.completedAt && p.orderId !== orderId
+    ).length;
+    return running >= maxCapacity;
+  }, [cur, processes, resources, orderId]);
 
   const machineBadge = useMemo(() => {
     if (!cur || (cur !== 'getting_washed' && cur !== 'getting_dried')) return null;
@@ -613,6 +709,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       return assignedName;
     } else {
       const freeIdx = runningForStep.length;
+      if (freeIdx >= names.length) {
+        return 'All in Use';
+      }
       const nextMachine = names[freeIdx] || names[0];
       return nextMachine;
     }
@@ -654,7 +753,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       );
     }
 
-    const allRegistered = registeredCount === garments.count;
+    const allRegistered = (garments.count || 0) > 0 && effectiveCount >= (garments.count || 0);
 
     return (
       <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
@@ -662,16 +761,27 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         
         <View className="flex-row items-center justify-between mb-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
           <View>
-            <Text className="text-gray-900 font-bold text-2xl">{registeredCount} / {garments.count}</Text>
+            <Text className="text-gray-900 font-bold text-2xl">{effectiveCount} / {garments.count}</Text>
             <Text className="text-gray-500 text-xs uppercase tracking-wider">Garments Scanned</Text>
           </View>
-          <TouchableOpacity
-            onPress={() => setScannerVisible(true)}
-            disabled={busy || allRegistered}
-            className={`w-14 h-14 rounded-full items-center justify-center ${allRegistered ? 'bg-green-100' : 'bg-[#994bff]'}`}
-          >
-            <Play size={24} color={allRegistered ? '#22c55e' : '#fff'} />
-          </TouchableOpacity>
+          <View className="flex-row items-center gap-2">
+            {!allRegistered && (
+              <TouchableOpacity
+                onPress={handleTagAll}
+                disabled={busy}
+                className="px-3 py-2.5 rounded-xl bg-purple-50 border border-purple-200 active:bg-purple-100"
+              >
+                <Text className="text-purple-700 font-bold text-xs">⚡ Tag All</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              onPress={() => setScannerVisible(true)}
+              disabled={busy || allRegistered}
+              className={`w-12 h-12 rounded-full items-center justify-center ${allRegistered ? 'bg-green-100' : 'bg-[#994bff]'}`}
+            >
+              <Play size={20} color={allRegistered ? '#22c55e' : '#fff'} />
+            </TouchableOpacity>
+          </View>
         </View>
 
         {scanError && <Text className="text-red-500 text-sm mb-4 font-medium">{scanError}</Text>}
@@ -679,11 +789,16 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         <View className="flex-row flex-wrap gap-2 mb-6">
           {Array.from({ length: garments.count }).map((_, i) => {
             const seq = i + 1;
-            const isScanned = registeredSeqs.includes(seq);
+            const isScanned = effectiveRegisteredSeqs.includes(seq);
             return (
-              <View key={seq} className={`w-12 h-12 rounded-xl items-center justify-center border-2 ${isScanned ? 'bg-green-50 border-green-500' : 'bg-gray-50 border-gray-200'}`}>
+              <TouchableOpacity 
+                key={seq} 
+                onPress={() => handleToggleGarment(seq)}
+                disabled={busy}
+                className={`w-12 h-12 rounded-xl items-center justify-center border-2 active:opacity-75 ${isScanned ? 'bg-green-50 border-green-500' : 'bg-gray-50 border-gray-200'}`}
+              >
                 <Text className={`font-bold ${isScanned ? 'text-green-700' : 'text-gray-400'}`}>{seq}</Text>
-              </View>
+              </TouchableOpacity>
             );
           })}
         </View>
@@ -721,15 +836,22 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       if (!cur) return null;
       
       const hasAssignee = !!curStage?.assignee;
+      const isMachine = cur === 'getting_washed' || cur === 'getting_dried' || cur === 'getting_ironed';
       
       return (
         <View className="mb-4 bg-gray-50 p-3 rounded-lg border border-gray-200">
           <Text className="text-gray-500 font-bold mb-2 text-xs uppercase tracking-widest">Supervisor Action</Text>
           {hasAssignee ? (
-            <View className="flex-row items-center justify-between">
+            <View className="flex-row items-center justify-between flex-wrap gap-2">
               <Text className="text-gray-700 font-bold text-sm">Assigned to: {curStage.assigneeName}</Text>
-              <View className="flex-row gap-2">
-                <TouchableOpacity onPress={handleUnassignHelper} className="bg-red-50 border border-red-200 px-3 py-1.5 rounded">
+              <View className="flex-row items-center gap-2">
+                {started && isMachine && (
+                  <TouchableOpacity onPress={handleUndoMachineStart} className="bg-amber-50 border border-amber-300 px-2.5 py-1.5 rounded flex-row items-center">
+                    <Undo2 size={12} color="#d97706" className="mr-1" />
+                    <Text className="text-amber-800 font-bold text-xs">Reset / Outside Machine</Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity onPress={() => handleUnassignHelper(started)} className="bg-red-50 border border-red-200 px-3 py-1.5 rounded">
                   <Text className="text-red-700 font-bold text-xs">Unassign</Text>
                 </TouchableOpacity>
                 <TouchableOpacity onPress={() => setShowAssignHelperModal(true)} className="bg-purple-50 border border-purple-200 px-3 py-1.5 rounded">
@@ -738,10 +860,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               </View>
             </View>
           ) : (
-            <TouchableOpacity onPress={() => setShowAssignHelperModal(true)} className="bg-purple-50 border border-purple-200 py-2 rounded items-center flex-row justify-center">
-              <UserPlus size={16} color="#994bff" className="mr-2" />
-              <Text className="text-purple-700 font-bold text-sm">Assign Step to Helper</Text>
-            </TouchableOpacity>
+            <View className="flex-row items-center justify-between">
+              <TouchableOpacity onPress={() => setShowAssignHelperModal(true)} className="bg-purple-50 border border-purple-200 py-2 px-3 rounded items-center flex-row justify-center flex-1 mr-2">
+                <UserPlus size={16} color="#994bff" className="mr-2" />
+                <Text className="text-purple-700 font-bold text-sm">Assign Step to Helper</Text>
+              </TouchableOpacity>
+              {started && isMachine && (
+                <TouchableOpacity onPress={handleUndoMachineStart} className="bg-amber-50 border border-amber-300 px-3 py-2 rounded flex-row items-center">
+                  <Undo2 size={14} color="#d97706" className="mr-1" />
+                  <Text className="text-amber-800 font-bold text-xs">Reset / Outside Machine</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           )}
         </View>
       );
@@ -827,20 +957,43 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
           {!started ? (
             <View>
-              <TouchableOpacity
-                onPress={handleStart}
-                disabled={busy}
-                className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
-              >
-                {busy ? <ActivityIndicator color="#fff" /> : (
-                  <View className="flex-row items-center gap-2">
-                    {isMachineStep && <MachineIcon size={20} color="#fff" />}
-                    <Text className="text-white font-bold text-lg">
-                      {isMachineStep && machineBadge ? `Start ${stepLabel(cur)} (${machineBadge})` : `Start ${stepLabel(cur)}`}
+              {isMachineCapacityFull ? (
+                <View>
+                  <TouchableOpacity
+                    onPress={() => {
+                      const stepTitle = cur === 'getting_washed' ? `${resources.washers} Washers` : cur === 'getting_dried' ? `${resources.dryers} Dryers` : `${resources.ironingStations} Irons`;
+                      Alert.alert(
+                        'Machine Capacity Full',
+                        `All ${stepTitle} are currently running in the store. Please wait for an active cycle to finish and unload before starting this order.`
+                      );
+                    }}
+                    className="h-14 rounded-xl items-center justify-center flex-row bg-gray-100 border border-gray-300"
+                  >
+                    <Lock size={18} color="#64748b" className="mr-2" />
+                    <Text className="text-gray-600 font-bold text-base">
+                      All {cur === 'getting_washed' ? 'Washers' : cur === 'getting_dried' ? 'Dryers' : 'Irons'} in Use ({cur === 'getting_washed' ? resources.washers : cur === 'getting_dried' ? resources.dryers : resources.ironingStations} Running)
                     </Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+                  </TouchableOpacity>
+                  <Text className="text-gray-400 text-xs text-center mt-2">
+                    This order is waiting outside the machine. Unload a finished machine first.
+                  </Text>
+                </View>
+              ) : (
+                <TouchableOpacity
+                  onPress={handleStart}
+                  disabled={busy}
+                  className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-orange-500'}`}
+                >
+                  {busy ? <ActivityIndicator color="#fff" /> : (
+                    <View className="flex-row items-center gap-2">
+                      {isMachineStep && <MachineIcon size={20} color="#fff" />}
+                      <Text className="text-white font-bold text-lg">
+                        {isMachineStep && machineBadge ? `Start ${stepLabel(cur)} (${machineBadge})` : `Start ${stepLabel(cur)}`}
+                      </Text>
+                    </View>
+                  )}
+                </TouchableOpacity>
+              )}
             </View>
           ) : (
             <View>
@@ -866,18 +1019,71 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <Text className="text-orange-700 font-bold">Machine Running</Text>
                 </View>
               ) : null}
-              <TouchableOpacity
-                onPress={handleComplete}
-                disabled={busy}
-                className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-green-500'}`}
-              >
-                {busy ? <ActivityIndicator color="#fff" /> : (
-                  <View className="flex-row items-center gap-2">
-                    {isMachineStep && <Check size={20} color="#fff" />}
-                    <Text className="text-white font-bold text-lg">{isMachineStep ? 'Unload & Complete' : `Complete ${stepLabel(cur)}`}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
+
+              {(() => {
+                const cycleStartedAtMs = curStage?.startedAt
+                  ? (typeof (curStage.startedAt as any).toMillis === 'function'
+                      ? (curStage.startedAt as any).toMillis()
+                      : new Date((curStage.startedAt as any)).getTime())
+                  : 0;
+                const machineElapsedSec = cycleStartedAtMs > 0 ? Math.floor((Date.now() - cycleStartedAtMs) / 1000) : 0;
+                const isCycleLocked = isMachineStep && machineElapsedSec < 1800;
+                const cycleLockMinLeft = Math.max(1, Math.ceil((1800 - machineElapsedSec) / 60));
+
+                if (isCycleLocked) {
+                  return (
+                    <View>
+                      <TouchableOpacity
+                        onPress={() => {
+                          Alert.alert(
+                            'Cycle in Progress',
+                            `The ${cur === 'getting_washed' ? 'washing' : 'drying'} cycle requires at least 30 minutes. ${cycleLockMinLeft} minute${cycleLockMinLeft > 1 ? 's' : ''} remaining before unload is enabled.`
+                          );
+                        }}
+                        className="h-14 rounded-xl items-center justify-center flex-row bg-gray-100 border border-gray-200 mb-2"
+                      >
+                        <Lock size={18} color="#94a3b8" className="mr-2" />
+                        <Text className="text-gray-500 font-bold text-base">
+                          Unload Enabled in {cycleLockMinLeft}m
+                        </Text>
+                      </TouchableOpacity>
+
+                      {(activeRole === 'supervisor' || activeRole === 'admin') && (
+                        <TouchableOpacity
+                          onPress={() => {
+                            Alert.alert(
+                              'Supervisor Emergency Override',
+                              'Are you sure you want to unload and complete early? Only do this if the machine was stopped early or during power failure.',
+                              [
+                                { text: 'Cancel', style: 'cancel' },
+                                { text: 'Force Complete', style: 'destructive', onPress: handleComplete }
+                              ]
+                            );
+                          }}
+                          className="py-2 items-center"
+                        >
+                          <Text className="text-red-500 font-semibold text-xs">Supervisor Emergency Override</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  );
+                }
+
+                return (
+                  <TouchableOpacity
+                    onPress={handleComplete}
+                    disabled={busy}
+                    className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-green-500'}`}
+                  >
+                    {busy ? <ActivityIndicator color="#fff" /> : (
+                      <View className="flex-row items-center gap-2">
+                        {isMachineStep && <Check size={20} color="#fff" />}
+                        <Text className="text-white font-bold text-lg">{isMachineStep ? 'Unload & Complete' : `Complete ${stepLabel(cur)}`}</Text>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })()}
             </View>
           )}
         </View>
@@ -995,7 +1201,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} className="flex-1 bg-gray-50">
       <ScrollView className="flex-1" contentContainerStyle={{ padding: 20, paddingBottom: 40 }}>
-        {/* Process Tabs */}
+        <View style={modalContainerStyle}>
+          {/* Process Tabs */}
         {orderProcesses.length > 1 && (
           <View className="flex-row flex-wrap gap-2 mb-4">
             {orderProcesses.map(p => {
@@ -1439,6 +1646,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             })}
           </View>
         )}
+        </View>
       </ScrollView>
 
       {/* Full-screen Photo Preview Modal */}
@@ -1471,7 +1679,11 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         onScan={handleScan}
         actionType="Garment Label"
         continuous={true}
-        progressText={`${registeredCount} / ${garments.count || 0} Garments Scanned`}
+        progressText={`${effectiveCount} / ${garments.count || 0} Garments Scanned`}
+        currentCount={effectiveCount}
+        totalCount={garments.count || 0}
+        onManualScanNext={() => handleScan('DUMMY')}
+        onBypassAll={handleTagAll}
       />
       
       {order && (
@@ -1508,6 +1720,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               onAssign={async (helperId) => {
                 const res = await useOpsProcessStore.getState().assignStepToHelper(order.id, process.id, order.userId || '', helperId);
                 if (!res.ok) setActionError(friendlyActionError(res.error));
+              }}
+              onUnassign={async () => {
+                await handleUnassignHelper(started);
               }}
             />
           )}

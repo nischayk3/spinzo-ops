@@ -8,9 +8,13 @@ export interface ActiveHelperTask {
   step: string;
 }
 
-// ─── Ironing Priority Phones & Helpers ─────────────────────────────────────────
+// ─── Staff Specialty Routing Phones & Roles ───────────────────────────────────
 
-export const IRONING_PRIORITY_PHONES = ['+916369768237', '+917559105832'];
+export const SAMSUL_PHONE = '+916369768237';
+export const ABDUR_PHONE = '+917559105832';
+export const ABDUL_PHONE = '+916900311761';
+
+export const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE];
 
 export function normalizePhone(raw?: string | null): string {
   if (!raw) return '';
@@ -240,43 +244,79 @@ export function getTopEligibleTask(
     return getProcessTimestamp(a) - getProcessTimestamp(b);
   });
 
-  // ── Ironing Priority Ranking (Priority 1: Samsul, Priority 2: Abdur) ──
-  // If task is getting_ironed and helper is Abdur (+917559105832), Abdur is offered after Samsul
-  // If phone is Samsul (+916369768237), Samsul gets top preference for iron orders
-  const topProcess = eligible[0] || null;
+  // ── Specialist Preference Ranking ──
+  // Abdul: Primary for Tagging and Packaging
+  // Samsul: Primary for Ironing
+  // Abdur: Secondary for Ironing (station 2) / Tagging fallback
+  const normPhone = normalizePhone(phone);
+  const isAbdul = normPhone === normalizePhone(ABDUL_PHONE);
+  const isSamsul = normPhone === normalizePhone(SAMSUL_PHONE);
+  const isAbdur = normPhone === normalizePhone(ABDUR_PHONE);
+
+  // Check for unclaimed orders that need tagging
+  const claimedOrderIds = new Set(processes.map(p => p.orderId));
+  const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
+  const taggingProcess: OpsProcess | null = o ? {
+    id: o.id,
+    orderId: o.id,
+    userId: o.userId,
+    vendorId: o.vendorId,
+    steps: ['tagging'],
+    currentIndex: 0,
+    status: 'tagging',
+    stages: {},
+    garments: { labels: [], registered: [] },
+  } : null;
 
   // ── 2. Machine Priority: Washer & Dryer should NEVER remain empty! ──
-  const isTopProcessMachine = topProcess && isMachineStep(currentStep(topProcess));
-  if (isTopProcessMachine) {
+  const machineProcess = eligible.find(p => isMachineStep(currentStep(p)));
+  if (machineProcess) {
     if (!isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
-      return topProcess;
+      return machineProcess;
     }
   }
 
   // ── 3. Busy gate: hands-on work in progress for non-machine tasks ──
   if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
 
-  // ── 4. Offer top non-machine process (packaging, ironing, etc.) if higher priority than new tagging ──
+  // ── 4. Specialist-Aware Task Routing ──
+  // If helper is Abdul: Prioritize Tagging and Packaging!
+  if (isAbdul) {
+    if (taggingProcess) return taggingProcess;
+    const packagingProcess = eligible.find(p => currentStep(p) === 'packaging');
+    if (packagingProcess) return packagingProcess;
+    if (eligible[0]) return eligible[0];
+  }
+
+  // If helper is Samsul: Prioritize Ironing!
+  if (isSamsul) {
+    const ironProcess = eligible.find(p => currentStep(p) === 'getting_ironed');
+    if (ironProcess) return ironProcess;
+  }
+
+  // If helper is Abdur:
+  // With 2 iron machines: if an iron process is available, Abdur takes it
+  // (especially if Samsul is busy or station 2 is open)!
+  if (isAbdur) {
+    const ironProcess = eligible.find(p => currentStep(p) === 'getting_ironed');
+    if (ironProcess) {
+      const isSamsulIroning = live.some(p => {
+        const cur = currentStep(p);
+        return cur === 'getting_ironed' && (p.stages.getting_ironed?.assigneeName?.toLowerCase() === 'samsul' || p.stages.getting_ironed?.assignee === '68dzIqzkHEOQzL5PVzmslKpDbsI3');
+      });
+      if (isSamsulIroning || (resources.ironingStations || 1) >= 2) {
+        return ironProcess;
+      }
+    }
+  }
+
+  // ── 5. Standard Priority Fallback ──
+  const topProcess = eligible[0] || null;
   if (topProcess && getStepPriority(currentStep(topProcess)) < getStepPriority('tagging')) {
     return topProcess;
   }
 
-  // ── 5. Check for unclaimed orders that need tagging ──
-  const claimedOrderIds = new Set(processes.map(p => p.orderId));
-  const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
-  if (o) {
-    return {
-      id: o.id,
-      orderId: o.id,
-      userId: o.userId,
-      vendorId: o.vendorId,
-      steps: ['tagging'],
-      currentIndex: 0,
-      status: 'tagging',
-      stages: {},
-      garments: { labels: [], registered: [] },
-    };
-  }
+  if (taggingProcess) return taggingProcess;
 
   return topProcess;
 }

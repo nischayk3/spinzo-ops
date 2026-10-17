@@ -32,6 +32,7 @@ interface OpsProcessState {
   printLabels: (orderId: string, garmentCount: number, processId?: string) => Promise<OpsProcessingResult>;
   printBundleLabels: (orderId: string, count: number, processId?: string) => Promise<OpsProcessingResult>;
   scanGarment: (orderId: string, qr: string, processId?: string) => Promise<OpsProcessingResult>;
+  tagAllGarments: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
   unregisterGarment: (orderId: string, seq: number, processId?: string) => Promise<OpsProcessingResult>;
   submitTagging: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
   markChemicalAdded: (orderId: string, processId: string, chemical: 'detergent' | 'softener') => Promise<OpsProcessingResult>;
@@ -50,7 +51,7 @@ interface OpsProcessState {
   unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   unassignDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   assignStepToHelper: (orderId: string, processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
-  unassignStep: (orderId: string, processId: string, userId: string) => Promise<SupervisorActionResult>;
+  unassignStep: (orderId: string, processId: string, userId: string, clearStartedAt?: boolean) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   snoozeNudge: (orderId: string, step: 'getting_washed' | 'getting_dried', phase: 'accepted' | 'started', processId?: string) => Promise<OpsProcessingResult>;
   reset: () => void;
@@ -68,7 +69,7 @@ const getProcessId = (orderId: string): string =>
   useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.orderId === orderId)?.id || orderId;
 
 const callSupervisor = () =>
-  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string }, SupervisorActionResult>(
+  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean }, SupervisorActionResult>(
     functions,
     'supervisorActions'
   );
@@ -236,6 +237,14 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
       return { ok: false, error: e?.message || 'request_failed' };
     }
   },
+  tagAllGarments: async (orderId, processId) => {
+    try {
+      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'tagAllGarments' });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
   unregisterGarment: async (orderId, seq, processId) => {
     try {
       const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'unregisterGarment', seq });
@@ -367,9 +376,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     }
   },
 
-  unassignStep: async (orderId, processId, userId) => {
+  unassignStep: async (orderId, processId, userId, clearStartedAt) => {
     try {
-      const res = await callSupervisor()({ action: 'unassignStep', orderId, processId, userId });
+      const res = await callSupervisor()({ action: 'unassignStep', orderId, processId, userId, clearStartedAt: !!clearStartedAt });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

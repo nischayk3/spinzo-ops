@@ -1,15 +1,19 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, FlatList, ActivityIndicator, Alert } from 'react-native';
+import React, { useEffect, useState, useMemo } from 'react';
+import { View, Text, FlatList, ActivityIndicator, Alert, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Package } from 'lucide-react-native';
+import { useNavigation } from '@react-navigation/native';
+import { Package, Bike, ChevronRight } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore, DeliveryTask } from '../../store/opsStaffStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
+import { isPending } from '../../utils/opsTasks';
 import { timeAgo, orderTotal, FeedOrder } from '../../utils/orderFeed';
 import { DeliveryVerification } from '../../components/DeliveryVerification';
 import { QRScanner } from '../../components/QRScanner';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
+import { SmartRouteSheet } from '../../components/Rider/SmartRouteSheet';
+import { buildSmartRoute, SmartRouteStop, extractLocality, safeShortId } from '../../utils/smartRoute';
 
 const HIDE_OLDER_THAN_MS = 24 * 60 * 60 * 1000; // deliveries older than 24h are hidden
 const OVERDUE_MS = 4 * 60 * 60 * 1000; // >4h out_for_delivery = overdue
@@ -23,8 +27,9 @@ const toMs = (t: any): number => {
 };
 
 export function DeliveriesScreen() {
+  const navigation = useNavigation<any>();
   const user = useAuthStore(state => state.user);
-  const { myDeliveries, isLoading, initialize } = useOpsStaffStore();
+  const { myDeliveries, myTasks, isLoading, initialize } = useOpsStaffStore();
   const orders = useOrderFeedStore(state => state.orders);
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -38,14 +43,59 @@ export function DeliveriesScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
-  const activeDeliveries = myDeliveries
-    .filter(d => {
+  // Compute live smart route sequence
+  const smartRouteStops = useMemo(() => {
+    return buildSmartRoute({
+      myTasks,
+      myDeliveries,
+      orders,
+    });
+  }, [myTasks, myDeliveries, orders]);
+
+  const stopMap = useMemo(() => {
+    const map = new Map<string, SmartRouteStop>();
+    smartRouteStops.forEach(s => {
+      if (s.orderId) map.set(s.orderId, s);
+      if (s.taskId) map.set(s.taskId, s);
+    });
+    return map;
+  }, [smartRouteStops]);
+
+  // Count live pickups to show quick switch banner if needed
+  const livePickupsCount = useMemo(() => {
+    return myTasks.filter(t => {
+      if (!isPending(t)) return false;
+      const order = orders.find(o => o.id === t.orderId || o.id === t.id);
+      if (orders.length > 0) {
+        if (!order) return false;
+        if (order.status === 'cancelled') return false;
+        if (order.status !== 'placed' && order.status !== 'confirmed' && order.status !== 'in_transit_to_store') return false;
+      }
+      return true;
+    }).length;
+  }, [myTasks, orders]);
+
+  const activeDeliveries = useMemo(() => {
+    const list = myDeliveries.filter(d => {
       if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
       const order = orders.find(o => o.id === d.orderId);
-      if (order && order.status === 'cancelled') return false;
+      if (orders.length > 0) {
+        if (!order) return false;
+        if (order.status === 'cancelled' || order.status === 'delivered') return false;
+        if (order.status !== 'ready' && order.status !== 'out_for_delivery') return false;
+      }
       return true;
-    })
-    .sort((a, b) => toMs(b.assignedAt || b.createdAt) - toMs(a.assignedAt || a.createdAt));
+    });
+
+    return list.sort((a, b) => {
+      const stopA = stopMap.get(a.orderId || a.id);
+      const stopB = stopMap.get(b.orderId || b.id);
+      const numA = stopA?.stopNumber ?? 999;
+      const numB = stopB?.stopNumber ?? 999;
+      if (numA !== numB) return numA - numB;
+      return toMs(b.assignedAt || b.createdAt) - toMs(a.assignedAt || a.createdAt);
+    });
+  }, [myDeliveries, orders, stopMap]);
 
   const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
   const orderFor = (t: DeliveryTask): FeedOrder | undefined => orders.find(o => o.id === t.orderId);
@@ -105,12 +155,65 @@ export function DeliveriesScreen() {
 
   return (
     <SafeAreaView className="flex-1 bg-bgDark">
-      <View className="px-4 pt-4 pb-2">
-        <Text className="text-2xl font-bold text-textPrimary">Deliveries</Text>
-        <Text className="text-textSecondary">
-          {activeDeliveries.length} active delivery{activeDeliveries.length === 1 ? '' : 'ies'}
-        </Text>
+      {/* Header */}
+      <View className="px-4 pt-4 pb-2.5 flex-row items-center justify-between">
+        <View>
+          <Text className="text-2xl font-black text-slate-950 tracking-tight">Deliveries</Text>
+          <Text className="text-slate-600 text-xs font-bold mt-0.5">
+            {activeDeliveries.length} active delivery tasks • SpinZo BTM Hub
+          </Text>
+        </View>
+        <View className="bg-emerald-100 border border-emerald-400 px-3 py-1 rounded-full flex-row items-center">
+          <View className="w-2 h-2 rounded-full bg-emerald-600 mr-1.5" />
+          <Text className="text-emerald-950 text-xs font-black">ON DUTY</Text>
+        </View>
       </View>
+
+      <SmartRouteSheet
+        myTasks={myTasks}
+        myDeliveries={myDeliveries}
+        orders={orders}
+        onSelectTask={(stop) => {
+          if (stop.type === 'pickup') {
+            navigation.navigate('Pickups');
+          } else {
+            const task = activeDeliveries.find(d => d.id === stop.taskId || d.orderId === stop.orderId);
+            if (task) {
+              if (task.status === 'assigned') {
+                setShowPickupScanner(task.id);
+              } else {
+                setActiveTaskId(task.id);
+              }
+            }
+          }
+        }}
+      />
+
+      {livePickupsCount > 0 ? (
+        <TouchableOpacity
+          activeOpacity={0.85}
+          onPress={() => navigation.navigate('Pickups')}
+          className="mx-4 mb-3.5 px-4 py-3 bg-purple-600 rounded-2xl flex-row items-center justify-between shadow-md shadow-purple-500/25"
+        >
+          <View className="flex-row items-center flex-1 mr-2">
+            <View className="w-8 h-8 rounded-xl bg-white/20 items-center justify-center mr-2.5">
+              <Bike size={16} color="#FFFFFF" />
+            </View>
+            <View>
+              <Text className="text-white font-black text-xs uppercase tracking-wide">
+                {livePickupsCount} Pending Pickup{livePickupsCount > 1 ? 's' : ''}
+              </Text>
+              <Text className="text-purple-100 text-[11px] font-bold">
+                Assigned on your current route
+              </Text>
+            </View>
+          </View>
+          <View className="flex-row items-center bg-white px-3 py-1.5 rounded-xl shadow-xs">
+            <Text className="text-purple-700 font-black text-xs mr-1">Switch</Text>
+            <ChevronRight size={13} color="#7C3AED" />
+          </View>
+        </TouchableOpacity>
+      ) : null}
 
       <FlatList
         data={activeDeliveries.length ? [0] : []}
@@ -130,6 +233,10 @@ export function DeliveriesScreen() {
             {activeDeliveries.map(t => {
               const order = orderFor(t);
               const overdue = isOverdue(t);
+              const stop = stopMap.get(t.orderId || t.id);
+              const rawAddr = t.deliveryAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined));
+              const locality = stop?.locality || extractLocality(rawAddr);
+
               return (
                 <View key={t.id}>
                   {overdue ? (
@@ -153,7 +260,7 @@ export function DeliveriesScreen() {
                   })()}
                   <RiderTaskCard
                     type="delivery"
-                    orderNumber={t.orderId.slice(-6).toUpperCase()}
+                    orderNumber={safeShortId(t.orderId)}
                     customerName={t.customerName || order?.customerName}
                     customerPhone={t.customerPhone || order?.customerPhone}
                     status={t.status}
@@ -170,6 +277,9 @@ export function DeliveriesScreen() {
                     lat={order?.latitude}
                     lng={order?.longitude}
                     bundleCount={t.bundleCount}
+                    stopNumber={stop?.stopNumber}
+                    locality={locality}
+                    loadUnits={stop?.loadUnits}
                     onPrimary={() => {
                       if (t.status === "assigned") {
                         setShowPickupScanner(t.id);

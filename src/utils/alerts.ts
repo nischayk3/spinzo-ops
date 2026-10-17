@@ -216,22 +216,25 @@ export function announceNewOrder() {
 }
 
 export function announceAssignedPickup(task: Pick<OpsTask, 'orderId' | 'pickupAddress'>) {
-  speak(`Pickup assigned. Order ${task.orderId.slice(-6).toUpperCase()}. ${task.pickupAddress || ''}`);
+  const shortId = (task?.orderId || '').slice(-6).toUpperCase() || '------';
+  speak(`Pickup assigned. Order ${shortId}. ${task?.pickupAddress || ''}`);
 }
 
 export function announceAssignedDelivery(orderId: string, address: string) {
-  speak(`Delivery assigned. Order ${orderId.slice(-6).toUpperCase()}. ${address || ''}`);
+  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
+  speak(`Delivery assigned. Order ${shortId}. ${address || ''}`);
 }
 
 /** Alert for order stage transition — lighter chime + TTS */
 export function announceStageTransition(orderId: string, stageName: string) {
   lifecycleChime();
-  speak(`Order ${orderId.slice(-6).toUpperCase()} moved to ${stageName}`);
+  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
+  speak(`Order ${shortId} moved to ${stageName}`);
 }
 
 /** Alert for washing machine chemical additions (13m detergent, 21m softener, 35m complete) */
 export function announceWasherMilestone(orderId: string, milestone: 'detergent' | 'softener' | 'complete') {
-  const shortId = orderId.slice(-6).toUpperCase();
+  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
   if (milestone === 'detergent') {
     dramaticChime(false);
     speak(`Order ${shortId}: Please add detergent to the washing machine.`);
@@ -253,7 +256,8 @@ export function announceSkippedOrder(orderId: string) {
   skippedNotified.add(orderId);
   // Short one-shot burst (loop:false stops after ~2.5s) — do NOT use a looping siren.
   dramaticChime(false);
-  speak(`You skipped order ${orderId.slice(-6).toUpperCase()}`);
+  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
+  speak(`You skipped order ${shortId}`);
 }
 
 /** Confirmation sound for successful actions */

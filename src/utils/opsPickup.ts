@@ -47,10 +47,10 @@ export async function verifyStoreOTP(
   }
 }
 
-export async function acceptTask(orderId: string, isDelivery?: boolean): Promise<{ ok: boolean; error?: string }> {
+export async function acceptTask(orderId: string, isDelivery?: boolean, taskId?: string): Promise<{ ok: boolean; error?: string }> {
   try {
-    const callable = httpsCallable<{ action: string; orderId: string; isDelivery?: boolean }, { ok: boolean; error?: string }>(functions, 'opsStatusSync');
-    const res = await callable({ action: 'acceptTask', orderId, isDelivery: !!isDelivery });
+    const callable = httpsCallable<{ action: string; orderId: string; isDelivery?: boolean; taskId?: string }, { ok: boolean; error?: string }>(functions, 'opsStatusSync');
+    const res = await callable({ action: 'acceptTask', orderId, isDelivery: !!isDelivery, taskId });
     return res.data;
   } catch (err: any) {
     return { ok: false, error: err?.message || 'network_error' };

@@ -16,11 +16,12 @@ interface AssignHelperModalProps {
   visible: boolean;
   onClose: () => void;
   onAssign: (helperId: string) => Promise<void>;
+  onUnassign?: () => Promise<void>;
   processId: string;
   stepName?: string;
 }
 
-export function AssignHelperModal({ visible, onClose, onAssign, processId, stepName }: AssignHelperModalProps) {
+export function AssignHelperModal({ visible, onClose, onAssign, onUnassign, processId, stepName }: AssignHelperModalProps) {
   const [helpers, setHelpers] = useState<StaffDoc[]>([]);
   const [loadingHelpers, setLoadingHelpers] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -123,6 +124,24 @@ export function AssignHelperModal({ visible, onClose, onAssign, processId, stepN
                 );
               }}
             />
+          )}
+
+          {!!onUnassign && (
+            <TouchableOpacity
+              onPress={async () => {
+                setBusy(true);
+                try {
+                  await onUnassign();
+                  onClose();
+                } finally {
+                  setBusy(false);
+                }
+              }}
+              disabled={busy}
+              className="h-12 rounded-xl flex-row items-center justify-center mb-3 bg-red-50 border border-red-200 active:opacity-80"
+            >
+              <Text className="text-red-700 font-bold text-sm">Unassign & Return to Queue</Text>
+            </TouchableOpacity>
           )}
 
           <TouchableOpacity

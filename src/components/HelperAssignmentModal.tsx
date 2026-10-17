@@ -64,19 +64,26 @@ export function HelperAssignmentModal() {
     };
   }, [activeTask?.id, acceptingId]);
 
-  // Auto-clear active task if the order was cancelled or completely deleted by someone else
+  // Auto-clear active task if the order was cancelled, completed, or deleted
   useEffect(() => {
     if (!staffDoc?.activeHelperTask) return;
     if (isOrdersLoading || isProcessesLoading) return;
 
-    const { orderId } = staffDoc.activeHelperTask;
+    const { orderId, step } = staffDoc.activeHelperTask;
     const p = processes.find(x => x.orderId === orderId);
     const o = orders.find(x => x.id === orderId);
 
     const isCancelled = p?.status === 'cancelled' || o?.status === 'cancelled';
     const isZombie = !o;
+    const isStepFinished = Boolean(
+      p && (
+        p.stages?.[step]?.completedAt ||
+        p.status === 'done' ||
+        (currentStep(p) && currentStep(p) !== step && p.stages?.[step]?.completedAt)
+      )
+    );
 
-    if (isCancelled || isZombie) {
+    if (isCancelled || isZombie || isStepFinished) {
       clearActiveHelperTask();
     }
   }, [staffDoc?.activeHelperTask, processes, orders, isOrdersLoading, isProcessesLoading, clearActiveHelperTask]);

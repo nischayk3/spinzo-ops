@@ -127,6 +127,7 @@ export function StageNudgeModal() {
         }
       } else {
         const errorMap: Record<string, string> = {
+          machine_capacity_reached: 'All machines are currently running. Please wait for an active cycle to finish.',
           unauthorized: 'You are not assigned to this step.',
           not_found: 'Process record not found. Please refresh.',
           server_error: 'Server is synchronizing. Please tap again to retry.',
