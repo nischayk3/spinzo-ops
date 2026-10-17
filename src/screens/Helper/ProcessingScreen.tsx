@@ -421,10 +421,25 @@ function SupervisorFeed() {
                 </Text>
               </TouchableOpacity>
             ) : (
-              <View className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full self-start mt-2 border border-purple-200">
+              <TouchableOpacity
+                disabled={role !== 'supervisor' && role !== 'admin'}
+                onPress={(e) => {
+                  e?.stopPropagation?.();
+                  setAssignModalData({
+                    visible: true,
+                    processId: item.orderId,
+                    stepName: 'Tagging',
+                    orderId: item.orderId,
+                    userId: order?.userId || '',
+                  });
+                }}
+                className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full self-start mt-2 border border-purple-200 active:opacity-70"
+              >
                 <AlertTriangle size={12} color="#994bff" className="mr-1.5" />
-                <Text className="text-[#994bff] font-bold text-xs">New Inbound • Ready for Tagging</Text>
-              </View>
+                <Text className="text-[#994bff] font-bold text-xs">
+                  New Inbound • Ready for Tagging {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
+                </Text>
+              </TouchableOpacity>
             )}
           </View>
           <View className="items-end">
@@ -624,12 +639,24 @@ function SupervisorFeed() {
           processId={assignModalData.processId}
           stepName={assignModalData.stepName}
           onAssign={async (helperId) => {
-            await useOpsProcessStore.getState().assignStepToHelper(
-              assignModalData.orderId,
-              assignModalData.processId,
-              assignModalData.userId,
-              helperId
-            );
+            const o = orderById.get(assignModalData.orderId);
+            const p = validProcesses.find(x => x.id === assignModalData.processId || x.orderId === assignModalData.orderId);
+            if (p) {
+              await useOpsProcessStore.getState().assignStepToHelper(
+                assignModalData.orderId,
+                p.id,
+                assignModalData.userId,
+                helperId
+              );
+            } else {
+              await useOpsProcessStore.getState().claim(
+                assignModalData.orderId,
+                o?.tokenNumber,
+                assignModalData.userId,
+                o?.vendorId,
+                helperId
+              );
+            }
             setAssignModalData(null);
           }}
           onUnassign={async () => {

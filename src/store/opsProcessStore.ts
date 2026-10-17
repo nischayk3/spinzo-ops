@@ -24,7 +24,7 @@ interface OpsProcessState {
   isLoading: boolean;
   error: string | null;
   initialize: (uid: string) => void;
-  claim: (orderId: string, tokenNumber?: string, userId?: string, vendorId?: string) => Promise<OpsProcessingResult>;
+  claim: (orderId: string, tokenNumber?: string, userId?: string, vendorId?: string, helperId?: string) => Promise<OpsProcessingResult>;
   acceptStep: (orderId: string, processId?: string, userId?: string, vendorId?: string) => Promise<OpsProcessingResult>;
   startStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
   completeStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
@@ -94,9 +94,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     );
   },
 
-  claim: async (orderId, tokenNumber, userId, vendorId) => {
+  claim: async (orderId, tokenNumber, userId, vendorId, helperId) => {
     try {
-      const res = await callOps()({ orderId, action: 'claim', tokenNumber, userId, vendorId } as any);
+      const res = await callOps()({ orderId, action: 'claim', tokenNumber, userId, vendorId, helperId } as any);
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e.message || String(e) };

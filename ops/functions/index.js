@@ -213,7 +213,49 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const after = event.data.after.data();
   if (!after) return;
   const wentOnShift = before && before.onShift !== true && after.onShift === true;
-  if (!wentOnShift || after.role !== 'rider') return;
+  if (!wentOnShift) return;
+
+  // Helper went on shift: auto-assign oldest unassigned tagging task to this helper
+  if (after.role === 'helper') {
+    const helperUid = event.params.staffId;
+    const helperName = after.name || '';
+    try {
+      const unassignedSnap = await db.collection('ops_process')
+        .where('status', '==', 'tagging')
+        .where('stages.tagging.assignee', '==', null)
+        .orderBy('createdAt', 'asc')
+        .limit(1)
+        .get();
+
+      if (!unassignedSnap.empty) {
+        const pDoc = unassignedSnap.docs[0];
+        const p = pDoc.data();
+        const now = TS();
+        await pDoc.ref.update({
+          'stages.tagging.assignee': helperUid,
+          'stages.tagging.assigneeName': helperName,
+          'stages.tagging.assignedAt': now,
+          'stages.tagging.assignedBy': 'system_catchup',
+        });
+        await db.doc(`ops_staff/${helperUid}`).update({
+          activeHelperTask: { orderId: p.orderId, step: 'tagging' }
+        });
+        await sendFCMOrderAssignment({
+          staffId: helperUid,
+          orderId: p.orderId,
+          taskType: 'step',
+          customerName: p.customerName || '',
+          stepName: 'tagging',
+        });
+        console.log(`[onShiftCatchUp] Assigned unassigned tagging task ${p.orderId} to newly on-shift helper ${helperName}`);
+      }
+    } catch (hErr) {
+      console.error(`[onShiftCatchUp] Failed for helper ${helperUid}:`, hErr);
+    }
+    return;
+  }
+
+  if (after.role !== 'rider') return;
 
   // Reassign stale pickups: orders placed on a PREVIOUS day (or earlier) that are
   // still `pending` but whose original assignee is no longer on shift. This brings
@@ -505,6 +547,15 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
         }
         return { ok: true };
       });
+
+      if (result.ok && !result.alreadyDone) {
+        try {
+          await autoAssignTaggingOnPickup(orderId, { ...order, status: 'pickup_completed' }, userId, vendorId);
+        } catch (autoErr) {
+          console.error(`[opsStatusSync] autoAssignTaggingOnPickup failed for ${orderId}:`, autoErr);
+        }
+      }
+
       return result;
     } catch (err) {
       console.error('opsStatusSync verifyStoreOTP failed', err);
@@ -746,29 +797,65 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
       onShiftHelpers.push({ uid: d.id, ...d.data() });
     });
 
-    // Helper selection with preferences:
-    // Primary for tagging: Abdul (+916900311761)
-    // Fallback 1: Abdur (+917559105832)
-    // Fallback 2: Samsul (+916369768237)
-    let selectedHelper = null;
     const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
 
-    const abdul = onShiftHelpers.find(h => normalize(h.phone) === '6900311761');
-    const abdur = onShiftHelpers.find(h => normalize(h.phone) === '7559105832');
-    const samsul = onShiftHelpers.find(h => normalize(h.phone) === '6369768237');
+    // Identify truly hands-on free helpers vs busy helpers
+    const freeHelpers = [];
+    for (const h of onShiftHelpers) {
+      if (!h.activeHelperTask || !h.activeHelperTask.orderId) {
+        freeHelpers.push(h);
+      } else {
+        try {
+          const taskOrderId = h.activeHelperTask.orderId;
+          const procSnap = await db.collection('ops_process')
+            .where('orderId', '==', taskOrderId)
+            .limit(1)
+            .get();
+          if (!procSnap.empty) {
+            const pData = procSnap.docs[0].data();
+            const cur = pData.steps?.[pData.currentIndex];
+            const isCompleted = pData.status === 'done' || pData.status === 'cancelled' || pData.stages?.[h.activeHelperTask.step]?.completedAt;
+            const isRunningMachine = (cur === 'getting_washed' || cur === 'getting_dried') && pData.stages?.[cur]?.startedAt;
+            if (isCompleted || isRunningMachine) {
+              freeHelpers.push(h);
+            }
+          } else {
+            freeHelpers.push(h);
+          }
+        } catch {
+          // If check fails, leave as busy
+        }
+      }
+    }
 
-    if (abdul) {
-      selectedHelper = abdul;
-    } else if (abdur) {
-      selectedHelper = abdur;
-    } else if (samsul) {
-      selectedHelper = samsul;
+    // Specialty routing preference:
+    // Primary for tagging: Abdul (+916900311761)
+    // Secondary: Abdur (+917559105832)
+    // Tertiary: Samsul (+916369768237)
+    let selectedHelper = null;
+    const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
+    const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
+    const freeSamsul = freeHelpers.find(h => normalize(h.phone) === '6369768237');
+
+    if (freeAbdul) {
+      selectedHelper = freeAbdul;
+    } else if (freeAbdur) {
+      selectedHelper = freeAbdur;
+    } else if (freeSamsul) {
+      selectedHelper = freeSamsul;
+    } else if (freeHelpers.length > 0) {
+      selectedHelper = freeHelpers[0];
     } else if (onShiftHelpers.length > 0) {
-      selectedHelper = onShiftHelpers[0];
+      // All on-shift helpers currently have active tasks.
+      // Pre-queue directly to Abdul (or Abdur) so it is ready the moment they finish
+      const abdul = onShiftHelpers.find(h => normalize(h.phone) === '6900311761');
+      const abdur = onShiftHelpers.find(h => normalize(h.phone) === '7559105832');
+      selectedHelper = abdul || abdur || onShiftHelpers[0];
     }
 
     const now = TS();
     const tokens = order.tokens || {};
+    const prodStep = firstProductionStep(opsStepsForOrder(order));
 
     // Create process docs for all services
     const batch = db.batch();
@@ -801,15 +888,32 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         },
         garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
         createdAt: now,
-        customerName: order.customerName || '',
+        customerName: order.customerName || order.userName || '',
       });
     }
 
-    if (selectedHelper) {
+    // If selectedHelper was free, record activeHelperTask
+    if (selectedHelper && (!selectedHelper.activeHelperTask || !selectedHelper.activeHelperTask.orderId)) {
       const staffRef = db.doc(`ops_staff/${selectedHelper.uid}`);
       batch.update(staffRef, {
         activeHelperTask: { orderId, step: 'tagging' }
       });
+    }
+
+    // Update customer and vendor order docs to 'processing'
+    const targetUserId = userId || order.userId;
+    const targetVendorId = vendorId || order.vendorId || 'default';
+    if (targetUserId) {
+      const orderRef = db.doc(`users/${targetUserId}/orders/${orderId}`);
+      const vendorRef = db.doc(`vendors/${targetVendorId}/orders/${orderId}`);
+      const updateData = {
+        status: 'processing',
+        updatedAt: now,
+        subProcessCount: serviceGroups.length,
+        processingStep: prodStep || 'tagging'
+      };
+      batch.update(orderRef, updateData);
+      batch.set(vendorRef, updateData, { merge: true });
     }
 
     await batch.commit();
@@ -820,7 +924,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         staffId: selectedHelper.uid,
         orderId,
         taskType: 'step',
-        customerName: order.customerName || '',
+        customerName: order.customerName || order.userName || '',
         stepName: 'tagging',
       });
     }
@@ -1137,6 +1241,10 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
   if (action === 'claim') {
     // Claim = start the tagging stage. A helper claiming an order begins tagging it.
+    // If a supervisor/admin specifies data.helperId, assign directly to that helper!
+    const isSupervisor = role === 'supervisor' || role === 'admin';
+    const targetUid = (isSupervisor && data.helperId) ? data.helperId : auth.uid;
+
     const orderSnap = await orderRef.get();
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
     const order = orderSnap.data();
@@ -1161,15 +1269,16 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           if (snap.exists) return { ok: false, error: 'already_claimed' };
         }
 
-        const staffSnap = await tx.get(db.doc(`ops_staff/${auth.uid}`));
-        const name = staffSnap.exists ? staffSnap.data().name || '' : '';
+        const staffSnap = await tx.get(db.doc(`ops_staff/${targetUid}`));
+        const targetStaff = staffSnap.exists ? staffSnap.data() : {};
+        const targetName = targetStaff.name || '';
 
         // Create N process docs
         for (const group of serviceGroups) {
           const processId = `${orderId}__${group.serviceType}`;
           const steps = stepsForServiceType(group.serviceType);
           
-          if (!stageRoleGate(steps[0], role, phone)) {
+          if (!stageRoleGate(steps[0], targetStaff.role || role, targetStaff.phone || phone)) {
              // Rollback/error if helper role is unauthorized for tagging
              throw new Error('unauthorized');
           }
@@ -1187,11 +1296,27 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             status: steps[0],
             tokenNumber: tokens[group.serviceType] || data.tokenNumber || order.tokenNumber || '',
             siblingCount: serviceGroups.length,
-            stages: { [steps[0]]: { assignee: auth.uid, assigneeName: name, acceptedAt: now, startedAt: now, queuedAt: now } },
+            stages: {
+              [steps[0]]: {
+                assignee: targetUid,
+                assigneeName: targetName,
+                acceptedAt: now,
+                startedAt: now,
+                queuedAt: now,
+                assignedAt: now,
+                assignedBy: isSupervisor ? auth.uid : 'self_claim',
+              }
+            },
             garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
             claimedAt: now,
+            customerName: order.customerName || order.userName || '',
           });
         }
+
+        // Update target helper's active task
+        tx.update(db.doc(`ops_staff/${targetUid}`), {
+          activeHelperTask: { orderId, step: 'tagging' }
+        });
 
         // Update customer order to 'processing'
         const updateData = { 
@@ -1206,6 +1331,21 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         
         return { ok: true };
       });
+
+      if (result.ok && targetUid) {
+        try {
+          await sendFCMOrderAssignment({
+            staffId: targetUid,
+            orderId,
+            taskType: 'step',
+            customerName: order.customerName || order.userName || '',
+            stepName: 'tagging',
+          });
+        } catch (fcmErr) {
+          console.warn('[claim] FCM send error:', fcmErr);
+        }
+      }
+
       return result;
     } catch (err) {
       if (err.message === 'unauthorized') return { ok: false, error: 'unauthorized' };
@@ -2542,6 +2682,23 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         tx.update(pRef, {
           [`stages.${step}`]: { ...progress, assignee: helperId, assigneeName: h.name || '', assignedBy: auth.uid, assignedAt: now },
         });
+
+        // Set activeHelperTask for the new helper
+        const hRef = db.doc(`ops_staff/${helperId}`);
+        tx.update(hRef, {
+          activeHelperTask: { orderId: p.orderId || processId, step }
+        });
+
+        // Clear activeHelperTask on previous assignee if different
+        if (assignee && assignee !== helperId) {
+          try {
+            const oldRef = db.doc(`ops_staff/${assignee}`);
+            tx.update(oldRef, { activeHelperTask: admin.firestore.FieldValue.delete() });
+          } catch (e) {
+            console.warn('Could not clear activeHelperTask on previous assignee', e);
+          }
+        }
+
         return { ok: true, status: 'assigned' };
       }
 

@@ -821,16 +821,29 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const renderActionState = () => {
     if (!process && order?.status === 'pickup_completed') {
+      const isSupervisor = activeRole === 'supervisor' || activeRole === 'admin';
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
-          <Text className="text-gray-900 font-bold mb-2">Ready for Tagging</Text>
-          <TouchableOpacity
-            onPress={handleClaim}
-            disabled={busy}
-            className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-[#994bff]'}`}
-          >
-            {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Claim & Start Tagging</Text>}
-          </TouchableOpacity>
+          <Text className="text-gray-900 font-bold mb-3 text-base">Ready for Tagging</Text>
+          <View className="flex-col gap-3">
+            <TouchableOpacity
+              onPress={handleClaim}
+              disabled={busy}
+              className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-[#994bff]'}`}
+            >
+              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Claim & Start Tagging</Text>}
+            </TouchableOpacity>
+            {isSupervisor && (
+              <TouchableOpacity
+                onPress={() => setShowAssignHelperModal(true)}
+                disabled={busy}
+                className="h-12 rounded-xl items-center justify-center flex-row border border-[#994bff] bg-purple-50"
+              >
+                <UserPlus size={18} color="#994bff" className="mr-2" />
+                <Text className="text-[#994bff] font-bold text-base">Assign to Helper</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
       );
     }
@@ -1730,15 +1743,26 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               if (!res.ok) setActionError(friendlyActionError(res.error));
             }}
           />
-          {process && order && (
+          {order && (
             <AssignHelperModal
               visible={showAssignHelperModal}
               onClose={() => setShowAssignHelperModal(false)}
-              processId={process.id}
-              stepName={cur ? stepLabel(cur) : undefined}
+              processId={process?.id || order.id}
+              stepName={cur ? stepLabel(cur) : 'Tagging'}
               onAssign={async (helperId) => {
-                const res = await useOpsProcessStore.getState().assignStepToHelper(order.id, process.id, order.userId || '', helperId);
-                if (!res.ok) setActionError(friendlyActionError(res.error));
+                if (process) {
+                  const res = await useOpsProcessStore.getState().assignStepToHelper(order.id, process.id, order.userId || '', helperId);
+                  if (!res.ok) setActionError(friendlyActionError(res.error));
+                } else {
+                  const res = await useOpsProcessStore.getState().claim(
+                    order.id,
+                    order.tokenNumber,
+                    order.userId,
+                    order.vendorId,
+                    helperId
+                  );
+                  if (!res.ok) setActionError(friendlyActionError(res.error));
+                }
               }}
               onUnassign={async () => {
                 await handleUnassignHelper(started);
