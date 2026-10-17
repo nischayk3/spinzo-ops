@@ -77,8 +77,10 @@ export function DeliveriesScreen() {
   }, [myTasks, orders]);
 
   const activeDeliveries = useMemo(() => {
+    const todayStr = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
     const list = myDeliveries.filter(d => {
       if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
+      if (d.deliveryDate && d.deliveryDate > todayStr && d.status !== 'out_for_delivery') return false;
       const order = orders.find(o => o.id === d.orderId);
       if (orders.length > 0) {
         if (!order) return false;

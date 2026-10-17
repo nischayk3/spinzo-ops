@@ -443,7 +443,34 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
   return { ok: false, error: 'unknown_stage', shouldQueue: true };
 }
 
+/**
+ * Return current date string (YYYY-MM-DD) in IST (UTC+5:30) or specified timezone offset.
+ * @param {number} offsetHours - default 5.5 (Asia/Kolkata)
+ * @returns {string} YYYY-MM-DD
+ */
+function getTodayDateString(offsetHours = 5.5) {
+  return new Date(Date.now() + (offsetHours * 3600 * 1000)).toISOString().split('T')[0];
+}
+
+/**
+ * Determine if a delivery is due for rider dispatch today.
+ * Deliveries are only due if the customer has scheduled a date, and that date
+ * is on or before today's date (due today or overdue from a previous day).
+ * Future dates (e.g. tomorrow) or unselected slots (null/undefined) are NOT due.
+ * @param {string|null|undefined} deliveryDate - YYYY-MM-DD
+ * @param {string} [todayStr] - optional reference date (YYYY-MM-DD)
+ * @returns {boolean}
+ */
+function isDeliveryDueToday(deliveryDate, todayStr = getTodayDateString()) {
+  if (!deliveryDate || typeof deliveryDate !== 'string') return false;
+  const clean = deliveryDate.trim();
+  if (!clean) return false;
+  return clean <= todayStr;
+}
+
 module.exports = {
+  getTodayDateString,
+  isDeliveryDueToday,
   checkPaymentGate,
   pickRider,
   normalizePhone,
@@ -470,3 +497,4 @@ module.exports = {
   allocateMachineName,
   selectHelperForStage,
 };
+

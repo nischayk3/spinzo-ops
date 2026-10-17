@@ -11,6 +11,9 @@ export interface StageRecord {
   softenerAddedAt?: unknown;
   acceptToCompleteMin?: number;
   startToCompleteMin?: number;
+  machineName?: string;
+  queuedAt?: unknown;
+  nudge?: any;
   qualityProof?: {
     photos?: string[];
     videoUrl?: string | null;

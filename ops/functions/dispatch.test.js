@@ -212,3 +212,24 @@ test('selectHelperForStage (Packaging): Abdul is 1st preference, falls back if b
   assert.strictEqual(res2.helper.uid === 'h_abdur' || res2.helper.uid === 'h_samsul', true);
 });
 
+const { isDeliveryDueToday } = require('./dispatch');
+
+test('isDeliveryDueToday: customer slot validation', () => {
+  const today = '2026-10-17';
+  
+  // Unscheduled / no slot selected yet -> never due for rider dispatch
+  assert.strictEqual(isDeliveryDueToday(null, today), false);
+  assert.strictEqual(isDeliveryDueToday(undefined, today), false);
+  assert.strictEqual(isDeliveryDueToday('', today), false);
+
+  // Scheduled for tomorrow or later -> not due today (stays in store holding)
+  assert.strictEqual(isDeliveryDueToday('2026-10-18', today), false);
+  assert.strictEqual(isDeliveryDueToday('2026-10-20', today), false);
+
+  // Scheduled for today -> due for auto-dispatch!
+  assert.strictEqual(isDeliveryDueToday('2026-10-17', today), true);
+
+  // Overdue from a past day -> due for immediate catch-up
+  assert.strictEqual(isDeliveryDueToday('2026-10-16', today), true);
+});
+

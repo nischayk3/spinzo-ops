@@ -282,6 +282,12 @@ export function buildSmartRoute({
       }
     }
 
+    // Guard: Deliveries are strictly for today. Future-scheduled deliveries must not appear on active route.
+    const todayStr = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
+    if (d.deliveryDate && d.deliveryDate > todayStr && d.status !== 'out_for_delivery') {
+      return;
+    }
+
     const isPickupFromStore = d.status === 'assigned';
     const addr = safeAddressText(d.deliveryAddress || order?.address);
     const locality = isPickupFromStore ? 'STORE' : extractLocality(addr);

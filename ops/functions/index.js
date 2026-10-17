@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -327,14 +327,16 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
   // Also catch up any pending unassigned outbound delivery tasks
   try {
+    const todayStr = getTodayDateString();
     const pendingDelSnap = await db.collection('ops_delivery_tasks')
-      .where('status', '==', 'pending')
-      .limit(20)
+      .where('status', 'in', ['pending', 'scheduled'])
+      .limit(50)
       .get();
 
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
-      if (!delData.assignee) {
+      // Only assign if the customer HAS picked a slot AND that slot is due TODAY (or overdue)
+      if (!delData.assignee && delData.deliveryDate && isDeliveryDueToday(delData.deliveryDate, todayStr)) {
         await delDoc.ref.update({
           assignee: newRiderUid,
           status: 'assigned',
@@ -349,7 +351,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
           slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim(),
           isInstant: false,
         });
-        console.log(`[onShiftCatchUp] Assigned pending delivery ${delDoc.id} to newly on-shift rider ${newRiderUid}`);
+        console.log(`[onShiftCatchUp] Assigned due delivery ${delDoc.id} (${delData.deliveryDate}) to newly on-shift rider ${newRiderUid}`);
       }
     }
   } catch (delErr) {
@@ -1192,32 +1194,118 @@ exports.syncTaskFromOrder = onDocumentWritten('users/{userId}/orders/{orderId}',
     }
   });
 
-// When an order becomes 'ready', create a delivery task for rider dispatch.
+// When an order becomes 'ready' or has its delivery slot scheduled, sync delivery task for rider dispatch.
 exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', async (event) => {
   if (!event.data) return;
   const before = event.data.before.data();
   const after = event.data.after.data();
   if (!before || !after) return;
-  // Only trigger when status changes TO 'ready'
-  if (before.status === 'ready' || after.status !== 'ready') return;
 
   const orderId = event.params.orderId;
   const userId = event.params.userId;
 
+  // We care about two events:
+  // 1. Status became 'ready'
+  // 2. Status IS 'ready' and customer scheduled or changed deliveryDate / deliveryTime
+  const justBecameReady = before.status !== 'ready' && after.status === 'ready';
+  const slotUpdatedWhileReady = after.status === 'ready' && (
+    before.deliveryDate !== after.deliveryDate ||
+    before.deliveryTime !== after.deliveryTime ||
+    before.deliverySlot !== after.deliverySlot
+  );
+
+  if (!justBecameReady && !slotUpdatedWhileReady) return;
+
   try {
-    // Don't create if already exists
-    const existing = await db.doc(`ops_delivery_tasks/${orderId}`).get();
-    if (existing.exists) return;
+    const deliveryTaskRef = db.doc(`ops_delivery_tasks/${orderId}`);
+    const taskSnap = await deliveryTaskRef.get();
+    const existingTask = taskSnap.exists ? taskSnap.data() : null;
 
     const deliveryAddress = pickupAddressFromOrder(after); // reuse same address helper
     const processSnap = await db.doc(`ops_process/${orderId}`).get();
     const bundleCount = processSnap.exists ? processSnap.data().stages?.packaging?.bundleCount || 1 : 1;
     const bundleLabels = processSnap.exists ? processSnap.data().stages?.packaging?.bundleLabels || [] : [];
 
-    // Select an on-shift rider automatically
-    const riderUid = await selectRider();
+    const deliveryDate = after.deliveryDate || after.deliverySlot || null;
+    const deliveryTime = after.deliveryTime || null;
 
-    await db.doc(`ops_delivery_tasks/${orderId}`).set({
+    const todayStr = getTodayDateString();
+    const hasSlot = Boolean(deliveryDate);
+    const isDueToday = hasSlot && isDeliveryDueToday(deliveryDate, todayStr);
+
+    // 1. If customer has NOT picked a slot yet:
+    // Order sits on store rack waiting for customer to select slot.
+    // Rider must NOT be assigned or notified.
+    if (!hasSlot) {
+      const payload = {
+        orderId,
+        userId,
+        vendorId: after.vendorId || 'default',
+        type: 'delivery',
+        status: 'awaiting_slot',
+        assignee: null,
+        assignedAt: null,
+        deliveryAddress,
+        deliveryDate: null,
+        deliveryTime: null,
+        deliveryOTP: after.deliveryOTP || null,
+        customerName: after.customerName || after.userName || '',
+        customerPhone: after.customerPhone || after.userPhone || '',
+        bundleCount,
+        bundleLabels,
+        tokenNumber: after.tokenNumber || null,
+        tokens: after.tokens || null,
+        updatedAt: TS(),
+        ...(!existingTask ? { createdAt: TS() } : {}),
+      };
+      await deliveryTaskRef.set(payload, { merge: true });
+      console.log(`[syncDeliveryTask] Order ${orderId} is ready, awaiting customer slot selection on store rack.`);
+      return;
+    }
+
+    // 2. Customer picked a slot, but it is for a FUTURE DATE (tomorrow or later):
+    // Keep in store holding, do not dispatch to today's rider.
+    if (!isDueToday) {
+      const payload = {
+        orderId,
+        userId,
+        vendorId: after.vendorId || 'default',
+        type: 'delivery',
+        status: 'scheduled',
+        assignee: null,
+        assignedAt: null,
+        deliveryAddress,
+        deliveryDate,
+        deliveryTime,
+        deliveryOTP: after.deliveryOTP || null,
+        customerName: after.customerName || after.userName || '',
+        customerPhone: after.customerPhone || after.userPhone || '',
+        bundleCount,
+        bundleLabels,
+        tokenNumber: after.tokenNumber || null,
+        tokens: after.tokens || null,
+        updatedAt: TS(),
+        ...(!existingTask ? { createdAt: TS() } : {}),
+      };
+      await deliveryTaskRef.set(payload, { merge: true });
+      console.log(`[syncDeliveryTask] Order ${orderId} scheduled for future date ${deliveryDate} (${deliveryTime}). Holding on shelf.`);
+      return;
+    }
+
+    // 3. Customer scheduled for TODAY (or overdue):
+    // Auto-dispatch to on-shift rider now!
+    let riderUid = existingTask?.assignee || null;
+    if (riderUid) {
+      const riderSnap = await db.doc(`ops_staff/${riderUid}`).get();
+      if (!riderSnap.exists || riderSnap.data().onShift !== true) {
+        riderUid = null;
+      }
+    }
+    if (!riderUid) {
+      riderUid = await selectRider();
+    }
+
+    const payload = {
       orderId,
       userId,
       vendorId: after.vendorId || 'default',
@@ -1226,8 +1314,8 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       assignee: riderUid || null,
       assignedAt: riderUid ? TS() : null,
       deliveryAddress,
-      deliveryDate: after.deliveryDate || null,
-      deliveryTime: after.deliveryTime || null,
+      deliveryDate,
+      deliveryTime,
       deliveryOTP: after.deliveryOTP || null,
       customerName: after.customerName || after.userName || '',
       customerPhone: after.customerPhone || after.userPhone || '',
@@ -1235,22 +1323,25 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       bundleLabels,
       tokenNumber: after.tokenNumber || null,
       tokens: after.tokens || null,
-      createdAt: TS(),
-    });
+      updatedAt: TS(),
+      ...(!existingTask ? { createdAt: TS() } : {}),
+    };
 
-    if (riderUid) {
+    await deliveryTaskRef.set(payload, { merge: true });
+
+    if (riderUid && (!existingTask || existingTask.assignee !== riderUid)) {
       await sendFCMOrderAssignment({
         staffId: riderUid,
         orderId,
         taskType: 'delivery',
         customerName: after.customerName || after.userName || '',
         address: deliveryAddress,
-        slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim(),
+        slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
         isInstant: false,
       });
-      console.log(`[syncDeliveryTask] Outbound delivery for order ${orderId} auto-assigned to rider ${riderUid}`);
-    } else {
-      console.log(`[syncDeliveryTask] No rider on-shift for delivery ${orderId}. Created as pending.`);
+      console.log(`[syncDeliveryTask] Outbound delivery for order ${orderId} (slot: ${deliveryDate} ${deliveryTime}) auto-assigned to rider ${riderUid}`);
+    } else if (!riderUid) {
+      console.log(`[syncDeliveryTask] Order ${orderId} due today (${deliveryDate}), but no rider currently on-shift. Set to pending.`);
     }
   } catch (err) {
     console.error(`syncDeliveryTask failed for ${orderId}`, err);
