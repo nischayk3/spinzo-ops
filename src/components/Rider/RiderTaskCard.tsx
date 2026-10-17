@@ -485,11 +485,13 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             className={`flex-1 h-13 items-center justify-center rounded-2xl shadow-lg border-2 ${
               isInTransit
                 ? 'bg-emerald-600 active:bg-emerald-700 border-emerald-400 shadow-emerald-600/30'
-                : 'bg-purple-600 active:bg-purple-700 border-purple-400 shadow-purple-600/30'
+                : isPickup
+                ? 'bg-purple-600 active:bg-purple-700 border-purple-400 shadow-purple-600/30'
+                : 'bg-blue-600 active:bg-blue-700 border-blue-400 shadow-blue-600/30'
             }`}
           >
             <Text className="text-white font-black text-sm uppercase tracking-wider">
-              {isInTransit ? '🏬 Handover to Store (Verify OTP)' : '🔐 Verify Pickup OTP (4-Digit)'}
+              {p.primaryLabel}
             </Text>
           </Pressable>
         ) : null}

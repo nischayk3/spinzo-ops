@@ -46,7 +46,7 @@ interface OpsProcessState {
   cancelOrder: (orderId: string, userId: string, reason: string, note?: string) => Promise<SupervisorActionResult>;
   reschedulePickup: (orderId: string, userId: string, date: string, time: string) => Promise<SupervisorActionResult>;
   scheduleDelivery: (orderId: string, userId: string, date: string, time: string) => Promise<SupervisorActionResult>;
-  verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string) => Promise<SupervisorActionResult>;
+  verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string, allowUnpaidDelivery?: boolean) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
   unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   unassignDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
@@ -69,7 +69,7 @@ const getProcessId = (orderId: string): string =>
   useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.orderId === orderId)?.id || orderId;
 
 const callSupervisor = () =>
-  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean }, SupervisorActionResult>(
+  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean; allowUnpaidDelivery?: boolean }, SupervisorActionResult>(
     functions,
     'supervisorActions'
   );
@@ -331,9 +331,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     }
   },
 
-  verifyDeliveryOTP: async (orderId, userId, otp, proofUrl) => {
+  verifyDeliveryOTP: async (orderId, userId, otp, proofUrl, allowUnpaidDelivery) => {
     try {
-      const res = await callSupervisor()({ action: 'verifyDeliveryOTP', orderId, userId, otp, proofUrl });
+      const res = await callSupervisor()({ action: 'verifyDeliveryOTP', orderId, userId, otp, proofUrl, allowUnpaidDelivery });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

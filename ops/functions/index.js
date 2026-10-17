@@ -2464,6 +2464,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           deliveryVerified: true,
           deliveredAt: now,
           updatedAt: now,
+          ...(order.paymentStatus !== 'paid' ? { paymentStatus: 'paid', paidAt: now, paymentMethod: order.paymentMethod || 'cash_on_delivery' } : {}),
           ...(proofUrl ? { deliveryProofUrl: proofUrl } : {}),
         };
         tx.update(orderRef, updateData);

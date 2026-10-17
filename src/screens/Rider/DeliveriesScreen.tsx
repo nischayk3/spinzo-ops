@@ -29,6 +29,7 @@ const toMs = (t: any): number => {
 export function DeliveriesScreen() {
   const navigation = useNavigation<any>();
   const user = useAuthStore(state => state.user);
+  const activeRole = useAuthStore(state => state.activeRole);
   const { myDeliveries, myTasks, isLoading, initialize } = useOpsStaffStore();
   const orders = useOrderFeedStore(state => state.orders);
 
@@ -118,12 +119,19 @@ export function DeliveriesScreen() {
     }
   };
 
-  const handleVerifyDelivery = async ({ otp, proofUrl }: { otp: string; proofUrl: string | null }) => {
+  const handleVerifyDelivery = async ({ otp, proofUrl, allowUnpaidDelivery }: { otp: string; proofUrl: string | null; allowUnpaidDelivery?: boolean }) => {
     if (!activeTaskId || otp.length !== 4) return false;
     const task = myDeliveries.find(d => d.id === activeTaskId);
     if (!task) return false;
+    const isSupervisor = activeRole === 'supervisor' || activeRole === 'admin';
     try {
-      const res = await useOpsProcessStore.getState().verifyDeliveryOTP(task.orderId, task.userId, otp, proofUrl || undefined);
+      const res = await useOpsProcessStore.getState().verifyDeliveryOTP(
+        task.orderId,
+        task.userId,
+        otp,
+        proofUrl || undefined,
+        allowUnpaidDelivery ?? isSupervisor
+      );
       if (res.ok) {
         setActiveTaskId(null);
         Alert.alert('Delivery verified', 'Order marked as delivered.');
@@ -284,24 +292,10 @@ export function DeliveriesScreen() {
                       if (t.status === "assigned") {
                         setShowPickupScanner(t.id);
                       } else {
-                        const total = order ? orderTotal(order) : (t.totalAmount || 0);
-                        const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
-                        const isCredit = order?.paymentMode === "credit";
-                        if (total > 0 && !isPaid && !isCredit) {
-                          Alert.alert(
-                            `Payment Pending (₹${total})`,
-                            "This order has not been marked paid yet. Ask the customer to pay in their SpinZo app before completing delivery.",
-                            [
-                              { text: "Cancel", style: "cancel" },
-                              { text: "Enter Delivery OTP", onPress: () => setActiveTaskId(t.id) }
-                            ]
-                          );
-                        } else {
-                          setActiveTaskId(t.id);
-                        }
+                        setActiveTaskId(t.id);
                       }
                     }}
-                    primaryLabel={t.status === 'assigned' ? 'Verify Pickup' : 'Deliver'}
+                    primaryLabel={t.status === 'assigned' ? '🏬 Scan Store Handover' : '🔐 Verify Delivery OTP (4-Digit)'}
                   />
                 </View>
               );
@@ -317,6 +311,11 @@ export function DeliveriesScreen() {
         expectedBundles={activeTask?.bundleCount || 1}
         expectedLabels={activeTask?.bundleLabels || []}
         onVerifyDelivery={handleVerifyDelivery}
+        totalAmount={activeTask ? (orderFor(activeTask) ? orderTotal(orderFor(activeTask)!) : (activeTask.totalAmount || 0)) : 0}
+        paymentStatus={activeTask ? orderFor(activeTask)?.paymentStatus : undefined}
+        paymentMode={activeTask ? orderFor(activeTask)?.paymentMode : undefined}
+        customerName={activeTask?.customerName || (activeTask ? orderFor(activeTask)?.customerName : undefined)}
+        isSupervisor={activeRole === 'supervisor' || activeRole === 'admin'}
       />
 
       {showPickupScanner && (
