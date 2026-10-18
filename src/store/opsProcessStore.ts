@@ -53,7 +53,7 @@ interface OpsProcessState {
   assignStepToHelper: (orderId: string, processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
   unassignStep: (orderId: string, processId: string, userId: string, clearStartedAt?: boolean) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
-  drainWaitingOpsQueues: () => Promise<SupervisorActionResult>;
+  drainWaitingOpsQueues: (stage?: string, force?: boolean) => Promise<SupervisorActionResult>;
   snoozeNudge: (orderId: string, step: 'getting_washed' | 'getting_dried', phase: 'accepted' | 'started', processId?: string) => Promise<OpsProcessingResult>;
   reset: () => void;
 }
@@ -70,7 +70,7 @@ const getProcessId = (orderId: string): string =>
   useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.orderId === orderId)?.id || orderId;
 
 const callSupervisor = () =>
-  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean; allowUnpaidDelivery?: boolean; resetSlot?: boolean }, SupervisorActionResult>(
+  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean; allowUnpaidDelivery?: boolean; resetSlot?: boolean; stage?: string; force?: boolean }, SupervisorActionResult>(
     functions,
     'supervisorActions'
   );
@@ -393,9 +393,9 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     }
   },
 
-  drainWaitingOpsQueues: async () => {
+  drainWaitingOpsQueues: async (stage, force) => {
     try {
-      const res = await callSupervisor()({ action: 'drainWaitingOpsQueues', userId: '' });
+      const res = await callSupervisor()({ action: 'drainWaitingOpsQueues', userId: '', stage, force: !!force });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

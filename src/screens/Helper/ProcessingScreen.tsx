@@ -264,7 +264,15 @@ function SupervisorFeed() {
     if (drainingQueues) return;
     setDrainingQueues(true);
     try {
-      await drainWaitingOpsQueues();
+      const stageMap: Record<string, string> = {
+        washing: 'getting_washed',
+        drying: 'getting_dried',
+        ironing: 'getting_ironed',
+        packaging: 'packaging',
+        tagging: 'tagging',
+      };
+      const targetStage = stageMap[selected] || selected;
+      await drainWaitingOpsQueues(targetStage, true);
     } catch (e) {
       console.warn('Auto drain queues failed:', e);
     } finally {

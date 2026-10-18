@@ -961,6 +961,12 @@ async function autoAssignStage(processId, targetStage, options = {}) {
       return { ok: true, alreadyAssigned: true, assignee: pData.stages[targetStage].assignee };
     }
 
+    // If supervisor explicitly put this order in queue (unassigned), do not auto-assign unless force flag is passed
+    if (pData.stages?.[targetStage]?.heldInQueue && !options.force) {
+      console.log(`[AutoAssignStage] ${processId} (${targetStage}) is explicitly held in queue by supervisor. Skipping.`);
+      return { ok: false, error: 'held_in_queue', shouldQueue: true };
+    }
+
     // 1. Fetch store resources
     const resSnap = await db.doc('config/storeResources').get();
     const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
@@ -1006,6 +1012,7 @@ async function autoAssignStage(processId, targetStage, options = {}) {
       [`stages.${targetStage}.assigneeName`]: selectedHelper.name || '',
       [`stages.${targetStage}.assignedAt`]: now,
       [`stages.${targetStage}.assignedBy`]: 'system_auto',
+      [`stages.${targetStage}.heldInQueue`]: admin.firestore.FieldValue.delete(),
     };
     if (machineName) {
       stageUpdate[`stages.${targetStage}.machineName`] = machineName;
@@ -1038,13 +1045,15 @@ async function autoAssignStage(processId, targetStage, options = {}) {
 }
 
 /**
- * Drain waiting unassigned ops queues across washing, drying, ironing, and packaging.
- * Automatically triggered whenever a machine cycle completes, a task is completed,
- * or a helper clocks on shift.
+ * Drain waiting unassigned ops queues.
+ * For automatic background cron (scheduleDrainWaitingQueues), we ONLY drain machines
+ * ('getting_washed', 'getting_dried') to ensure washers and dryers never sit idle.
+ * Manual floor stages ('packaging', 'tagging', 'getting_ironed') are never forcefully
+ * dispatched by cron unless explicitly triggered by supervisor action.
  */
-async function drainWaitingOpsQueues() {
+async function drainWaitingOpsQueues(stageList = null, options = {}) {
   try {
-    const stagesToCheck = ['getting_washed', 'getting_dried', 'getting_ironed', 'packaging', 'tagging'];
+    const stagesToCheck = stageList || ['getting_washed', 'getting_dried'];
 
     for (const stg of stagesToCheck) {
       const queuedSnap = await db.collection('ops_process')
@@ -1057,8 +1066,11 @@ async function drainWaitingOpsQueues() {
         const unassigned = [];
         queuedSnap.forEach(d => {
           const data = d.data();
-          if (!data.stages?.[stg]?.assignee) {
-            const queuedAt = data.stages?.[stg]?.queuedAt;
+          const s = data.stages?.[stg];
+          if (!s?.assignee) {
+            // Respect supervisor queue hold
+            if (s?.heldInQueue && !options.force) return;
+            const queuedAt = s?.queuedAt;
             const qMs = queuedAt ? (typeof queuedAt.toMillis === 'function' ? queuedAt.toMillis() : new Date(queuedAt).getTime()) : 0;
             unassigned.push({ id: d.id, qMs });
           }
@@ -1067,7 +1079,7 @@ async function drainWaitingOpsQueues() {
         unassigned.sort((a, b) => a.qMs - b.qMs);
 
         for (const item of unassigned) {
-          const res = await autoAssignStage(item.id, stg);
+          const res = await autoAssignStage(item.id, stg, options);
           if (!res.ok) {
             // Machine capacity reached or specialists busy, stop trying further in this stage queue
             break;
@@ -1081,14 +1093,14 @@ async function drainWaitingOpsQueues() {
 }
 
 /**
- * 1-minute heartbeat cron: guarantees that unassigned floor work across washing,
- * drying, and ironing is automatically dispatched as soon as any machine frees up.
+ * 1-minute heartbeat cron: guarantees that unassigned machine tasks across washing
+ * and drying are automatically dispatched as soon as any machine frees up.
  */
 exports.scheduleDrainWaitingQueues = onSchedule({
   schedule: 'every 1 minutes',
   timeZone: 'Asia/Kolkata',
 }, async (event) => {
-  await drainWaitingOpsQueues();
+  await drainWaitingOpsQueues(['getting_washed', 'getting_dried']);
 });
 
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
@@ -2519,7 +2531,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   }
 
   if (action === 'drainWaitingOpsQueues') {
-    await drainWaitingOpsQueues();
+    const stages = data.stage ? [data.stage] : ['getting_washed', 'getting_dried', 'getting_ironed', 'packaging', 'tagging'];
+    await drainWaitingOpsQueues(stages, { force: true });
     return { ok: true };
   }
 
@@ -3000,9 +3013,14 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           if (!assignee && !s.startedAt) return { ok: true, status: 'unassigned' };
           const isMachine = step === 'getting_washed' || step === 'getting_dried' || step === 'getting_ironed';
           const shouldClearStart = Boolean(data.clearStartedAt) || !isMachine;
-          const updateStage = shouldClearStart
+          const baseProgress = shouldClearStart
             ? (({ startedAt, detergentAddedAt, softenerAddedAt, ...rest }) => rest)(progress)
             : progress;
+          const updateStage = {
+            ...baseProgress,
+            heldInQueue: true, // Supervisor explicitly moved this to queue: do NOT auto-assign!
+            queuedAt: now,
+          };
           tx.update(pRef, { [`stages.${step}`]: updateStage });
 
           if (assignee) {
@@ -3022,8 +3040,10 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (!h || h.onShift !== true || h.role === 'rider') return { ok: false, error: 'helper_unavailable' };
 
         // acceptedAt is cleared so the new helper gets the popup and must acknowledge.
+        // eslint-disable-next-line no-unused-vars
+        const { heldInQueue: _h, ...cleanProgress } = progress;
         tx.update(pRef, {
-          [`stages.${step}`]: { ...progress, assignee: helperId, assigneeName: h.name || '', assignedBy: auth.uid, assignedAt: now },
+          [`stages.${step}`]: { ...cleanProgress, assignee: helperId, assigneeName: h.name || '', assignedBy: auth.uid, assignedAt: now },
         });
 
         // Set activeHelperTask for the new helper
