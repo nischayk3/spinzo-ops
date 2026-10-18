@@ -986,7 +986,12 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     liveSnap.forEach(d => liveProcesses.push({ id: d.id, ...d.data() }));
 
     // 4. Select helper using pure dispatch rules
-    const decision = selectHelperForStage(targetStage, onShiftHelpers, liveProcesses, resources, options);
+    const effectiveOptions = {
+      ...options,
+      taggingAssignee: options.taggingAssignee || pData.stages?.tagging?.assignee,
+      previousAssignee: options.previousAssignee || pData.stages?.getting_washed?.assignee,
+    };
+    const decision = selectHelperForStage(targetStage, onShiftHelpers, liveProcesses, resources, effectiveOptions);
     if (!decision.ok || !decision.helper) {
       console.log(`[AutoAssignStage] Could not auto-assign ${processId} (${targetStage}): ${decision.error || 'queued'}`);
       return decision;
@@ -1061,7 +1066,7 @@ async function drainWaitingOpsQueues() {
 
         unassigned.sort((a, b) => a.qMs - b.qMs);
 
-        for (const item of unassigned.slice(0, 2)) {
+        for (const item of unassigned) {
           const res = await autoAssignStage(item.id, stg);
           if (!res.ok) {
             // Machine capacity reached or specialists busy, stop trying further in this stage queue
@@ -1074,6 +1079,17 @@ async function drainWaitingOpsQueues() {
     console.error('[drainWaitingOpsQueues] Error draining queues:', err);
   }
 }
+
+/**
+ * 1-minute heartbeat cron: guarantees that unassigned floor work across washing,
+ * drying, and ironing is automatically dispatched as soon as any machine frees up.
+ */
+exports.scheduleDrainWaitingQueues = onSchedule({
+  schedule: 'every 1 minutes',
+  timeZone: 'Asia/Kolkata',
+}, async (event) => {
+  await drainWaitingOpsQueues();
+});
 
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
 // (e.g. canceled, or pickup_completed via the admin panel instead of opsStatusSync),
@@ -1747,6 +1763,30 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         }
         return { ok: true, step };
       });
+
+      if (result && result.ok) {
+        // Free helper active hands-on task when machine cycle starts
+        if (step === 'getting_washed' || step === 'getting_dried') {
+          try {
+            const sDoc = await db.doc(`ops_staff/${auth.uid}`).get();
+            if (sDoc.exists && sDoc.data().activeHelperTask?.step === step) {
+              await db.doc(`ops_staff/${auth.uid}`).update({
+                activeHelperTask: admin.firestore.FieldValue.delete()
+              });
+            }
+          } catch (err) {
+            console.warn(`[startStep] Clearing activeHelperTask failed for ${auth.uid}:`, err);
+          }
+        }
+
+        // Immediately drain queue so next machine gets loaded without delay
+        try {
+          await drainWaitingOpsQueues();
+        } catch (drainErr) {
+          console.error('[startStep] drainWaitingOpsQueues failed:', drainErr);
+        }
+      }
+
       return result;
     } catch (err) {
       console.error('opsProcessing startStep failed', err);
@@ -2219,7 +2259,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
       if (result && result.ok && result.status && result.status !== 'done') {
         try {
-          await autoAssignStage(processRef.id, result.status);
+          await autoAssignStage(processRef.id, result.status, { taggingAssignee: auth.uid });
         } catch (autoErr) {
           console.error(`[submitTagging] autoAssignStage failed:`, autoErr);
         }
@@ -2476,6 +2516,11 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
   
   if (role !== 'supervisor' && role !== 'admin' && !(role === 'rider' && action === 'verifyDeliveryOTP')) {
     return { ok: false, error: 'unauthorized' };
+  }
+
+  if (action === 'drainWaitingOpsQueues') {
+    await drainWaitingOpsQueues();
+    return { ok: true };
   }
 
   if (action === 'backfillOpsTasks') {

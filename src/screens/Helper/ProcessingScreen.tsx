@@ -108,7 +108,7 @@ function SupervisorFeed() {
   // The role is simply their activeRole.
   const role = authRole || 'helper';
   
-  const { processes, isLoading, error, initialize, startStep, completeStep } = useOpsProcessStore();
+  const { processes, isLoading, error, initialize, startStep, completeStep, drainWaitingOpsQueues } = useOpsProcessStore();
   const resources = useStoreResourcesStore(s => s.resources);
   const { orders, initialize: initializeFeed } = useOrderFeedStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
@@ -248,6 +248,39 @@ function SupervisorFeed() {
       await completeStep(activeFloatingProcess.orderId);
     }
   };
+
+  const [drainingQueues, setDrainingQueues] = useState(false);
+  const hasUnassignedPending = useMemo(() => {
+    return pendingItems.some(i => {
+      const p = i.process;
+      if (!p) return false;
+      const cur = currentStep(p);
+      if (!cur) return false;
+      return !p.stages?.[cur]?.assignee;
+    });
+  }, [pendingItems]);
+
+  const handleAutoDrain = async () => {
+    if (drainingQueues) return;
+    setDrainingQueues(true);
+    try {
+      await drainWaitingOpsQueues();
+    } catch (e) {
+      console.warn('Auto drain queues failed:', e);
+    } finally {
+      setDrainingQueues(false);
+    }
+  };
+
+  // Autopilot: automatically evaluate and drain queue if there are unassigned machine tasks
+  useEffect(() => {
+    if (hasUnassignedPending && (role === 'supervisor' || role === 'admin')) {
+      const timer = setTimeout(() => {
+        handleAutoDrain();
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [hasUnassignedPending, role]);
 
   const handleItemPress = (item: QueueItem) => {
     navigation.navigate('OrderDetail', { orderId: item.orderId, processId: item.process?.id });
@@ -617,11 +650,26 @@ function SupervisorFeed() {
                    selected === 'drying' ? `🧺 Queued for Dryer (${pendingItems.length} Waiting Outside)` :
                    `Pending Floor Work (${pendingItems.length})`}
                 </Text>
-                {selected === 'washing' && (
+                {hasUnassignedPending && (role === 'supervisor' || role === 'admin') ? (
+                  <TouchableOpacity
+                    onPress={handleAutoDrain}
+                    disabled={drainingQueues}
+                    className="flex-row items-center bg-[#994bff]/10 border border-[#994bff]/30 px-3 py-1 rounded-full active:opacity-75"
+                  >
+                    {drainingQueues ? (
+                      <ActivityIndicator size="small" color="#994bff" className="mr-1" />
+                    ) : (
+                      <Zap size={12} color="#994bff" className="mr-1" />
+                    )}
+                    <Text className="text-[#994bff] font-bold text-xs">
+                      {drainingQueues ? 'Assigning…' : '⚡ Auto-Assign'}
+                    </Text>
+                  </TouchableOpacity>
+                ) : selected === 'washing' ? (
                   <Text className="text-slate-400 text-xs font-semibold">
                     Staged in queue · will start when washer opens
                   </Text>
-                )}
+                ) : null}
               </View>
               <View className={isDesktop || isTablet ? "flex-row flex-wrap -mx-2" : ""}>
                 {pendingItems.map(item => (

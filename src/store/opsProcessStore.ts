@@ -53,6 +53,7 @@ interface OpsProcessState {
   assignStepToHelper: (orderId: string, processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
   unassignStep: (orderId: string, processId: string, userId: string, clearStartedAt?: boolean) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
+  drainWaitingOpsQueues: () => Promise<SupervisorActionResult>;
   snoozeNudge: (orderId: string, step: 'getting_washed' | 'getting_dried', phase: 'accepted' | 'started', processId?: string) => Promise<OpsProcessingResult>;
   reset: () => void;
 }
@@ -386,6 +387,15 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   unassignStep: async (orderId, processId, userId, clearStartedAt) => {
     try {
       const res = await callSupervisor()({ action: 'unassignStep', orderId, processId, userId, clearStartedAt: !!clearStartedAt });
+      return res.data;
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+
+  drainWaitingOpsQueues: async () => {
+    try {
+      const res = await callSupervisor()({ action: 'drainWaitingOpsQueues', userId: '' });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

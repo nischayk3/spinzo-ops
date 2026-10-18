@@ -312,11 +312,23 @@ function isHelperHandsOnBusy(helperUid, liveProcesses) {
 
 function getRunningMachines(step, liveProcesses) {
   if (!liveProcesses || liveProcesses.length === 0) return [];
+  const now = Date.now();
+  // Standard laundry cycle limits: Washers ~35m (max 50m threshold), Dryers ~45m (max 60m threshold)
+  // If a cycle was started longer ago than this, the machine physically finished and shouldn't block new cycles.
+  const MAX_CYCLE_MS = step === 'getting_washed' ? 50 * 60 * 1000 : step === 'getting_dried' ? 60 * 60 * 1000 : Infinity;
   return liveProcesses.filter(p => {
     const cur = p.steps ? p.steps[p.currentIndex] : p.status;
     if (cur !== step) return false;
     const stage = p.stages && p.stages[cur];
-    return !!stage?.startedAt && !stage?.completedAt;
+    if (!stage?.startedAt || stage?.completedAt) return false;
+    const startMs = typeof stage.startedAt.toMillis === 'function'
+      ? stage.startedAt.toMillis()
+      : (typeof stage.startedAt === 'number' ? stage.startedAt : new Date(stage.startedAt).getTime());
+    // Only apply cycle timeout for real epoch timestamps (after Jan 1 2020)
+    if (startMs > 1577836800000 && (now - startMs) > MAX_CYCLE_MS) {
+      return false; // Physical cycle already finished; do not falsely occupy machine capacity
+    }
+    return true;
   });
 }
 
@@ -337,8 +349,8 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
 /**
  * Deterministic helper selection for store operations stages:
  * - Tagging: 1st Abdul, fallback Abdur or Samsul
- * - Washing: Any free helper (requires available washer)
- * - Drying: Any free helper / previousAssignee (requires available dryer)
+ * - Washing: Any free helper / taggingAssignee / fallback (requires available washer)
+ * - Drying: Any free helper / previousAssignee / fallback (requires available dryer)
  * - Ironing: 1st Samsul (Station 1), 2nd Abdur (Station 2)
  * - Packaging: 1st Abdul, fallback Abdur or Samsul
  */
@@ -376,10 +388,23 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
       return { ok: false, error: 'washers_at_capacity', shouldQueue: true };
     }
     const machineName = allocateMachineName('getting_washed', liveProcesses, maxWashers);
-    if (freeHelpers.length > 0) {
-      return { ok: true, helper: freeHelpers[0], machineName };
+
+    // In a laundry operation, starting a washer takes 60 seconds (load drum, add soap, press start).
+    // The 40-minute machine cycle must NEVER sit idle waiting for a helper to be completely free.
+    // Helper priority:
+    // 1. Any truly free helper (e.g. Abdur available)
+    // 2. The helper who tagged this order (clothes are already at their station)
+    // 3. Fallback: Any on-shift helper (Abdul, Abdur, Samsul) to load and start cycle
+    const taggingHelper = options.taggingAssignee ? helpers.find(h => h.uid === options.taggingAssignee) : null;
+    const chosenHelper = freeHelpers[0]
+      || (taggingHelper && taggingHelper.onShift ? taggingHelper : null)
+      || freeAbdur || freeAbdul || freeSamsul
+      || abdur || abdul || samsul || helpers[0];
+
+    if (chosenHelper) {
+      return { ok: true, helper: chosenHelper, machineName };
     }
-    return { ok: false, error: 'helpers_busy', shouldQueue: true };
+    return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
   }
 
   // 3. DRYING
@@ -390,14 +415,23 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
       return { ok: false, error: 'dryers_at_capacity', shouldQueue: true };
     }
     const machineName = allocateMachineName('getting_dried', liveProcesses, maxDryers);
-    if (options.previousAssignee) {
-      const prev = freeHelpers.find(h => h.uid === options.previousAssignee);
-      if (prev) return { ok: true, helper: prev, machineName };
+
+    // Moving clothes from washer to dryer takes 60 seconds.
+    // Dryers must never sit idle waiting for a 100% idle helper.
+    // Helper priority:
+    // 1. Any truly free helper
+    // 2. The helper who washed the order (previousAssignee)
+    // 3. Fallback: Any on-shift helper to transfer and start dryer
+    const prev = options.previousAssignee ? helpers.find(h => h.uid === options.previousAssignee) : null;
+    const chosenHelper = freeHelpers[0]
+      || (prev && prev.onShift ? prev : null)
+      || freeAbdur || freeAbdul || freeSamsul
+      || abdur || abdul || samsul || helpers[0];
+
+    if (chosenHelper) {
+      return { ok: true, helper: chosenHelper, machineName };
     }
-    if (freeHelpers.length > 0) {
-      return { ok: true, helper: freeHelpers[0], machineName };
-    }
-    return { ok: false, error: 'helpers_busy', shouldQueue: true };
+    return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
   }
 
   // 4. IRONING

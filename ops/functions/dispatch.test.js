@@ -233,3 +233,34 @@ test('isDeliveryDueToday: customer slot validation', () => {
   assert.strictEqual(isDeliveryDueToday('2026-10-16', today), true);
 });
 
+test('selectHelperForStage (Washing): assigns free washer even when all helpers are hands-on busy', () => {
+  // Abdul is packaging, Samsul is ironing, Abdur is tagging
+  const liveBusy = [
+    { id: 'p1', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p2', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000 } } },
+    { id: 'p3', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdur', startedAt: 1000 } } },
+  ];
+  const res = selectHelperForStage('getting_washed', mockHelpers, liveBusy, { washers: 2, dryers: 2, ironingStations: 2 }, { taggingAssignee: 'h_abdul' });
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.machineName, 'Washer 1');
+  assert.strictEqual(typeof res.helper.uid, 'string');
+});
+
+test('getRunningMachines: ignores ghost cycles started > 50 mins ago for washers', () => {
+  const { getRunningMachines } = require('./dispatch');
+  const now = Date.now();
+  const past60Min = now - (60 * 60 * 1000); // 60 mins ago
+  const liveOld = [
+    {
+      id: 'p_old',
+      status: 'getting_washed',
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      stages: { getting_washed: { startedAt: past60Min, machineName: 'Washer 1' } }
+    }
+  ];
+  const running = getRunningMachines('getting_washed', liveOld);
+  assert.strictEqual(running.length, 0); // Cycle expired, machine available!
+});
+
+
