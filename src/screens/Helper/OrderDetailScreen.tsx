@@ -1079,51 +1079,34 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                       : new Date((curStage.startedAt as any)).getTime())
                   : 0;
                 const machineElapsedSec = cycleStartedAtMs > 0 ? Math.floor((Date.now() - cycleStartedAtMs) / 1000) : 0;
-                const isCycleLocked = isMachineStep && machineElapsedSec < 1800;
-                const cycleLockMinLeft = Math.max(1, Math.ceil((1800 - machineElapsedSec) / 60));
-
-                if (isCycleLocked) {
-                  return (
-                    <View>
-                      <TouchableOpacity
-                        onPress={() => {
-                          if (activeRole === 'supervisor' || activeRole === 'admin') {
-                            setShowEmergencyOverrideModal(true);
-                          }
-                        }}
-                        className="h-14 rounded-xl items-center justify-center flex-row bg-gray-100 border border-gray-200 mb-2 active:opacity-80"
-                      >
-                        <Lock size={18} color="#94a3b8" className="mr-2" />
-                        <Text className="text-gray-500 font-bold text-base">
-                          Unload Enabled in {cycleLockMinLeft}m
-                        </Text>
-                      </TouchableOpacity>
-
-                      {(activeRole === 'supervisor' || activeRole === 'admin') && (
-                        <TouchableOpacity
-                          onPress={() => setShowEmergencyOverrideModal(true)}
-                          className="py-2.5 items-center active:opacity-75"
-                        >
-                          <Text className="text-red-500 font-semibold text-xs">Supervisor Emergency Override</Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  );
-                }
+                const elapsedMin = Math.floor(machineElapsedSec / 60);
 
                 return (
-                  <TouchableOpacity
-                    onPress={handleComplete}
-                    disabled={busy}
-                    className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-green-500'}`}
-                  >
-                    {busy ? <ActivityIndicator color="#fff" /> : (
-                      <View className="flex-row items-center gap-2">
-                        {isMachineStep && <Check size={20} color="#fff" />}
-                        <Text className="text-white font-bold text-lg">{isMachineStep ? 'Unload & Complete' : `Complete ${stepLabel(cur)}`}</Text>
-                      </View>
+                  <View>
+                    <TouchableOpacity
+                      onPress={handleComplete}
+                      disabled={busy}
+                      className={`h-14 rounded-xl items-center justify-center flex-row mb-2 ${busy ? 'bg-gray-200' : 'bg-green-500'} active:opacity-90`}
+                    >
+                      {busy ? <ActivityIndicator color="#fff" /> : (
+                        <View className="flex-row items-center gap-2">
+                          {isMachineStep && <Check size={20} color="#fff" />}
+                          <Text className="text-white font-bold text-lg">
+                            {isMachineStep ? `Unload & Complete (${elapsedMin}m run)` : `Complete ${stepLabel(cur)}`}
+                          </Text>
+                        </View>
+                      )}
+                    </TouchableOpacity>
+
+                    {(activeRole === 'supervisor' || activeRole === 'admin') && isMachineStep && (
+                      <TouchableOpacity
+                        onPress={() => setShowEmergencyOverrideModal(true)}
+                        className="py-2.5 items-center active:opacity-75"
+                      >
+                        <Text className="text-red-500 font-semibold text-xs">Supervisor Emergency Override</Text>
+                      </TouchableOpacity>
                     )}
-                  </TouchableOpacity>
+                  </View>
                 );
               })()}
             </View>

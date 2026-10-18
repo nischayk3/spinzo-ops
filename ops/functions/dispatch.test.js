@@ -210,6 +210,17 @@ test('selectHelperForStage (Packaging): Abdul is 1st preference, falls back if b
   const res2 = selectHelperForStage('packaging', mockHelpers, livePackaging);
   assert.strictEqual(res2.ok, true);
   assert.strictEqual(res2.helper.uid === 'h_abdur' || res2.helper.uid === 'h_samsul', true);
+
+  // When all helpers are busy with hands-on tasks, packaging MUST queue (never pile up multiple orders on Abdul!)
+  const liveAllBusy = [
+    { id: 'p1', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p2', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+    { id: 'p3', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000 } } },
+  ];
+  const res3 = selectHelperForStage('packaging', mockHelpers, liveAllBusy);
+  assert.strictEqual(res3.ok, false);
+  assert.strictEqual(res3.shouldQueue, true);
+  assert.strictEqual(res3.error, 'all_packagers_busy');
 });
 
 const { isDeliveryDueToday } = require('./dispatch');
@@ -246,21 +257,27 @@ test('selectHelperForStage (Washing): assigns free washer even when all helpers 
   assert.strictEqual(typeof res.helper.uid, 'string');
 });
 
-test('getRunningMachines: ignores ghost cycles started > 50 mins ago for washers', () => {
+test('getRunningMachines: retains running machine across multi-lot orders until completed', () => {
   const { getRunningMachines } = require('./dispatch');
   const now = Date.now();
-  const past60Min = now - (60 * 60 * 1000); // 60 mins ago
-  const liveOld = [
+  const past70Min = now - (70 * 60 * 1000); // 70 mins ago (e.g. 2nd lot running for 13kg order)
+  const liveRunning = [
     {
-      id: 'p_old',
+      id: 'p_multilot',
       status: 'getting_washed',
       steps: ['getting_washed'],
       currentIndex: 0,
-      stages: { getting_washed: { startedAt: past60Min, machineName: 'Washer 1' } }
+      stages: { getting_washed: { startedAt: past70Min, machineName: 'Washer 1' } }
     }
   ];
-  const running = getRunningMachines('getting_washed', liveOld);
-  assert.strictEqual(running.length, 0); // Cycle expired, machine available!
+  const running = getRunningMachines('getting_washed', liveRunning);
+  assert.strictEqual(running.length, 1);
+  assert.strictEqual(running[0].stages.getting_washed.machineName, 'Washer 1');
+
+  // Once completedAt is set, machine is free
+  liveRunning[0].stages.getting_washed.completedAt = now;
+  const runningAfter = getRunningMachines('getting_washed', liveRunning);
+  assert.strictEqual(runningAfter.length, 0);
 });
 
 

@@ -287,47 +287,47 @@ function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
 }
 
 /**
- * Check if a helper is currently hands-on busy.
- * A helper is hands-on busy if:
- * 1. They are doing tagging, ironing, packaging, or
- * 2. They have accepted washing/drying but haven't started it yet (startedAt is null).
- * Once a washer or dryer cycle is started, the helper is FREE.
+ * Helper hands-on and machine loading definitions:
+ * - A helper has an active hands-on task if they have an uncompleted tagging, ironing, or packaging task.
+ * - A helper has an active machine-loading task if they are assigned washing/drying but haven't started it yet.
+ * - Once started, washing and drying run unattended by the machine.
  */
-function isHelperHandsOnBusy(helperUid, liveProcesses) {
+function hasActiveHandsOnTask(helperUid, liveProcesses) {
   if (!liveProcesses || liveProcesses.length === 0) return false;
   return liveProcesses.some(p => {
     const cur = p.steps ? p.steps[p.currentIndex] : p.status;
     if (!cur || p.status === 'done' || p.status === 'cancelled') return false;
     const stage = p.stages && p.stages[cur];
     if (!stage || stage.assignee !== helperUid || stage.completedAt) return false;
-
-    // If machine step and already started, helper is FREE for other tasks
-    if ((cur === 'getting_washed' || cur === 'getting_dried') && stage.startedAt) {
-      return false;
-    }
-    // Any other assigned, uncompleted stage (including loading a machine) is hands-on busy
-    return true;
+    return cur === 'tagging' || cur === 'getting_ironed' || cur === 'packaging';
   });
+}
+
+function hasActiveMachineLoadingTask(helperUid, liveProcesses) {
+  if (!liveProcesses || liveProcesses.length === 0) return false;
+  return liveProcesses.some(p => {
+    const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+    if (!cur || p.status === 'done' || p.status === 'cancelled') return false;
+    const stage = p.stages && p.stages[cur];
+    if (!stage || stage.assignee !== helperUid || stage.completedAt) return false;
+    return (cur === 'getting_washed' || cur === 'getting_dried') && !stage.startedAt;
+  });
+}
+
+function isHelperHandsOnBusy(helperUid, liveProcesses) {
+  return hasActiveHandsOnTask(helperUid, liveProcesses) || hasActiveMachineLoadingTask(helperUid, liveProcesses);
 }
 
 function getRunningMachines(step, liveProcesses) {
   if (!liveProcesses || liveProcesses.length === 0) return [];
-  const now = Date.now();
-  // Standard laundry cycle limits: Washers ~35m (max 50m threshold), Dryers ~45m (max 60m threshold)
-  // If a cycle was started longer ago than this, the machine physically finished and shouldn't block new cycles.
-  const MAX_CYCLE_MS = step === 'getting_washed' ? 50 * 60 * 1000 : step === 'getting_dried' ? 60 * 60 * 1000 : Infinity;
+  // Machines remain occupied until explicitly marked completed or reset.
+  // In a laundry operation, orders can exceed machine capacity (e.g. 12-13 kg in a 10 kg machine)
+  // requiring 2 sequential lots in the same machine. No artificial timeout should evict the machine.
   return liveProcesses.filter(p => {
     const cur = p.steps ? p.steps[p.currentIndex] : p.status;
     if (cur !== step) return false;
     const stage = p.stages && p.stages[cur];
     if (!stage?.startedAt || stage?.completedAt) return false;
-    const startMs = typeof stage.startedAt.toMillis === 'function'
-      ? stage.startedAt.toMillis()
-      : (typeof stage.startedAt === 'number' ? stage.startedAt : new Date(stage.startedAt).getTime());
-    // Only apply cycle timeout for real epoch timestamps (after Jan 1 2020)
-    if (startMs > 1577836800000 && (now - startMs) > MAX_CYCLE_MS) {
-      return false; // Physical cycle already finished; do not falsely occupy machine capacity
-    }
     return true;
   });
 }
@@ -348,11 +348,11 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
 
 /**
  * Deterministic helper selection for store operations stages:
- * - Tagging: 1st Abdul, fallback Abdur or Samsul
- * - Washing: Any free helper / taggingAssignee / fallback (requires available washer)
- * - Drying: Any free helper / previousAssignee / fallback (requires available dryer)
- * - Ironing: 1st Samsul (Station 1), 2nd Abdur (Station 2)
- * - Packaging: 1st Abdul, fallback Abdur or Samsul
+ * - Tagging: 1st Abdul, fallback Abdur or Samsul (only if completely free, else queue)
+ * - Washing: Free helper or hands-on helper without pending machine load (requires available washer)
+ * - Drying: Free helper or hands-on helper without pending machine load (requires available dryer)
+ * - Ironing: 1st Samsul (Station 1), 2nd Abdur (Station 2) (only if free, else queue)
+ * - Packaging: 1st Abdul, fallback Abdur or Samsul (only if completely free, else queue)
  */
 function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}) {
   const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
@@ -361,6 +361,7 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
   }
 
+  // Helpers with NO active hands-on task and NO pending machine loading task
   const freeHelpers = helpers.filter(h => !isHelperHandsOnBusy(h.uid, liveProcesses));
 
   const abdul = helpers.find(h => normalize(h.phone) === '6900311761');
@@ -371,16 +372,16 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
   const freeSamsul = freeHelpers.find(h => normalize(h.phone) === '6369768237');
   const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
 
-  // 1. TAGGING
+  // 1. TAGGING (Hands-on: requires human hands. If all helpers busy, MUST queue!)
   if (stage === 'tagging') {
     if (freeAbdul) return { ok: true, helper: freeAbdul };
     if (freeAbdur) return { ok: true, helper: freeAbdur };
     if (freeSamsul) return { ok: true, helper: freeSamsul };
     if (freeHelpers.length > 0) return { ok: true, helper: freeHelpers[0] };
-    return { ok: true, helper: abdul || abdur || samsul || helpers[0] };
+    return { ok: false, error: 'all_taggers_busy', shouldQueue: true };
   }
 
-  // 2. WASHING
+  // 2. WASHING (Machine step: takes ~60s to load & start, then machine runs alone)
   if (stage === 'getting_washed') {
     const maxWashers = resources.washers || 2;
     const runningWashers = getRunningMachines('getting_washed', liveProcesses);
@@ -389,25 +390,32 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     }
     const machineName = allocateMachineName('getting_washed', liveProcesses, maxWashers);
 
-    // In a laundry operation, starting a washer takes 60 seconds (load drum, add soap, press start).
-    // The 40-minute machine cycle must NEVER sit idle waiting for a helper to be completely free.
-    // Helper priority:
-    // 1. Any truly free helper (e.g. Abdur available)
-    // 2. The helper who tagged this order (clothes are already at their station)
-    // 3. Fallback: Any on-shift helper (Abdul, Abdur, Samsul) to load and start cycle
-    const taggingHelper = options.taggingAssignee ? helpers.find(h => h.uid === options.taggingAssignee) : null;
+    // Helpers who are NOT currently loading another machine (can only load 1 machine at a time)
+    const canLoadHelpers = helpers.filter(h => !hasActiveMachineLoadingTask(h.uid, liveProcesses));
+    if (canLoadHelpers.length === 0) {
+      return { ok: false, error: 'all_helpers_loading_machines', shouldQueue: true };
+    }
+
+    // Priority:
+    // 1. Truly free helper (no task at all)
+    // 2. Tagging helper for this order (if not already loading another machine)
+    // 3. Hands-on helper (Abdul, Abdur, Samsul) who can briefly load the drum and return to hands-on work
+    const taggingHelper = options.taggingAssignee ? canLoadHelpers.find(h => h.uid === options.taggingAssignee) : null;
     const chosenHelper = freeHelpers[0]
       || (taggingHelper && taggingHelper.onShift ? taggingHelper : null)
       || freeAbdur || freeAbdul || freeSamsul
-      || abdur || abdul || samsul || helpers[0];
+      || canLoadHelpers.find(h => normalize(h.phone) === '7559105832') // abdur
+      || canLoadHelpers.find(h => normalize(h.phone) === '6900311761') // abdul
+      || canLoadHelpers.find(h => normalize(h.phone) === '6369768237') // samsul
+      || canLoadHelpers[0];
 
     if (chosenHelper) {
       return { ok: true, helper: chosenHelper, machineName };
     }
-    return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
+    return { ok: false, error: 'no_helpers_available', shouldQueue: true };
   }
 
-  // 3. DRYING
+  // 3. DRYING (Machine step: takes ~60s to transfer & start, then machine runs alone)
   if (stage === 'getting_dried') {
     const maxDryers = resources.dryers || 2;
     const runningDryers = getRunningMachines('getting_dried', liveProcesses);
@@ -416,62 +424,51 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     }
     const machineName = allocateMachineName('getting_dried', liveProcesses, maxDryers);
 
-    // Moving clothes from washer to dryer takes 60 seconds.
-    // Dryers must never sit idle waiting for a 100% idle helper.
-    // Helper priority:
-    // 1. Any truly free helper
-    // 2. The helper who washed the order (previousAssignee)
-    // 3. Fallback: Any on-shift helper to transfer and start dryer
-    const prev = options.previousAssignee ? helpers.find(h => h.uid === options.previousAssignee) : null;
+    const canLoadHelpers = helpers.filter(h => !hasActiveMachineLoadingTask(h.uid, liveProcesses));
+    if (canLoadHelpers.length === 0) {
+      return { ok: false, error: 'all_helpers_loading_machines', shouldQueue: true };
+    }
+
+    const prev = options.previousAssignee ? canLoadHelpers.find(h => h.uid === options.previousAssignee) : null;
     const chosenHelper = freeHelpers[0]
       || (prev && prev.onShift ? prev : null)
       || freeAbdur || freeAbdul || freeSamsul
-      || abdur || abdul || samsul || helpers[0];
+      || canLoadHelpers.find(h => normalize(h.phone) === '7559105832') // abdur
+      || canLoadHelpers.find(h => normalize(h.phone) === '6900311761') // abdul
+      || canLoadHelpers.find(h => normalize(h.phone) === '6369768237') // samsul
+      || canLoadHelpers[0];
 
     if (chosenHelper) {
       return { ok: true, helper: chosenHelper, machineName };
     }
-    return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
+    return { ok: false, error: 'no_helpers_available', shouldQueue: true };
   }
 
-  // 4. IRONING
+  // 4. IRONING (Hands-on: requires dedicated ironing specialist. If busy, MUST queue!)
   if (stage === 'getting_ironed') {
     const maxIrons = resources.ironingStations || 2;
     const runningIrons = getRunningMachines('getting_ironed', liveProcesses);
     if (runningIrons.length >= maxIrons) {
       return { ok: false, error: 'iron_stations_at_capacity', shouldQueue: true };
     }
-    const isSamsulIroning = runningIrons.some(p => {
-      const s = p.stages?.getting_ironed;
-      return s && (s.assignee === samsul?.uid || normalize(s.assigneePhone) === '6369768237');
-    });
-    const isAbdurIroning = runningIrons.some(p => {
-      const s = p.stages?.getting_ironed;
-      return s && (s.assignee === abdur?.uid || normalize(s.assigneePhone) === '7559105832');
-    });
 
-    if (samsul && !isSamsulIroning && freeSamsul) {
+    // Only assign if specialist is completely free from any hands-on task
+    if (freeSamsul) {
       return { ok: true, helper: samsul, machineName: 'Iron Station 1' };
     }
-    if (abdur && !isAbdurIroning && freeAbdur) {
-      return { ok: true, helper: abdur, machineName: 'Iron Station 2' };
-    }
-    if (samsul && !isSamsulIroning) {
-      return { ok: true, helper: samsul, machineName: 'Iron Station 1' };
-    }
-    if (abdur && !isAbdurIroning) {
+    if (freeAbdur) {
       return { ok: true, helper: abdur, machineName: 'Iron Station 2' };
     }
     return { ok: false, error: 'iron_specialists_busy', shouldQueue: true };
   }
 
-  // 5. PACKAGING
+  // 5. PACKAGING (Hands-on: 1 order per person. If all helpers busy, MUST queue!)
   if (stage === 'packaging') {
     if (freeAbdul) return { ok: true, helper: freeAbdul };
     if (freeAbdur) return { ok: true, helper: freeAbdur };
     if (freeSamsul) return { ok: true, helper: freeSamsul };
     if (freeHelpers.length > 0) return { ok: true, helper: freeHelpers[0] };
-    return { ok: true, helper: abdul || abdur || samsul || helpers[0] };
+    return { ok: false, error: 'all_packagers_busy', shouldQueue: true };
   }
 
   return { ok: false, error: 'unknown_stage', shouldQueue: true };

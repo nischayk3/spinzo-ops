@@ -272,16 +272,6 @@ function SupervisorFeed() {
     }
   };
 
-  // Autopilot: automatically evaluate and drain queue if there are unassigned machine tasks
-  useEffect(() => {
-    if (hasUnassignedPending && (role === 'supervisor' || role === 'admin')) {
-      const timer = setTimeout(() => {
-        handleAutoDrain();
-      }, 1500);
-      return () => clearTimeout(timer);
-    }
-  }, [hasUnassignedPending, role]);
-
   const handleItemPress = (item: QueueItem) => {
     navigation.navigate('OrderDetail', { orderId: item.orderId, processId: item.process?.id });
   };
