@@ -49,7 +49,7 @@ interface OpsProcessState {
   verifyDeliveryOTP: (orderId: string, userId: string, otp: string, proofUrl?: string, allowUnpaidDelivery?: boolean) => Promise<SupervisorActionResult>;
   assignTaskToRider: (orderId: string, userId: string, riderId: string, isDelivery: boolean) => Promise<SupervisorActionResult>;
   unassignPickup: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
-  unassignDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
+  unassignDelivery: (orderId: string, userId: string, options?: { resetSlot?: boolean; reason?: string; note?: string }) => Promise<SupervisorActionResult>;
   assignStepToHelper: (orderId: string, processId: string, userId: string, helperId: string) => Promise<SupervisorActionResult>;
   unassignStep: (orderId: string, processId: string, userId: string, clearStartedAt?: boolean) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
@@ -69,7 +69,7 @@ const getProcessId = (orderId: string): string =>
   useOpsProcessStore.getState().processes.find((pr: OpsProcess) => pr.orderId === orderId)?.id || orderId;
 
 const callSupervisor = () =>
-  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean; allowUnpaidDelivery?: boolean }, SupervisorActionResult>(
+  httpsCallable<{ action: string; orderId?: string; processId?: string; userId: string; vendorId?: string; reason?: string; note?: string; date?: string; time?: string; otp?: string; riderId?: string; helperId?: string; isDelivery?: boolean; proofUrl?: string; clearStartedAt?: boolean; allowUnpaidDelivery?: boolean; resetSlot?: boolean }, SupervisorActionResult>(
     functions,
     'supervisorActions'
   );
@@ -358,9 +358,16 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     }
   },
 
-  unassignDelivery: async (orderId, userId) => {
+  unassignDelivery: async (orderId, userId, options) => {
     try {
-      const res = await callSupervisor()({ action: 'unassignDelivery', orderId, userId });
+      const res = await callSupervisor()({
+        action: 'unassignDelivery',
+        orderId,
+        userId,
+        resetSlot: options?.resetSlot,
+        reason: options?.reason,
+        note: options?.note,
+      });
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };

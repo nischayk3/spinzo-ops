@@ -7,12 +7,13 @@ import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
 import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import { AssignHelperModal } from '../../components/Supervisor/AssignHelperModal';
+import { ReturnDeliveryModal, ReturnDeliveryOptions } from '../../components/Supervisor/ReturnDeliveryModal';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel } from '../../utils/orderFeed';
-import { currentStep, isDone, stage, stepLabel } from '../../utils/opsProcess';
+import { currentStep, isDone, stage, stepLabel, GarmentsRecord } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
 import { canStartStage } from './ProcessingScreen';
@@ -299,27 +300,41 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
   const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
   const [showAssignHelperModal, setShowAssignHelperModal] = useState(false);
+  const [showReturnDeliveryModal, setShowReturnDeliveryModal] = useState(false);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
 
   const [previewImage, setPreviewImage] = useState<string | null>(null);
 
   const done = process ? isDone(process) : false;
-  const taggingStage = process?.stages?.tagging;
-  const garments = process?.garments || {};
-  const registered = garments.registered || [];
-  const registeredSeqs = useMemo(() => registered.map((r: any) => typeof r === 'number' ? r : r.seq), [registered]);
+  const garments: GarmentsRecord = process?.garments || {};
+  const registered = garments?.registered;
+  const registeredKey = useMemo(() => {
+    if (!registered || !Array.isArray(registered)) return '';
+    return registered.map((r: any) => (typeof r === 'number' ? r : r.seq)).sort((a, b) => a - b).join(',');
+  }, [registered]);
+
+  const registeredSeqs = useMemo(() => {
+    if (!registered || !Array.isArray(registered)) return [];
+    return registered.map((r: any) => (typeof r === 'number' ? r : r.seq));
+  }, [registeredKey]);
+
   const [optimisticSeqs, setOptimisticSeqs] = useState<number[]>([]);
   const optimisticSeqsRef = useRef<number[]>([]);
 
   useEffect(() => {
     setOptimisticSeqs(prev => {
+      const hasNew = registeredSeqs.some(s => !prev.includes(s));
+      if (!hasNew) {
+        return prev; // Prevents re-render and infinite update depth loop
+      }
       const merged = Array.from(new Set([...registeredSeqs, ...prev]));
       optimisticSeqsRef.current = merged;
       return merged;
     });
-  }, [registeredSeqs]);
+  }, [registeredKey]);
 
-  const effectiveRegisteredSeqs = useMemo(() => Array.from(new Set([...registeredSeqs, ...optimisticSeqs])), [registeredSeqs, optimisticSeqs]);
+  const effectiveRegisteredSeqs = useMemo(() => Array.from(new Set([...registeredSeqs, ...optimisticSeqs])), [registeredKey, optimisticSeqs]);
   const effectiveCount = effectiveRegisteredSeqs.length;
   const registeredCount = effectiveCount;
 
@@ -438,7 +453,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     setScanError(null);
     setActionError(null);
 
-    const totalCount = garments.count || 0;
+    const totalCount = garments?.count || 0;
     if (totalCount === 0) return;
 
     const currentAssigned = optimisticSeqsRef.current;
@@ -495,7 +510,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   };
 
   const handleTagAll = async () => {
-    const totalCount = garments.count || 0;
+    const totalCount = garments?.count || 0;
     if (totalCount === 0) return;
     const all = Array.from({ length: totalCount }, (_, i) => i + 1);
     optimisticSeqsRef.current = all;
@@ -600,38 +615,35 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
-  const handleUnassignDelivery = async () => {
-    Alert.alert(
-      'Unassign Delivery',
-      'Are you sure you want to unassign the delivery partner and return this order to ready status?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Unassign',
-          style: 'destructive',
-          onPress: async () => {
-            setBusy(true);
-            try {
-              const targetUserId = order?.userId || orderProcesses[0]?.userId || '';
-              const res = await useOpsProcessStore.getState().unassignDelivery(orderId, targetUserId);
-              setBusy(false);
-              if (!res.ok) {
-                const msg = friendlyActionError(res.error || 'unknown');
-                setActionError(msg);
-                Alert.alert('Unassign Failed', msg);
-              } else {
-                Alert.alert('Success', 'Order unassigned and returned to ready state.');
-              }
-            } catch (e: any) {
-              setBusy(false);
-              const msg = friendlyActionError(e?.message || 'request_failed');
-              setActionError(msg);
-              Alert.alert('Unassign Failed', msg);
-            }
-          },
-        },
-      ]
-    );
+  const handleUnassignDelivery = () => {
+    setShowReturnDeliveryModal(true);
+  };
+
+  const handleConfirmReturnDelivery = async (options: ReturnDeliveryOptions) => {
+    setBusy(true);
+    setActionError(null);
+    setActionSuccess(null);
+    try {
+      const targetUserId = order?.userId || orderProcesses[0]?.userId || '';
+      const res = await useOpsProcessStore.getState().unassignDelivery(orderId, targetUserId, options);
+      setBusy(false);
+      if (!res.ok) {
+        const msg = friendlyActionError(res.error || 'unknown');
+        setActionError(msg);
+        throw new Error(msg);
+      } else {
+        const successMsg = options.resetSlot
+          ? 'Order unassigned and returned to Store Ready Rack (slot reset for reschedule).'
+          : 'Order unassigned and returned to Store Ready Rack.';
+        setActionSuccess(successMsg);
+        setTimeout(() => setActionSuccess(null), 5000);
+      }
+    } catch (e: any) {
+      setBusy(false);
+      const msg = friendlyActionError(e?.message || 'request_failed');
+      setActionError(msg);
+      throw new Error(msg);
+    }
   };
 
   const handleUnassignHelper = async (clearStartedAt = false) => {
@@ -732,7 +744,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   // View sections based on stage
   const renderTagging = () => {
-    if (garments.count == null) {
+    if (garments?.count == null) {
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
           <Text className="text-gray-900 font-bold mb-4 text-lg">Garment Registration</Text>
@@ -759,7 +771,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       );
     }
 
-    const allRegistered = (garments.count || 0) > 0 && effectiveCount >= (garments.count || 0);
+    const allRegistered = (garments?.count || 0) > 0 && effectiveCount >= (garments?.count || 0);
 
     return (
       <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
@@ -767,7 +779,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         
         <View className="flex-row items-center justify-between mb-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
           <View>
-            <Text className="text-gray-900 font-bold text-2xl">{effectiveCount} / {garments.count}</Text>
+            <Text className="text-gray-900 font-bold text-2xl">{effectiveCount} / {garments?.count ?? 0}</Text>
             <Text className="text-gray-500 text-xs uppercase tracking-wider">Garments Scanned</Text>
           </View>
           <View className="flex-row items-center gap-2">
@@ -793,7 +805,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         {scanError && <Text className="text-red-500 text-sm mb-4 font-medium">{scanError}</Text>}
 
         <View className="flex-row flex-wrap gap-2 mb-6">
-          {Array.from({ length: garments.count }).map((_, i) => {
+          {Array.from({ length: garments?.count || 0 }).map((_, i) => {
             const seq = i + 1;
             const isScanned = effectiveRegisteredSeqs.includes(seq);
             return (
@@ -939,7 +951,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         return (
           <PackagingVerification
             orderId={orderId}
-            totalGarments={garments.count || 0}
+            totalGarments={garments?.count || 0}
             onPrint={async (bundles: number) => {
               const res = await useOpsProcessStore.getState().printBundleLabels(orderId, bundles, process?.id);
               if (res.ok) {
@@ -1527,6 +1539,13 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
         )}
 
+        {!!actionSuccess && (
+          <View className="bg-green-50 border border-green-200 rounded-xl p-4 mb-4 flex-row items-center gap-2">
+            <CheckCircle2 color="#16a34a" size={20} />
+            <Text className="text-green-700 font-medium flex-1">{actionSuccess}</Text>
+          </View>
+        )}
+
         {renderActionState()}
 
         {/* Garment Count & Scan Details Card */}
@@ -1712,9 +1731,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         onScan={handleScan}
         actionType="Garment Label"
         continuous={true}
-        progressText={`${effectiveCount} / ${garments.count || 0} Garments Scanned`}
+        progressText={`${effectiveCount} / ${garments?.count || 0} Garments Scanned`}
         currentCount={effectiveCount}
-        totalCount={garments.count || 0}
+        totalCount={garments?.count || 0}
         onManualScanNext={() => handleScan('DUMMY')}
         onBypassAll={handleTagAll}
       />
@@ -1742,6 +1761,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               const isDelivery = order?.status === 'ready' || order?.status === 'out_for_delivery';
               const res = await useOpsProcessStore.getState().assignTaskToRider(orderId, order?.userId || '', riderId, isDelivery);
               if (!res.ok) setActionError(friendlyActionError(res.error));
+            }}
+          />
+          <ReturnDeliveryModal
+            visible={showReturnDeliveryModal}
+            onClose={() => setShowReturnDeliveryModal(false)}
+            orderId={orderId}
+            customerName={order?.customerName || ''}
+            currentSlot={order?.deliveryDate && order?.deliveryTime ? `${order.deliveryDate} • ${order.deliveryTime}` : undefined}
+            onConfirm={handleConfirmReturnDelivery}
+            onSwitchToReassign={() => {
+              setShowReturnDeliveryModal(false);
+              setShowAssignRiderModal(true);
             }}
           />
           {order && (

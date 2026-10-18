@@ -2898,6 +2898,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (order.status !== 'ready' && order.status !== 'out_for_delivery') {
           return { ok: false, error: 'invalid_state' };
         }
+        const { resetSlot, reason, note } = data;
         // Move the delivery out of the rider's queue and return order to 'ready'
         const updateData = {
           status: 'ready',
@@ -2905,6 +2906,11 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           outForDeliveryAt: admin.firestore.FieldValue.delete(),
           deliveryRiderId: admin.firestore.FieldValue.delete(),
           riderId: admin.firestore.FieldValue.delete(),
+          ...(resetSlot ? {
+            deliveryDate: admin.firestore.FieldValue.delete(),
+            deliveryTime: admin.firestore.FieldValue.delete(),
+            deliveryScheduledAt: admin.firestore.FieldValue.delete(),
+          } : {}),
         };
         tx.update(orderRef, updateData);
         tx.set(vendorRef, updateData, { merge: true });
@@ -2912,10 +2918,16 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (delTaskSnap.exists) {
           tx.update(delTaskRef, {
             assignee: null,
-            status: 'pending',
+            status: resetSlot ? 'awaiting_slot' : 'pending',
             assignedAt: admin.firestore.FieldValue.delete(),
             acceptedAt: admin.firestore.FieldValue.delete(),
             pickedUpAt: admin.firestore.FieldValue.delete(),
+            ...(resetSlot ? {
+              deliveryDate: admin.firestore.FieldValue.delete(),
+              deliveryTime: admin.firestore.FieldValue.delete(),
+            } : {}),
+            ...(reason ? { returnReason: reason } : {}),
+            ...(note ? { returnNote: note } : {}),
           });
         }
         return { ok: true, status: 'unassigned' };
