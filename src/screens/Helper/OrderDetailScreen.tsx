@@ -8,6 +8,8 @@ import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import { AssignHelperModal } from '../../components/Supervisor/AssignHelperModal';
 import { ReturnDeliveryModal, ReturnDeliveryOptions } from '../../components/Supervisor/ReturnDeliveryModal';
+import { EmergencyOverrideModal } from '../../components/Supervisor/EmergencyOverrideModal';
+import { ResetMachineCycleModal } from '../../components/Supervisor/ResetMachineCycleModal';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
@@ -301,6 +303,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
   const [showAssignHelperModal, setShowAssignHelperModal] = useState(false);
   const [showReturnDeliveryModal, setShowReturnDeliveryModal] = useState(false);
+  const [showEmergencyOverrideModal, setShowEmergencyOverrideModal] = useState(false);
+  const [showResetMachineModal, setShowResetMachineModal] = useState(false);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
 
@@ -337,6 +341,16 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const effectiveRegisteredSeqs = useMemo(() => Array.from(new Set([...registeredSeqs, ...optimisticSeqs])), [registeredKey, optimisticSeqs]);
   const effectiveCount = effectiveRegisteredSeqs.length;
   const registeredCount = effectiveCount;
+
+  const isCurrentMachineStep = cur === 'getting_washed' || cur === 'getting_dried';
+  const cycleStartedAtMs = curStage?.startedAt
+    ? (typeof (curStage.startedAt as any).toMillis === 'function'
+        ? (curStage.startedAt as any).toMillis()
+        : new Date((curStage.startedAt as any)).getTime())
+    : 0;
+  const machineElapsedSec = cycleStartedAtMs > 0 ? Math.floor((Date.now() - cycleStartedAtMs) / 1000) : 0;
+  const isCycleLocked = isCurrentMachineStep && machineElapsedSec < 1800;
+  const cycleLockMinLeft = Math.max(1, Math.ceil((1800 - machineElapsedSec) / 60));
 
   const packagingPhotos = useMemo(() => {
     const list: string[] = [];
@@ -555,7 +569,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     try {
       const res = await cancelOrder(orderId, order.userId, reason, note);
       if (!res.ok) setActionError(friendlyActionError(res.error));
-      else Alert.alert("Success", "Order cancelled successfully.");
+      else {
+        setActionSuccess("Order cancelled successfully.");
+        setTimeout(() => setActionSuccess(null), 5000);
+      }
     } finally {
       setBusy(false);
     }
@@ -572,7 +589,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         : await reschedulePickup(orderId, order.userId, dateStr, slot);
         
       if (!res.ok) setActionError(friendlyActionError(res.error));
-      else Alert.alert("Success", `${isDelivery ? 'Delivery' : 'Pickup'} rescheduled successfully.`);
+      else {
+        setActionSuccess(`${isDelivery ? 'Delivery' : 'Pickup'} rescheduled successfully.`);
+        setTimeout(() => setActionSuccess(null), 5000);
+      }
     } finally {
       setBusy(false);
     }
@@ -597,7 +617,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     try {
       const res = await verifyDeliveryOTP(orderId, order.userId, otp);
       if (!res.ok) setActionError(friendlyActionError(res.error));
-      else Alert.alert("Success", "Delivery verified successfully.");
+      else {
+        setActionSuccess("Delivery verified successfully.");
+        setTimeout(() => setActionSuccess(null), 5000);
+      }
     } finally {
       setBusy(false);
     }
@@ -661,18 +684,19 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const handleUndoMachineStart = () => {
     if (!process || !order) return;
-    Alert.alert(
-      'Reset Machine Cycle?',
-      'Confirm that this order is NOT physically in a machine. This will reset the stage back to waiting outside the machine.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reset to Queue',
-          style: 'destructive',
-          onPress: () => handleUnassignHelper(true),
-        },
-      ]
-    );
+    setShowResetMachineModal(true);
+  };
+
+  const handleConfirmResetMachine = async () => {
+    await handleUnassignHelper(true);
+    setActionSuccess('Machine cycle reset. Order moved back to queue.');
+    setTimeout(() => setActionSuccess(null), 5000);
+  };
+
+  const handleConfirmEmergencyOverride = async (reason: string) => {
+    await handleComplete();
+    setActionSuccess(`Emergency override executed (${reason}). Cycle completed.`);
+    setTimeout(() => setActionSuccess(null), 5000);
   };
 
   const handleWhatsApp = () => {
@@ -993,10 +1017,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <TouchableOpacity
                     onPress={() => {
                       const stepTitle = cur === 'getting_washed' ? `${resources.washers} Washers` : cur === 'getting_dried' ? `${resources.dryers} Dryers` : `${resources.ironingStations} Irons`;
-                      Alert.alert(
-                        'Machine Capacity Full',
-                        `All ${stepTitle} are currently running in the store. Please wait for an active cycle to finish and unload before starting this order.`
-                      );
+                      setActionError(`All ${stepTitle} are currently running in the store. Please wait for an active cycle to finish and unload before starting this order.`);
                     }}
                     className="h-14 rounded-xl items-center justify-center flex-row bg-gray-100 border border-gray-300"
                   >
@@ -1066,12 +1087,11 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                     <View>
                       <TouchableOpacity
                         onPress={() => {
-                          Alert.alert(
-                            'Cycle in Progress',
-                            `The ${cur === 'getting_washed' ? 'washing' : 'drying'} cycle requires at least 30 minutes. ${cycleLockMinLeft} minute${cycleLockMinLeft > 1 ? 's' : ''} remaining before unload is enabled.`
-                          );
+                          if (activeRole === 'supervisor' || activeRole === 'admin') {
+                            setShowEmergencyOverrideModal(true);
+                          }
                         }}
-                        className="h-14 rounded-xl items-center justify-center flex-row bg-gray-100 border border-gray-200 mb-2"
+                        className="h-14 rounded-xl items-center justify-center flex-row bg-gray-100 border border-gray-200 mb-2 active:opacity-80"
                       >
                         <Lock size={18} color="#94a3b8" className="mr-2" />
                         <Text className="text-gray-500 font-bold text-base">
@@ -1081,17 +1101,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
                       {(activeRole === 'supervisor' || activeRole === 'admin') && (
                         <TouchableOpacity
-                          onPress={() => {
-                            Alert.alert(
-                              'Supervisor Emergency Override',
-                              'Are you sure you want to unload and complete early? Only do this if the machine was stopped early or during power failure.',
-                              [
-                                { text: 'Cancel', style: 'cancel' },
-                                { text: 'Force Complete', style: 'destructive', onPress: handleComplete }
-                              ]
-                            );
-                          }}
-                          className="py-2 items-center"
+                          onPress={() => setShowEmergencyOverrideModal(true)}
+                          className="py-2.5 items-center active:opacity-75"
                         >
                           <Text className="text-red-500 font-semibold text-xs">Supervisor Emergency Override</Text>
                         </TouchableOpacity>
@@ -1774,6 +1785,23 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               setShowReturnDeliveryModal(false);
               setShowAssignRiderModal(true);
             }}
+          />
+          <EmergencyOverrideModal
+            visible={showEmergencyOverrideModal}
+            onClose={() => setShowEmergencyOverrideModal(false)}
+            onConfirm={handleConfirmEmergencyOverride}
+            orderId={orderId}
+            stageName={cur ? stepLabel(cur) : 'Current Stage'}
+            machineName={curStage?.machineName}
+            cycleLockMinLeft={cycleLockMinLeft}
+          />
+          <ResetMachineCycleModal
+            visible={showResetMachineModal}
+            onClose={() => setShowResetMachineModal(false)}
+            onConfirm={handleConfirmResetMachine}
+            orderId={orderId}
+            stageName={cur ? stepLabel(cur) : 'Current Stage'}
+            machineName={curStage?.machineName}
           />
           {order && (
             <AssignHelperModal
