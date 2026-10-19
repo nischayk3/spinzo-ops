@@ -296,18 +296,12 @@ function SupervisorFeed() {
     const startMs = curStage?.startedAt ? (typeof (curStage.startedAt as any).toMillis === 'function' ? (curStage.startedAt as any).toMillis() : new Date((curStage.startedAt as any) || Date.now()).getTime()) : 0;
     const isCycleDone = isMachine && !!curStage?.startedAt && startMs > 0 && (Date.now() - startMs) >= 1800000; // >= 30 mins
 
-    const isAcceptedWaitingStart = isMachine && !!curStage?.acceptedAt && !curStage?.startedAt;
-    const acceptMs = curStage?.acceptedAt ? (typeof (curStage.acceptedAt as any).toMillis === 'function' ? (curStage.acceptedAt as any).toMillis() : new Date((curStage.acceptedAt as any) || Date.now()).getTime()) : 0;
-    const elapsedAcceptMin = acceptMs > 0 ? Math.floor((Date.now() - acceptMs) / 60000) : 0;
-    const isOverdueAccepted = isAcceptedWaitingStart && elapsedAcceptMin >= 2;
-
     const sla = cur && curStage?.startedAt ? STAGE_SLA_MINUTES[cur] : undefined;
     const remaining = sla != null ? slaRemainingMinutes(curStage?.startedAt, sla) : undefined;
     const tone = sla != null && remaining != null ? slaTone(remaining, sla, done) : 'muted';
     const badge = p ? (
       done ? 'Complete' :
       isCycleDone ? 'Ready to Unload' :
-      isOverdueAccepted ? `⚠️ Not Started (${elapsedAcceptMin}m)` :
       (isMachine && !curStage?.startedAt) ? 'Queued' :
       stepLabel(cur || '')
     ) : 'Ready to tag';
@@ -372,15 +366,13 @@ function SupervisorFeed() {
             <View className={`px-2 py-1 rounded-md ${
               done ? 'bg-green-500/15' :
               isCycleDone ? 'bg-emerald-500/20 border border-emerald-500/40' :
-              isOverdueAccepted ? 'bg-rose-500/20 border border-rose-500/50' :
-              (isMachine && !curStage?.startedAt) ? 'bg-amber-500/15 border border-amber-500/30' :
+              (isMachine && !curStage?.startedAt) ? 'bg-slate-100 border border-slate-200' :
               'bg-primary/10'
             }`}>
               <Text className={`text-xs font-bold ${
                 done ? 'text-green-700' :
                 isCycleDone ? 'text-emerald-700' :
-                isOverdueAccepted ? 'text-rose-700' :
-                (isMachine && !curStage?.startedAt) ? 'text-amber-800' :
+                (isMachine && !curStage?.startedAt) ? 'text-slate-600' :
                 'text-primary'
               }`}>{badge}</Text>
             </View>
@@ -454,11 +446,11 @@ function SupervisorFeed() {
                       userId: order?.userId || '',
                     });
                   }}
-                  className="flex-row items-center bg-amber-500/15 px-2.5 py-1 rounded-full self-start mt-2 border border-amber-500/30 active:opacity-70"
+                  className="flex-row items-center bg-slate-100 px-2.5 py-1 rounded-full self-start mt-2 border border-slate-200 active:opacity-70"
                 >
-                  <AlertTriangle size={12} color="#d97706" className="mr-1.5" />
-                  <Text className="text-amber-800 font-bold text-xs">
-                    ⚠️ Unassigned {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
+                  <Clock size={12} color="#64748B" className="mr-1.5" />
+                  <Text className="text-slate-600 font-bold text-xs">
+                    {isMachine ? 'Waiting for Machine' : 'In Queue'} {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
                   </Text>
                 </TouchableOpacity>
               ) : (
@@ -482,7 +474,7 @@ function SupervisorFeed() {
                   </Text>
                 </TouchableOpacity>
               )}
-              {!!curStage?.machineName && (
+              {!!curStage?.machineName && (!isMachine || !!curStage?.startedAt) && (
                 <View className="flex-row items-center bg-teal-500/10 px-2.5 py-1 rounded-full self-start mt-2 ml-2 border border-teal-500/30">
                   <Text className="text-teal-700 font-bold text-xs">
                     {curStage.machineName.includes('Washer') ? '🫧 ' : curStage.machineName.includes('Dryer') ? '💨 ' : '👔 '}
@@ -513,7 +505,7 @@ function SupervisorFeed() {
             {!p && order?.createdAt && <UrgencyCountdown createdAt={order.createdAt} />}
             
             {/* Process SLAs */}
-            {sla != null && remaining != null && (
+            {sla != null && remaining != null && (isMachine ? !!curStage?.startedAt : !!curStage?.assignee) && (
               <View className="flex-row items-center">
                 <Clock size={12} color={tone === 'error' ? '#ef4444' : '#94A3B8'} className="mr-1" />
                 <Text className={`text-xs font-bold ${TONE_CLASS[tone]}`}>

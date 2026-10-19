@@ -278,12 +278,44 @@ const ABDUL_PHONE = '+916900311761';
 const SAMSUL_PHONE = '+916369768237';
 const ABDUR_PHONE = '+917559105832';
 
-const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE];
+// All three store helpers are authorized for ironing operations
+// (Samuel primary on Station 1; Abdur/Abdul on Station 2 on overflow)
+const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE, ABDUL_PHONE];
 
 function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
   if (!phone) return false;
   const p = normalizePhone(phone);
   return allowedList.map(normalizePhone).includes(p);
+}
+
+/**
+ * Compute real-time helper workload and task breakdown from live processes.
+ * - handsOn: active uncompleted tagging, ironing, or packaging task (capacity = 1)
+ * - machineLoad: assigned washing/drying task awaiting 'Start' (capacity = 1)
+ * - total: total active live processes assigned to this helper
+ */
+function getHelperWorkload(liveProcesses) {
+  const workloads = {};
+  (liveProcesses || []).forEach(p => {
+    const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+    if (!cur || p.status === 'done' || p.status === 'cancelled') return;
+    const stage = p.stages && p.stages[cur];
+    if (!stage || !stage.assignee || stage.completedAt) return;
+    const uid = stage.assignee;
+    if (!workloads[uid]) {
+      workloads[uid] = { total: 0, handsOn: 0, machineLoad: 0, isIroning: false };
+    }
+    workloads[uid].total += 1;
+    if (cur === 'tagging' || cur === 'packaging') {
+      workloads[uid].handsOn += 1;
+    } else if (cur === 'getting_ironed') {
+      workloads[uid].handsOn += 1;
+      workloads[uid].isIroning = true;
+    } else if ((cur === 'getting_washed' || cur === 'getting_dried') && !stage.startedAt) {
+      workloads[uid].machineLoad += 1;
+    }
+  });
+  return workloads;
 }
 
 /**
@@ -320,9 +352,7 @@ function isHelperHandsOnBusy(helperUid, liveProcesses) {
 
 function getRunningMachines(step, liveProcesses) {
   if (!liveProcesses || liveProcesses.length === 0) return [];
-  // Machines remain occupied until explicitly marked completed or reset.
-  // In a laundry operation, orders can exceed machine capacity (e.g. 12-13 kg in a 10 kg machine)
-  // requiring 2 sequential lots in the same machine. No artificial timeout should evict the machine.
+  // Machines physically running with startedAt set and not yet completed
   return liveProcesses.filter(p => {
     const cur = p.steps ? p.steps[p.currentIndex] : p.status;
     if (cur !== step) return false;
@@ -332,10 +362,22 @@ function getRunningMachines(step, liveProcesses) {
   });
 }
 
+function getOccupiedMachines(step, liveProcesses) {
+  if (!liveProcesses || liveProcesses.length === 0) return [];
+  // Machine slot is occupied if physically running OR currently assigned to a helper to load
+  return liveProcesses.filter(p => {
+    const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+    if (cur !== step) return false;
+    const stage = p.stages && p.stages[cur];
+    if (stage?.completedAt) return false;
+    return Boolean(stage?.startedAt || stage?.assignee);
+  });
+}
+
 function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
   const prefix = step === 'getting_washed' ? 'Washer' : step === 'getting_dried' ? 'Dryer' : 'Iron Station';
-  const running = getRunningMachines(step, liveProcesses);
-  const usedNames = new Set(running.map(p => p.stages?.[step]?.machineName).filter(Boolean));
+  const occupied = getOccupiedMachines(step, liveProcesses);
+  const usedNames = new Set(occupied.map(p => p.stages?.[step]?.machineName).filter(Boolean));
 
   for (let i = 1; i <= totalCapacity; i++) {
     const candidate = `${prefix} ${i}`;
@@ -343,16 +385,16 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
       return candidate;
     }
   }
-  return `${prefix} 1`;
+  return null;
 }
 
 /**
- * Deterministic helper selection for store operations stages:
- * - Tagging: 1st Abdul, fallback Abdur or Samsul (only if completely free, else queue)
- * - Washing: Free helper or hands-on helper without pending machine load (requires available washer)
- * - Drying: Free helper or hands-on helper without pending machine load (requires available dryer)
- * - Ironing: 1st Samsul (Station 1), 2nd Abdur (Station 2) (only if free, else queue)
- * - Packaging: 1st Abdul, fallback Abdur or Samsul (only if completely free, else queue)
+ * Deterministic, balanced helper selection for store operations stages:
+ * - Tagging: Free floor helper (Abdul or Abdur, least loaded) -> Samsul (if free & no iron) -> else QUEUE!
+ * - Washing: 2 Washers max. Free helper (least loaded) -> Floor helper doing tagging/packaging (60s load) -> Samsul (if not ironing) -> else QUEUE!
+ * - Drying: 2 Dryers max. 1st previousAssignee (unloaded washer) -> Free helper -> Floor helper -> else QUEUE!
+ * - Ironing: 2 Stations max. Station 1 dedicated to Samsul; Station 2 to Abdur/Abdul on pipeline overflow. If busy -> QUEUE!
+ * - Packaging: Free floor helper (Abdul or Abdur, least loaded) -> Samsul (if free & no iron) -> else QUEUE!
  */
 function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}) {
   const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
@@ -361,90 +403,141 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
   }
 
-  // Helpers with NO active hands-on task and NO pending machine loading task
-  const freeHelpers = helpers.filter(h => !isHelperHandsOnBusy(h.uid, liveProcesses));
+  const workloads = getHelperWorkload(liveProcesses);
 
-  const abdul = helpers.find(h => normalize(h.phone) === '6900311761');
-  const samsul = helpers.find(h => normalize(h.phone) === '6369768237');
-  const abdur = helpers.find(h => normalize(h.phone) === '7559105832');
+  // Helper roles
+  const isFloorHelper = (h) => {
+    const p = normalize(h.phone);
+    return p === '6900311761' || p === '7559105832';
+  };
+  const isSamsul = (h) => normalize(h.phone) === '6369768237';
 
-  const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
-  const freeSamsul = freeHelpers.find(h => normalize(h.phone) === '6369768237');
-  const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
+  // Completely free helpers (0 hands-on tasks, 0 machine loading tasks)
+  const freeHelpers = helpers.filter(h => {
+    const wl = workloads[h.uid] || { handsOn: 0, machineLoad: 0 };
+    return wl.handsOn === 0 && wl.machineLoad === 0;
+  });
 
-  // 1. TAGGING (Hands-on: requires human hands. If all helpers busy, MUST queue!)
+  // Sort candidates by total assigned workload ascending (least loaded first)
+  const sortByLeastLoaded = (list) => {
+    return [...list].sort((a, b) => {
+      const wa = workloads[a.uid]?.total || 0;
+      const wb = workloads[b.uid]?.total || 0;
+      return wa - wb;
+    });
+  };
+
+  // 1. TAGGING (Hands-on: strict capacity = 1 order per person)
   if (stage === 'tagging') {
-    if (freeAbdul) return { ok: true, helper: freeAbdul };
-    if (freeAbdur) return { ok: true, helper: freeAbdur };
-    if (freeSamsul) return { ok: true, helper: freeSamsul };
-    if (freeHelpers.length > 0) return { ok: true, helper: freeHelpers[0] };
+    const hasPendingIron = liveProcesses.some(p => {
+      const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+      return cur === 'getting_ironed' && !p.stages?.[cur]?.completedAt;
+    });
+
+    const freeFloor = sortByLeastLoaded(freeHelpers.filter(isFloorHelper));
+    const freeSamsul = (!hasPendingIron) ? freeHelpers.find(isSamsul) : null;
+
+    // In tie-break (both total=0), floor helper takes tagging; if floor helper is busy or has more tasks, Samsul takes it
+    if (freeFloor.length > 0 && (!freeSamsul || (workloads[freeFloor[0].uid]?.total || 0) <= (workloads[freeSamsul.uid]?.total || 0))) {
+      return { ok: true, helper: freeFloor[0] };
+    }
+    if (freeSamsul) {
+      return { ok: true, helper: freeSamsul };
+    }
+    if (freeFloor.length > 0) {
+      return { ok: true, helper: freeFloor[0] };
+    }
+
+    // ALL helpers busy with hands-on tasks -> MUST QUEUE! (Never overload Abdul or anyone)
     return { ok: false, error: 'all_taggers_busy', shouldQueue: true };
   }
 
-  // 2. WASHING (Machine step: takes ~60s to load & start, then machine runs alone)
+  // 2. WASHING (Machine step: 2 Washers max)
   if (stage === 'getting_washed') {
     const maxWashers = resources.washers || 2;
-    const runningWashers = getRunningMachines('getting_washed', liveProcesses);
-    if (runningWashers.length >= maxWashers) {
+    const occupiedWashers = getOccupiedMachines('getting_washed', liveProcesses);
+    if (occupiedWashers.length >= maxWashers) {
       return { ok: false, error: 'washers_at_capacity', shouldQueue: true };
     }
     const machineName = allocateMachineName('getting_washed', liveProcesses, maxWashers);
+    if (!machineName) {
+      return { ok: false, error: 'no_washers_available', shouldQueue: true };
+    }
 
     // Helpers who are NOT currently loading another machine (can only load 1 machine at a time)
-    const canLoadHelpers = helpers.filter(h => !hasActiveMachineLoadingTask(h.uid, liveProcesses));
+    const canLoadHelpers = helpers.filter(h => {
+      const wl = workloads[h.uid] || { machineLoad: 0 };
+      return wl.machineLoad === 0;
+    });
     if (canLoadHelpers.length === 0) {
       return { ok: false, error: 'all_helpers_loading_machines', shouldQueue: true };
     }
 
     // Priority:
-    // 1. Truly free helper (no task at all)
-    // 2. Tagging helper for this order (if not already loading another machine)
-    // 3. Hands-on helper (Abdul, Abdur, Samsul) who can briefly load the drum and return to hands-on work
-    const taggingHelper = options.taggingAssignee ? canLoadHelpers.find(h => h.uid === options.taggingAssignee) : null;
-    const chosenHelper = freeHelpers[0]
-      || (taggingHelper && taggingHelper.onShift ? taggingHelper : null)
-      || freeAbdur || freeAbdul || freeSamsul
-      || canLoadHelpers.find(h => normalize(h.phone) === '7559105832') // abdur
-      || canLoadHelpers.find(h => normalize(h.phone) === '6900311761') // abdul
-      || canLoadHelpers.find(h => normalize(h.phone) === '6369768237') // samsul
-      || canLoadHelpers[0];
+    // 1. Completely free helper (least loaded among Abdul, Abdur, Samsul)
+    const freeAvailable = sortByLeastLoaded(canLoadHelpers.filter(h => {
+      const wl = workloads[h.uid] || { handsOn: 0 };
+      return wl.handsOn === 0;
+    }));
+    if (freeAvailable.length > 0) {
+      return { ok: true, helper: freeAvailable[0], machineName, isMicroTask: false };
+    }
 
-    if (chosenHelper) {
-      return { ok: true, helper: chosenHelper, machineName };
+    // 2. Any hands-on busy helper (Abdul tagging, Abdur packaging, or Samsul ironing) - 60s load keeps 40m machine spinning!
+    // Balanced by least-loaded so all 3 helpers share machine loading and unloading equally.
+    const busyCanLoad = sortByLeastLoaded(canLoadHelpers);
+    if (busyCanLoad.length > 0) {
+      return { ok: true, helper: busyCanLoad[0], machineName, isMicroTask: true };
     }
     return { ok: false, error: 'no_helpers_available', shouldQueue: true };
   }
 
-  // 3. DRYING (Machine step: takes ~60s to transfer & start, then machine runs alone)
+  // 3. DRYING (Machine step: 2 Dryers max)
   if (stage === 'getting_dried') {
     const maxDryers = resources.dryers || 2;
-    const runningDryers = getRunningMachines('getting_dried', liveProcesses);
-    if (runningDryers.length >= maxDryers) {
+    const occupiedDryers = getOccupiedMachines('getting_dried', liveProcesses);
+    if (occupiedDryers.length >= maxDryers) {
       return { ok: false, error: 'dryers_at_capacity', shouldQueue: true };
     }
     const machineName = allocateMachineName('getting_dried', liveProcesses, maxDryers);
+    if (!machineName) {
+      return { ok: false, error: 'no_dryers_available', shouldQueue: true };
+    }
 
-    const canLoadHelpers = helpers.filter(h => !hasActiveMachineLoadingTask(h.uid, liveProcesses));
+    const canLoadHelpers = helpers.filter(h => {
+      const wl = workloads[h.uid] || { machineLoad: 0 };
+      return wl.machineLoad === 0;
+    });
     if (canLoadHelpers.length === 0) {
       return { ok: false, error: 'all_helpers_loading_machines', shouldQueue: true };
     }
 
+    // Priority for Drying:
+    // 1. The helper who just unloaded the washer (they are holding the wet basket right now!)
     const prev = options.previousAssignee ? canLoadHelpers.find(h => h.uid === options.previousAssignee) : null;
-    const chosenHelper = freeHelpers[0]
-      || (prev && prev.onShift ? prev : null)
-      || freeAbdur || freeAbdul || freeSamsul
-      || canLoadHelpers.find(h => normalize(h.phone) === '7559105832') // abdur
-      || canLoadHelpers.find(h => normalize(h.phone) === '6900311761') // abdul
-      || canLoadHelpers.find(h => normalize(h.phone) === '6369768237') // samsul
-      || canLoadHelpers[0];
+    if (prev) {
+      const isHandsOn = (workloads[prev.uid]?.handsOn || 0) > 0;
+      return { ok: true, helper: prev, machineName, isMicroTask: isHandsOn };
+    }
 
-    if (chosenHelper) {
-      return { ok: true, helper: chosenHelper, machineName };
+    // 2. Completely free helper (least loaded among all 3)
+    const freeAvailable = sortByLeastLoaded(canLoadHelpers.filter(h => {
+      const wl = workloads[h.uid] || { handsOn: 0 };
+      return wl.handsOn === 0;
+    }));
+    if (freeAvailable.length > 0) {
+      return { ok: true, helper: freeAvailable[0], machineName, isMicroTask: false };
+    }
+
+    // 3. Any hands-on busy helper (Abdul, Abdur, or Samsul), balanced by least loaded
+    const busyCanLoad = sortByLeastLoaded(canLoadHelpers);
+    if (busyCanLoad.length > 0) {
+      return { ok: true, helper: busyCanLoad[0], machineName, isMicroTask: true };
     }
     return { ok: false, error: 'no_helpers_available', shouldQueue: true };
   }
 
-  // 4. IRONING (Hands-on: requires dedicated ironing specialist. If busy, MUST queue!)
+  // 4. IRONING (Hands-on: 2 Stations max)
   if (stage === 'getting_ironed') {
     const maxIrons = resources.ironingStations || 2;
     const runningIrons = getRunningMachines('getting_ironed', liveProcesses);
@@ -452,22 +545,59 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
       return { ok: false, error: 'iron_stations_at_capacity', shouldQueue: true };
     }
 
-    // Only assign if specialist is completely free from any hands-on task
-    if (freeSamsul) {
-      return { ok: true, helper: samsul, machineName: 'Iron Station 1' };
+    const occupiedStationNames = new Set(
+      getOccupiedMachines('getting_ironed', liveProcesses)
+        .map(p => p.stages?.getting_ironed?.machineName)
+        .filter(Boolean)
+    );
+
+    const samsul = helpers.find(isSamsul);
+    const freeSamsul = freeHelpers.find(isSamsul);
+
+    // Station 1: Preferred for Samsul (The Iron Specialist)
+    if (!occupiedStationNames.has('Iron Station 1') && freeSamsul) {
+      return { ok: true, helper: samsul, machineName: 'Iron Station 1', isMicroTask: false };
     }
-    if (freeAbdur) {
-      return { ok: true, helper: abdur, machineName: 'Iron Station 2' };
+
+    // Station 2 (or Station 1 if Samsul busy): Abdur (Priority 2 iron specialist), then Abdul
+    const availableStation = !occupiedStationNames.has('Iron Station 1') ? 'Iron Station 1' : (!occupiedStationNames.has('Iron Station 2') ? 'Iron Station 2' : null);
+    if (availableStation) {
+      const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
+      const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
+      const candidate = freeAbdur || freeAbdul || sortByLeastLoaded(freeHelpers.filter(isFloorHelper))[0];
+      if (candidate) {
+        return { ok: true, helper: candidate, machineName: availableStation, isMicroTask: false };
+      }
+      if (freeSamsul) {
+        return { ok: true, helper: samsul, machineName: availableStation, isMicroTask: false };
+      }
     }
+
+    // Both stations running or specialists busy -> MUST QUEUE!
     return { ok: false, error: 'iron_specialists_busy', shouldQueue: true };
   }
 
-  // 5. PACKAGING (Hands-on: 1 order per person. If all helpers busy, MUST queue!)
+  // 5. PACKAGING (Hands-on: strict capacity = 1 order per person)
   if (stage === 'packaging') {
-    if (freeAbdul) return { ok: true, helper: freeAbdul };
-    if (freeAbdur) return { ok: true, helper: freeAbdur };
-    if (freeSamsul) return { ok: true, helper: freeSamsul };
-    if (freeHelpers.length > 0) return { ok: true, helper: freeHelpers[0] };
+    const hasPendingIron = liveProcesses.some(p => {
+      const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+      return cur === 'getting_ironed' && !p.stages?.[cur]?.completedAt;
+    });
+
+    const freeFloor = sortByLeastLoaded(freeHelpers.filter(isFloorHelper));
+    const freeSamsul = (!hasPendingIron) ? freeHelpers.find(isSamsul) : null;
+
+    if (freeFloor.length > 0 && (!freeSamsul || (workloads[freeFloor[0].uid]?.total || 0) <= (workloads[freeSamsul.uid]?.total || 0))) {
+      return { ok: true, helper: freeFloor[0] };
+    }
+    if (freeSamsul) {
+      return { ok: true, helper: freeSamsul };
+    }
+    if (freeFloor.length > 0) {
+      return { ok: true, helper: freeFloor[0] };
+    }
+
+    // ALL helpers busy with hands-on tasks -> MUST QUEUE!
     return { ok: false, error: 'all_packagers_busy', shouldQueue: true };
   }
 
@@ -525,6 +655,7 @@ module.exports = {
   isIroningEligible,
   isHelperHandsOnBusy,
   getRunningMachines,
+  getOccupiedMachines,
   allocateMachineName,
   selectHelperForStage,
 };

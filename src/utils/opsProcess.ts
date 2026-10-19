@@ -161,6 +161,22 @@ export function isActivelyLoadingMachine(processes: OpsProcess[], uid: string): 
   });
 }
 
+/**
+ * Helper is actively engaged in a dedicated hands-on task: tagging, ironing, or packaging.
+ * In this state, hands-on capacity is strictly 1 order, and in-app reminder popups
+ * must NEVER interrupt the helper while working on garments.
+ */
+export function isHelperDoingHandsOn(processes: OpsProcess[], uid: string): boolean {
+  return processes.some(p => {
+    if (!myInProgress(p, uid)) return false;
+    const cur = currentStep(p);
+    if (!cur) return false;
+    const s = p.stages[cur];
+    if (s?.completedAt) return false;
+    return cur === 'tagging' || cur === 'getting_ironed' || cur === 'packaging';
+  });
+}
+
 export function currentStepLabel(p: Pick<OpsProcess, 'steps' | 'currentIndex' | 'status'>): string {
   const step = p.steps[p.currentIndex];
   return step ? stepLabel(step) : stepLabel(p.status);

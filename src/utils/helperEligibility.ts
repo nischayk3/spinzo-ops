@@ -1,4 +1,4 @@
-import { OpsProcess, currentStep, isDone, isHelperBusy, isMachineStep, isActivelyLoadingMachine } from './opsProcess';
+import { OpsProcess, currentStep, isDone, isHelperBusy, isMachineStep, isActivelyLoadingMachine, isHelperDoingHandsOn } from './opsProcess';
 import { StoreResources } from '../store/storeResourcesStore';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -269,6 +269,7 @@ export function getTopEligibleTask(
   } : null;
 
   // ── 2. Machine Priority: Washer & Dryer should NEVER remain empty! ──
+  // Surfaced to free helpers via full modal, or to hands-on helpers via non-intrusive floating banner.
   const machineProcess = eligible.find(p => isMachineStep(currentStep(p)));
   if (machineProcess) {
     if (!isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
@@ -279,44 +280,23 @@ export function getTopEligibleTask(
   // ── 3. Busy gate: hands-on work in progress for non-machine tasks ──
   if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
 
-  // ── 4. Specialist-Aware Task Routing ──
-  // If helper is Abdul: Prioritize Tagging and Packaging!
-  if (isAbdul) {
-    if (taggingProcess) return taggingProcess;
-    const packagingProcess = eligible.find(p => currentStep(p) === 'packaging');
-    if (packagingProcess) return packagingProcess;
-    if (eligible[0]) return eligible[0];
+  // ── 4. Equal Three-Helper Task Routing (Abdul, Abdur, Samsool) ──
+  const ironProcess = eligible.find(p => currentStep(p) === 'getting_ironed');
+  // If ironing is available and helper is Samsul, he takes it as primary specialist
+  if (isSamsul && ironProcess) {
+    return ironProcess;
   }
 
-  // If helper is Samsul: Prioritize Ironing!
-  if (isSamsul) {
-    const ironProcess = eligible.find(p => currentStep(p) === 'getting_ironed');
-    if (ironProcess) return ironProcess;
-  }
+  // All three helpers (Abdul, Abdur, Samsool) are equally eligible for Tagging and Packaging!
+  if (taggingProcess) return taggingProcess;
+  const packagingProcess = eligible.find(p => currentStep(p) === 'packaging');
+  if (packagingProcess) return packagingProcess;
 
-  // If helper is Abdur:
-  // With 2 iron machines: if an iron process is available, Abdur takes it
-  // (especially if Samsul is busy or station 2 is open)!
-  if (isAbdur) {
-    const ironProcess = eligible.find(p => currentStep(p) === 'getting_ironed');
-    if (ironProcess) {
-      const isSamsulIroning = live.some(p => {
-        const cur = currentStep(p);
-        return cur === 'getting_ironed' && (p.stages.getting_ironed?.assigneeName?.toLowerCase() === 'samsul' || p.stages.getting_ironed?.assignee === '68dzIqzkHEOQzL5PVzmslKpDbsI3');
-      });
-      if (isSamsulIroning || (resources.ironingStations || 1) >= 2) {
-        return ironProcess;
-      }
-    }
+  // With 2 iron stations, Abdur or Abdul can also operate Station 2 on pipeline overflow:
+  if (ironProcess && (resources.ironingStations || 1) >= 2) {
+    return ironProcess;
   }
 
   // ── 5. Standard Priority Fallback ──
-  const topProcess = eligible[0] || null;
-  if (topProcess && getStepPriority(currentStep(topProcess)) < getStepPriority('tagging')) {
-    return topProcess;
-  }
-
-  if (taggingProcess) return taggingProcess;
-
-  return topProcess;
+  return eligible[0] || null;
 }

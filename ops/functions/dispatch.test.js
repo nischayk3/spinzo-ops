@@ -153,6 +153,16 @@ test('selectHelperForStage (Washing): allocates Washer 1 and Washer 2, queues wh
   const res3 = selectHelperForStage('getting_washed', mockHelpers, live2, { washers: 2, dryers: 2, ironingStations: 2 });
   assert.strictEqual(res3.ok, false);
   assert.strictEqual(res3.shouldQueue, true);
+
+  // Both Washer 1 (running) and Washer 2 (assigned to helper, loading) block a 3rd order
+  const liveAssigned = [
+    { id: 'p1', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { startedAt: 1000, machineName: 'Washer 1' } } },
+    { id: 'p2', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { assignee: 'h_abdur', machineName: 'Washer 2' } } },
+  ];
+  const res4 = selectHelperForStage('getting_washed', mockHelpers, liveAssigned, { washers: 2, dryers: 2, ironingStations: 2 });
+  assert.strictEqual(res4.ok, false);
+  assert.strictEqual(res4.shouldQueue, true);
+  assert.strictEqual(res4.error, 'washers_at_capacity');
 });
 
 test('selectHelperForStage (Ironing): Samsul Station 1, Abdur Station 2 parallel', () => {
@@ -279,5 +289,100 @@ test('getRunningMachines: retains running machine across multi-lot orders until 
   const runningAfter = getRunningMachines('getting_washed', liveRunning);
   assert.strictEqual(runningAfter.length, 0);
 });
+
+test('selectHelperForStage (Tagging Balancing): chooses Abdur over Abdul if Abdul has more active tasks', () => {
+  // Abdul currently has an active machine task, Abdur has 0 tasks
+  const live = [
+    {
+      id: 'p_abdul_task',
+      status: 'getting_washed',
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      stages: { getting_washed: { assignee: 'h_abdul', startedAt: 1000, machineName: 'Washer 1' } }
+    }
+  ];
+  // Both are hands-on free (machine is running), but Abdur has total=0 while Abdul has total=1
+  const res = selectHelperForStage('tagging', mockHelpers, live);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.helper.uid, 'h_abdur');
+});
+
+test('selectHelperForStage (Tagging): Samsul is assigned when floor helpers are busy and no iron orders pending', () => {
+  const live = [
+    { id: 'p1', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p2', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+  ];
+  const res = selectHelperForStage('tagging', mockHelpers, live);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.helper.uid, 'h_samsul');
+});
+
+test('selectHelperForStage (Tagging Queue Guard): queues when all 3 helpers are busy, never overloads Abdul', () => {
+  const live = [
+    { id: 'p1', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p2', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+    { id: 'p3', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000 } } },
+  ];
+  const res = selectHelperForStage('tagging', mockHelpers, live);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.shouldQueue, true);
+  assert.strictEqual(res.error, 'all_taggers_busy');
+});
+
+test('selectHelperForStage (Machine Collision Guard): helper currently loading a washer cannot be assigned dryer until started', () => {
+  // Abdul is assigned Washer 1 but hasn't started it yet (startedAt is null)
+  const live = [
+    {
+      id: 'p1',
+      status: 'getting_washed',
+      steps: ['getting_washed'],
+      currentIndex: 0,
+      stages: { getting_washed: { assignee: 'h_abdul', machineName: 'Washer 1' } }
+    }
+  ];
+  const onlyAbdul = [{ uid: 'h_abdul', name: 'Abdul', phone: '+916900311761', onShift: true }];
+  const res = selectHelperForStage('getting_dried', onlyAbdul, live);
+  assert.strictEqual(res.ok, false);
+  assert.strictEqual(res.shouldQueue, true);
+  assert.strictEqual(res.error, 'all_helpers_loading_machines');
+});
+
+test('selectHelperForStage (Ironing Overflow): assigns Abdul to Station 2 if Abdur is busy and Station 1 is occupied', () => {
+  const live = [
+    { id: 'p_iron1', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000, machineName: 'Iron Station 1' } } },
+    { id: 'p_pack', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+  ];
+  const res = selectHelperForStage('getting_ironed', mockHelpers, live);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.helper.uid, 'h_abdul');
+  assert.strictEqual(res.machineName, 'Iron Station 2');
+});
+
+test('selectHelperForStage (Samsul Machine Flexibility): Samsul can be assigned machine micro-load while ironing', () => {
+  // Abdul and Abdur are hands-on busy with 2 tasks each; Samsul is ironing with 1 task
+  const live = [
+    { id: 'p_iron', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000, machineName: 'Iron Station 1' } } },
+    { id: 'p_tag1', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p_wash1', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p_pack1', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+    { id: 'p_dry1', status: 'getting_dried', steps: ['getting_dried'], currentIndex: 0, stages: { getting_dried: { assignee: 'h_abdur', startedAt: 1000 } } },
+  ];
+  const res = selectHelperForStage('getting_washed', mockHelpers, live);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.helper.uid, 'h_samsul');
+  assert.strictEqual(res.isMicroTask, true);
+});
+
+test('selectHelperForStage (Packaging Parity): Samsul can be assigned packaging when free and no iron pending', () => {
+  // Abdul is busy tagging, Abdur has 1 previous task, Samsul has 0 tasks
+  const live = [
+    { id: 'p_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p_wash', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { assignee: 'h_abdur', startedAt: 1000 } } },
+  ];
+  const res = selectHelperForStage('packaging', mockHelpers, live);
+  assert.strictEqual(res.ok, true);
+  assert.strictEqual(res.helper.uid, 'h_samsul');
+});
+
 
 

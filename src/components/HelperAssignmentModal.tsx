@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
-import { BellRing, CheckCircle2, MapPin, Package, Hash, User, Layers } from 'lucide-react-native';
+import { BellRing, CheckCircle2, MapPin, Package, Hash, User, Layers, X, WashingMachine } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useOpsProcessStore } from '../store/opsProcessStore';
@@ -8,7 +8,7 @@ import { useAuthStore } from '../store/authStore';
 import { getTopEligibleTask } from '../utils/helperEligibility';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
-import { stepLabel, currentStep } from '../utils/opsProcess';
+import { stepLabel, currentStep, isMachineStep, isHelperDoingHandsOn } from '../utils/opsProcess';
 import { serviceSummary, orderTotal } from '../utils/orderFeed';
 import { doc, runTransaction } from '../config/firebase';
 import { db } from '../config/firebase';
@@ -22,31 +22,43 @@ export function HelperAssignmentModal() {
   const authRole = useAuthStore(s => s.activeRole);
   const resources = useStoreResourcesStore(s => s.resources);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [localSnoozeMap, setLocalSnoozeMap] = useState<Record<string, number>>({});
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
-  const activeTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources, staffDoc.onShift === true, staffDoc.phone) : null;
+  const candidateTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources, staffDoc.onShift === true, staffDoc.phone) : null;
+
+  // Check if this task was recently dismissed/snoozed by the user
+  const isSnoozed = candidateTask ? Boolean(localSnoozeMap[candidateTask.orderId || candidateTask.id] && Date.now() < (localSnoozeMap[candidateTask.orderId || candidateTask.id] + 5 * 60 * 1000)) : false;
+  const activeTask = isSnoozed ? null : candidateTask;
+
   const order = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
+  const curStep = activeTask ? (activeTask.steps[activeTask.currentIndex] || activeTask.status) : '';
+  const isHandsOn = staffDoc ? isHelperDoingHandsOn(processes, staffDoc.uid) : false;
+  const isMachineMicroTask = activeTask ? isMachineStep(curStep) : false;
+  const showAsBanner = isHandsOn && isMachineMicroTask;
 
   useEffect(() => {
     if (activeTask && !acceptingId) {
-      dramaticChime();
-      const cur = currentStep(activeTask);
+      // Only play sound if helper is free (never ring loud alarm if helper is busy with hands-on garments)
+      if (!showAsBanner) {
+        dramaticChime(false);
+      }
       const addr = order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '';
       triggerAssignmentNotification({
         orderId: activeTask.orderId,
         orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
-        taskType: cur ? `${stepLabel(cur)} Stage` : 'Process Stage',
+        taskType: curStep ? `${stepLabel(curStep)} Stage` : 'Process Stage',
         address: addr,
         isInstant: Boolean(order?.pickupDetails?.isInstant),
       });
 
-      if (Platform.OS === 'android') {
+      if (Platform.OS === 'android' && !showAsBanner) {
         SpinzoOverlay.showOverlay({
           orderId: activeTask.orderId || activeTask.id,
           taskType: 'helper_step',
           customerName: order?.customerName || '',
           address: addr || 'Store Operations',
-          stepName: cur ? stepLabel(cur) : '',
+          stepName: curStep ? stepLabel(curStep) : '',
         });
       }
     } else {
@@ -62,7 +74,7 @@ export function HelperAssignmentModal() {
         SpinzoOverlay.dismissOverlay();
       }
     };
-  }, [activeTask?.id, acceptingId]);
+  }, [activeTask?.id, acceptingId, showAsBanner]);
 
   // Auto-clear active task if the order was cancelled, completed, or deleted
   useEffect(() => {
@@ -88,6 +100,18 @@ export function HelperAssignmentModal() {
     }
   }, [staffDoc?.activeHelperTask, processes, orders, isOrdersLoading, isProcessesLoading, clearActiveHelperTask]);
 
+  const handleDismiss = () => {
+    stopAlarm();
+    clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
+    if (activeTask) {
+      const key = activeTask.orderId || activeTask.id;
+      setLocalSnoozeMap(prev => ({ ...prev, [key]: Date.now() }));
+    }
+  };
+
   const handleAccept = async () => {
     if (!activeTask || !staffDoc) return;
     setAcceptingId(activeTask.id);
@@ -98,7 +122,6 @@ export function HelperAssignmentModal() {
     }
 
     try {
-      const curStep = activeTask.steps[activeTask.currentIndex] || activeTask.status;
       const orderTargetId = activeTask.orderId || activeTask.id;
       const targetUserId = activeTask.userId || order?.userId;
       const targetVendorId = activeTask.vendorId || order?.vendorId;
@@ -123,15 +146,19 @@ export function HelperAssignmentModal() {
       const res = await acceptStep(orderTargetId, activeTask.id !== orderTargetId ? activeTask.id : undefined, targetUserId, targetVendorId);
       if (!res.ok) throw new Error(res.error || 'Failed to claim task.');
 
-      const staffRef = doc(db, 'ops_staff', staffDoc.uid);
-      await runTransaction(db, async (tx) => {
-        tx.update(staffRef, {
-          activeHelperTask: {
-            orderId: orderTargetId,
-            step: curStep
-          }
+      // If helper is busy with hands-on work (e.g. tagging), DO NOT overwrite activeHelperTask!
+      // This protects their active hands-on progress while allowing 60s machine loading.
+      if (!isHandsOn) {
+        const staffRef = doc(db, 'ops_staff', staffDoc.uid);
+        await runTransaction(db, async (tx) => {
+          tx.update(staffRef, {
+            activeHelperTask: {
+              orderId: orderTargetId,
+              step: curStep
+            }
+          });
         });
-      });
+      }
 
     } catch (err: any) {
       console.warn("Failed to claim task:", err);
@@ -143,21 +170,63 @@ export function HelperAssignmentModal() {
 
   if (!activeTask) return null;
 
-  const curStep = activeTask.steps[activeTask.currentIndex] || activeTask.status;
   const token = activeTask.tokenNumber || order?.tokenNumber;
   const orderShort = (activeTask.orderId || '').slice(-6).toUpperCase();
   const items = order?.items || [];
   const qty = items.reduce((sum, i: any) => sum + (i.quantity || 0), 0);
   const serviceLabel = activeTask.serviceLabel || (order ? serviceSummary(order) : '');
 
+  // 1. NON-BLOCKING TOP BANNER: Rendered when helper is actively doing hands-on work (tagging/ironing/packaging)
+  // Ensures screen is NEVER hijacked or locked while scanning tags or working!
+  if (showAsBanner) {
+    const machineName = activeTask.stages?.[curStep]?.machineName || (curStep === 'getting_washed' ? 'Washer' : 'Dryer');
+    return (
+      <View className="absolute top-12 left-4 right-4 bg-gray-900/95 border-2 border-purple-500/50 rounded-2xl p-3.5 shadow-2xl z-50 flex-row items-center justify-between">
+        <View className="flex-row items-center flex-1 mr-3">
+          <View className="w-10 h-10 rounded-full bg-purple-500/20 items-center justify-center mr-2.5">
+            <WashingMachine size={20} color="#c084fc" />
+          </View>
+          <View className="flex-1">
+            <Text className="text-white font-bold text-sm">
+              {machineName} Ready to Load
+            </Text>
+            <Text className="text-gray-300 text-xs">
+              Order #{orderShort} • 60s micro-task
+            </Text>
+          </View>
+        </View>
+        <View className="flex-row items-center gap-2">
+          <TouchableOpacity onPress={handleDismiss} className="px-2.5 py-1.5 rounded-lg bg-gray-800">
+            <Text className="text-gray-400 text-xs font-semibold">Later</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={handleAccept} disabled={!!acceptingId} className="px-3.5 py-1.5 rounded-lg bg-primary">
+            {acceptingId ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <Text className="text-white text-xs font-bold">Start Now</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
+  // 2. FULL MODAL: Rendered when helper is completely free
   return (
-    <Modal visible={true} animationType="fade" transparent onRequestClose={() => {/* Helpers must accept */}}>
+    <Modal visible={true} animationType="fade" transparent onRequestClose={handleDismiss}>
       <View className="flex-1 bg-black/80 justify-center p-5">
         <View className="bg-bgSurface rounded-3xl border border-bgSurfaceLight shadow-lg max-h-[88%]">
           {/* Header */}
-          <View className="items-center pt-7 px-5 pb-4 border-b border-bgSurfaceLight">
-            <View className="w-16 h-16 rounded-full bg-primary/15 items-center justify-center mb-4">
-              <BellRing size={30} color="#994BFF" />
+          <View className="items-center pt-6 px-5 pb-4 border-b border-bgSurfaceLight relative">
+            <TouchableOpacity 
+              onPress={handleDismiss}
+              className="absolute top-4 right-4 w-9 h-9 rounded-full bg-bgSurfaceLight items-center justify-center z-10"
+            >
+              <X size={18} color="#9ca3af" />
+            </TouchableOpacity>
+
+            <View className="w-16 h-16 rounded-full bg-primary/15 items-center justify-center mb-3">
+              <BellRing size={28} color="#994BFF" />
             </View>
             <Text className="text-2xl font-black text-textPrimary text-center">New Task Available</Text>
             
@@ -243,19 +312,26 @@ export function HelperAssignmentModal() {
             ) : null}
           </View>
 
-          {/* Accept — kept inside the scrollable card so the button never goes out of view */}
-          <View className="px-5 pb-6 pt-2">
+          {/* Action Buttons */}
+          <View className="px-5 pb-6 pt-2 flex-row items-center gap-3">
+            <TouchableOpacity
+              onPress={handleDismiss}
+              className="flex-1 h-14 bg-bgSurfaceLight rounded-2xl items-center justify-center border border-bgSurfaceLight"
+            >
+              <Text className="text-textSecondary text-base font-bold">Later</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity
               onPress={handleAccept}
               disabled={!!acceptingId}
-              className="w-full h-16 bg-primary rounded-2xl items-center justify-center flex-row"
+              className="flex-2 h-14 bg-primary rounded-2xl items-center justify-center flex-row px-5"
             >
               {acceptingId ? (
-                <ActivityIndicator color="#fff" size="large" />
+                <ActivityIndicator color="#fff" size="small" />
               ) : (
                 <>
-                  <CheckCircle2 color="white" size={24} className="mr-3" />
-                  <Text className="text-white text-lg font-black tracking-wide uppercase">Accept Task</Text>
+                  <CheckCircle2 color="white" size={20} className="mr-2" />
+                  <Text className="text-white text-base font-black tracking-wide uppercase">Accept Task</Text>
                 </>
               )}
             </TouchableOpacity>

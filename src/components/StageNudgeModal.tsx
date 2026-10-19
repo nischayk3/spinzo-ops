@@ -33,10 +33,10 @@ export function StageNudgeModal() {
     return () => clearInterval(interval);
   }, [processes, user?.id, activeRole]);
 
-  // Alert triggers: Alarm sound + system heads-up notification + Android over-the-app overlay
+  // Alert triggers: Single non-looping chime + system heads-up notification + Android over-the-app overlay
   useEffect(() => {
     if (activeNudge && !busy) {
-      dramaticChime();
+      dramaticChime(false);
       triggerStageNudgeNotification({
         orderId: activeNudge.orderId,
         orderShortId: activeNudge.orderId.slice(-6).toUpperCase(),

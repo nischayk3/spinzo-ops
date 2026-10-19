@@ -1,4 +1,4 @@
-import { OpsProcess, currentStep } from './opsProcess';
+import { OpsProcess, currentStep, isHelperDoingHandsOn } from './opsProcess';
 
 export interface StageNudgeRule {
   step: 'getting_washed' | 'getting_dried';
@@ -15,11 +15,11 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_washed_accepted: {
     step: 'getting_washed',
     phase: 'accepted',
-    initialDelayMs: 2 * 60 * 1000, // 2 minutes (immediate reminder)
-    repeatIntervalMs: 2 * 60 * 1000, // 2 minutes repeating loop
+    initialDelayMs: 5 * 60 * 1000, // 5 minutes grace window to walk over and start
+    repeatIntervalMs: 5 * 60 * 1000, // 5 minutes repeating loop (no 2m spam)
     title: 'Washing Status Check',
-    message: 'It has been 2+ minutes since this wash was accepted. Did you start the machine or are you still doing pre-stain?',
-    snoozeLabel: 'Still doing pre-stain (+2m)',
+    message: 'It has been 5+ minutes since this wash task was assigned. Please load the machine and tap Start Washing.',
+    snoozeLabel: 'Still loading (+5m)',
     actionLabel: 'Start Washing',
   },
   getting_washed_started: {
@@ -35,18 +35,18 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_dried_accepted: {
     step: 'getting_dried',
     phase: 'accepted',
-    initialDelayMs: 2 * 60 * 1000,  // 2 minutes (immediate reminder)
-    repeatIntervalMs: 2 * 60 * 1000, // 2 minutes repeating loop
+    initialDelayMs: 5 * 60 * 1000,  // 5 minutes grace window
+    repeatIntervalMs: 5 * 60 * 1000, // 5 minutes repeating loop (no 2m spam)
     title: 'Drying Status Check',
-    message: 'It has been 2+ minutes since this drying task was accepted. Did you start the dryer or are you still loading?',
-    snoozeLabel: 'Still loading (+2m)',
+    message: 'It has been 5+ minutes since this drying task was assigned. Please transfer clothes and tap Start Drying.',
+    snoozeLabel: 'Still loading (+5m)',
     actionLabel: 'Start Drying',
   },
   getting_dried_started: {
     step: 'getting_dried',
     phase: 'started',
     initialDelayMs: 46 * 60 * 1000, // 46 minutes
-    repeatIntervalMs: 3 * 60 * 1000,  // 3 minutes snooze
+    repeatIntervalMs: 5 * 60 * 1000,  // 5 minutes snooze
     title: 'Drying Cycle Check',
     message: 'The 46-minute dry cycle has elapsed. Has the dryer finished?',
     snoozeLabel: 'Still running',
@@ -102,8 +102,8 @@ export function getProcessNudge(
 
   const isSupervisor = role === 'supervisor' || role === 'admin';
 
-  // Must be assigned to this user (or allow supervisor/admin to monitor hub unstarted tasks)
-  if (stage.assignee && stage.assignee !== uid && !isSupervisor) return null;
+  // Must be assigned to this specific user (unassigned tasks in queue must NEVER nudge helpers!)
+  if (!stage.assignee || (stage.assignee !== uid && !isSupervisor)) return null;
 
   // If already completed, no nudge
   if (stage.completedAt) return null;
@@ -162,7 +162,7 @@ export function getProcessNudge(
     if (isDue) {
       const helperTag = (isSupervisor && stage.assignee !== uid && stage.assigneeName) ? ` (${stage.assigneeName})` : '';
       const customMsg = (isSupervisor && stage.assignee !== uid && stage.assigneeName)
-        ? `It has been 2+ minutes since ${stage.assigneeName} accepted this task. Did they start the machine?`
+        ? `It has been 5+ minutes since ${stage.assigneeName} was assigned this task. Did they start the machine?`
         : rule.message;
 
       return {
@@ -185,6 +185,7 @@ export function getProcessNudge(
 
 /**
  * Returns the first active nudge among all processes belonging to a user (or all processes for supervisors).
+ * Completely silenced if the helper is actively doing hands-on work (tagging, ironing, packaging).
  */
 export function getActiveStageNudge(
   processes: OpsProcess[],
@@ -192,6 +193,11 @@ export function getActiveStageNudge(
   now: number = Date.now(),
   role?: string
 ): ActiveStageNudge | null {
+  // If helper is actively busy with hands-on work, NEVER disturb them with reminder alarms
+  if (role !== 'supervisor' && role !== 'admin' && isHelperDoingHandsOn(processes, uid)) {
+    return null;
+  }
+
   for (const process of processes) {
     const nudge = getProcessNudge(process, uid, now, role);
     if (nudge) return nudge;

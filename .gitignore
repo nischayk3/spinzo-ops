@@ -43,3 +43,5 @@ yarn-error.*
 ops/functions/node_modules
 .vercel
 .codegraph/
+*.log
+firebase-debug.log*

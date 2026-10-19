@@ -792,6 +792,10 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
       return;
     }
 
+    // Fetch store resources
+    const resSnap = await db.doc('config/storeResources').get();
+    const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
+
     // Find on-shift helpers from ops_staff
     const staffSnap = await db.collection('ops_staff')
       .where('onShift', '==', true)
@@ -803,61 +807,41 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
       onShiftHelpers.push({ uid: d.id, ...d.data() });
     });
 
-    const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
+    // Fetch active live processes to determine real-time hands-on occupancy
+    const liveSnap = await db.collection('ops_process')
+      .where('status', 'in', ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'])
+      .get();
+    const liveProcesses = [];
+    liveSnap.forEach(d => liveProcesses.push({ id: d.id, ...d.data() }));
 
-    // Identify truly hands-on free helpers vs busy helpers
-    const freeHelpers = [];
+    // Self-healing: identify which staff are actually assigned to active uncompleted stages
+    const trulyActiveStaffUids = new Set();
+    liveProcesses.forEach(p => {
+      const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+      if (!cur || p.status === 'done' || p.status === 'cancelled') return;
+      const stg = p.stages && p.stages[cur];
+      if (stg && stg.assignee && !stg.completedAt) {
+        trulyActiveStaffUids.add(stg.assignee);
+      }
+    });
+
+    // Clean up any stale activeHelperTask on ops_staff docs so helpers don't get ghost-locked
     for (const h of onShiftHelpers) {
-      if (!h.activeHelperTask || !h.activeHelperTask.orderId) {
-        freeHelpers.push(h);
-      } else {
+      if (h.activeHelperTask && !trulyActiveStaffUids.has(h.uid)) {
         try {
-          const taskOrderId = h.activeHelperTask.orderId;
-          const procSnap = await db.collection('ops_process')
-            .where('orderId', '==', taskOrderId)
-            .limit(1)
-            .get();
-          if (!procSnap.empty) {
-            const pData = procSnap.docs[0].data();
-            const cur = pData.steps?.[pData.currentIndex];
-            const isCompleted = pData.status === 'done' || pData.status === 'cancelled' || pData.stages?.[h.activeHelperTask.step]?.completedAt;
-            const isRunningMachine = (cur === 'getting_washed' || cur === 'getting_dried') && pData.stages?.[cur]?.startedAt;
-            if (isCompleted || isRunningMachine) {
-              freeHelpers.push(h);
-            }
-          } else {
-            freeHelpers.push(h);
-          }
-        } catch {
-          // If check fails, leave as busy
+          await db.doc(`ops_staff/${h.uid}`).update({
+            activeHelperTask: admin.firestore.FieldValue.delete()
+          });
+          h.activeHelperTask = null;
+        } catch (cleanupErr) {
+          console.warn(`[AutoAssignTagging] Stale task cleanup failed for ${h.uid}:`, cleanupErr);
         }
       }
     }
 
-    // Specialty routing preference:
-    // Primary for tagging: Abdul (+916900311761)
-    // Secondary: Abdur (+917559105832)
-    // Tertiary: Samsul (+916369768237)
-    let selectedHelper = null;
-    const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
-    const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
-    const freeSamsul = freeHelpers.find(h => normalize(h.phone) === '6369768237');
-
-    if (freeAbdul) {
-      selectedHelper = freeAbdul;
-    } else if (freeAbdur) {
-      selectedHelper = freeAbdur;
-    } else if (freeSamsul) {
-      selectedHelper = freeSamsul;
-    } else if (freeHelpers.length > 0) {
-      selectedHelper = freeHelpers[0];
-    } else if (onShiftHelpers.length > 0) {
-      // All on-shift helpers currently have active tasks.
-      // Pre-queue directly to Abdul (or Abdur) so it is ready the moment they finish
-      const abdul = onShiftHelpers.find(h => normalize(h.phone) === '6900311761');
-      const abdur = onShiftHelpers.find(h => normalize(h.phone) === '7559105832');
-      selectedHelper = abdul || abdur || onShiftHelpers[0];
-    }
+    // Select helper using balanced, workload-aware dispatch rules
+    const decision = selectHelperForStage('tagging', onShiftHelpers, liveProcesses, resources);
+    const selectedHelper = (decision && decision.ok && decision.helper) ? decision.helper : null;
 
     const now = TS();
     const tokens = order.tokens || {};
@@ -991,10 +975,33 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     const liveProcesses = [];
     liveSnap.forEach(d => liveProcesses.push({ id: d.id, ...d.data() }));
 
+    // Self-healing: identify which staff are actually assigned to active uncompleted stages
+    const trulyActiveStaffUids = new Set();
+    liveProcesses.forEach(p => {
+      const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+      if (!cur || p.status === 'done' || p.status === 'cancelled') return;
+      const stg = p.stages && p.stages[cur];
+      if (stg && stg.assignee && !stg.completedAt) {
+        trulyActiveStaffUids.add(stg.assignee);
+      }
+    });
+
+    for (const h of onShiftHelpers) {
+      if (h.activeHelperTask && !trulyActiveStaffUids.has(h.uid)) {
+        try {
+          await db.doc(`ops_staff/${h.uid}`).update({
+            activeHelperTask: admin.firestore.FieldValue.delete()
+          });
+          h.activeHelperTask = null;
+        } catch (cleanupErr) {
+          console.warn(`[AutoAssignStage] Stale task cleanup failed for ${h.uid}:`, cleanupErr);
+        }
+      }
+    }
+
     // 4. Select helper using pure dispatch rules
     const effectiveOptions = {
       ...options,
-      taggingAssignee: options.taggingAssignee || pData.stages?.tagging?.assignee,
       previousAssignee: options.previousAssignee || pData.stages?.getting_washed?.assignee,
     };
     const decision = selectHelperForStage(targetStage, onShiftHelpers, liveProcesses, resources, effectiveOptions);
@@ -1021,10 +1028,12 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     const batch = db.batch();
     batch.update(procRef, stageUpdate);
 
-    // Update staff activeHelperTask for hands-on tasks or active loading
-    batch.update(db.doc(`ops_staff/${selectedHelper.uid}`), {
-      activeHelperTask: { orderId: pData.orderId || processId, step: targetStage }
-    });
+    // Update staff activeHelperTask for hands-on tasks or active loading when helper was free
+    if (!decision.isMicroTask) {
+      batch.update(db.doc(`ops_staff/${selectedHelper.uid}`), {
+        activeHelperTask: { orderId: pData.orderId || processId, step: targetStage }
+      });
+    }
 
     await batch.commit();
     console.log(`[AutoAssignStage] Auto-assigned ${processId} (${targetStage}) to ${selectedHelper.name}${machineName ? ` on ${machineName}` : ''}`);
@@ -1053,7 +1062,7 @@ async function autoAssignStage(processId, targetStage, options = {}) {
  */
 async function drainWaitingOpsQueues(stageList = null, options = {}) {
   try {
-    const stagesToCheck = stageList || ['getting_washed', 'getting_dried'];
+    const stagesToCheck = stageList || ['getting_washed', 'getting_dried', 'getting_ironed', 'packaging', 'tagging'];
 
     for (const stg of stagesToCheck) {
       const queuedSnap = await db.collection('ops_process')
@@ -2269,15 +2278,10 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
       });
 
-      if (result && result.ok && result.status && result.status !== 'done') {
-        try {
-          await autoAssignStage(processRef.id, result.status, { taggingAssignee: auth.uid });
-        } catch (autoErr) {
-          console.error(`[submitTagging] autoAssignStage failed:`, autoErr);
-        }
-      }
+      // After tagging is done, orders come to pending first.
+      // If a washer slot is available, drainWaitingOpsQueues will dispatch the oldest queued order.
       try {
-        await drainWaitingOpsQueues();
+        await drainWaitingOpsQueues(['getting_washed', 'tagging', 'packaging']);
       } catch (drainErr) {
         console.error(`[submitTagging] drainWaitingOpsQueues failed:`, drainErr);
       }
@@ -3010,12 +3014,17 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         const { assignee, assigneeName, assignedBy, assignedAt, acceptedAt, ...progress } = s;
 
         if (action === 'unassignStep') {
-          if (!assignee && !s.startedAt) return { ok: true, status: 'unassigned' };
+          if (!assignee && !s.startedAt && !s.machineName) return { ok: true, status: 'unassigned' };
           const isMachine = step === 'getting_washed' || step === 'getting_dried' || step === 'getting_ironed';
           const shouldClearStart = Boolean(data.clearStartedAt) || !isMachine;
-          const baseProgress = shouldClearStart
+          let baseProgress = shouldClearStart
             ? (({ startedAt, detergentAddedAt, softenerAddedAt, ...rest }) => rest)(progress)
             : progress;
+          // If the machine hasn't actually started running, clear machineName so the slot stays open
+          if (!s.startedAt || shouldClearStart) {
+            const { machineName, ...cleanMachine } = baseProgress;
+            baseProgress = cleanMachine;
+          }
           const updateStage = {
             ...baseProgress,
             heldInQueue: true, // Supervisor explicitly moved this to queue: do NOT auto-assign!
