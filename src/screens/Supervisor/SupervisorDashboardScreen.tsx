@@ -4,14 +4,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
   Search, ChevronRight, Truck, Users, AlertTriangle, IndianRupee, Timer, X, Zap,
   Phone, Clock, ArrowRight, ShieldCheck, Flame, RefreshCw, CheckCircle2, PackageOpen, Tag,
-  WashingMachine, Sparkles, Filter, Layers, ArrowUpRight
+  WashingMachine, Sparkles, Filter, Layers, ArrowUpRight, Calendar
 } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useAuthStore } from '../../store/authStore';
 import { useStaffRosterStore, StaffMember } from '../../store/staffRosterStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
-import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo } from '../../utils/orderFeed';
+import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo } from '../../utils/orderFeed';
 import { announceSkippedOrder } from '../../utils/alerts';
 import { stepLabel, currentStep, isDone } from '../../utils/opsProcess';
 import { useResponsive } from '../../utils/useResponsive';
@@ -405,6 +405,28 @@ export function SupervisorDashboardScreen() {
                   <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.2 rounded flex-row items-center">
                     <AlertTriangle size={8} color="#d97706" className="mr-0.5" />
                     <Text className="text-amber-800 font-bold text-[9px]">Unassigned</Text>
+                  </View>
+                );
+              }
+              return null;
+            })()}
+            {(() => {
+              const pInfo = getPickupInfo(o);
+              if (pInfo.isInstant) {
+                return (
+                  <View className="bg-amber-100/90 border border-amber-300 px-1.5 py-0.2 rounded flex-row items-center">
+                    <Zap size={8} color="#b45309" className="mr-0.5" />
+                    <Text className="text-amber-900 font-extrabold text-[9px]">{pInfo.timeLabel || 'Instant'}</Text>
+                  </View>
+                );
+              }
+              if (pInfo.hasInfo) {
+                return (
+                  <View className="bg-blue-50 border border-blue-200 px-1.5 py-0.2 rounded flex-row items-center">
+                    <Calendar size={8} color="#1d4ed8" className="mr-0.5" />
+                    <Text className="text-blue-800 font-bold text-[9px]">
+                      {pInfo.dateLabel ? `${pInfo.dateLabel} ` : ''}{pInfo.timeLabel}
+                    </Text>
                   </View>
                 );
               }

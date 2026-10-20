@@ -19,6 +19,20 @@ const orderFromDoc = (d: any): FeedOrder => {
   const data = d.data() as any;
   // For vendor-mirror docs the path parent is the vendor id, so this fallback is best-effort.
   const userId = data.userId || (d.ref.parent?.parent as any)?.id || '';
+  const rawPickup = data.pickupDetails || data.pickupSlot || data.pickup || (data.slot ? { scheduledTime: data.slot } : undefined);
+  const isInstant = Boolean(
+    rawPickup?.isInstant ||
+    rawPickup?.type === 'instant' ||
+    data.isInstant ||
+    (typeof rawPickup?.scheduledTime === 'string' && rawPickup.scheduledTime.toLowerCase().includes('instant')) ||
+    (typeof rawPickup?.slot === 'string' && rawPickup.slot.toLowerCase().includes('instant')) ||
+    (typeof data.slot === 'string' && data.slot.toLowerCase().includes('instant'))
+  );
+  const pickupDetails = rawPickup ? {
+    ...rawPickup,
+    isInstant: isInstant || Boolean(rawPickup.isInstant),
+  } : (isInstant ? { isInstant: true } : undefined);
+
   return {
     id: d.id,
     userId,
@@ -26,7 +40,13 @@ const orderFromDoc = (d: any): FeedOrder => {
     status: data.status,
     customerName: data.customerName || data.userName,
     customerPhone: data.customerPhone || data.userPhone,
-    pickupDetails: data.pickupDetails || data.pickup,
+    pickupDetails,
+    pickupSlot: rawPickup,
+    pickupDate: data.pickupDate || rawPickup?.scheduledDate || rawPickup?.date,
+    pickupTime: data.pickupTime || rawPickup?.scheduledTime || rawPickup?.time || rawPickup?.slot,
+    slot: data.slot || rawPickup?.scheduledTime || rawPickup?.slot,
+    isInstant,
+    riderName: data.riderName || data.assignedRiderName,
     items: data.items || [],
     totalAmount: data.totalAmount || data.billDetails?.total || data.cartTotal,
     billDetails: data.billDetails,

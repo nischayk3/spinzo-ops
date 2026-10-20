@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Image } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp, Zap, Truck } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { EditOrderModal } from '../../components/EditOrderModal';
@@ -15,7 +15,8 @@ import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel } from '../../utils/orderFeed';
+import { useStaffRosterStore } from '../../store/staffRosterStore';
+import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel, getPickupInfo } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel, GarmentsRecord } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
@@ -377,6 +378,11 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const curStage = cur ? stage(process!, cur) : undefined;
   const staffDoc = useOpsStaffStore(s => s.staffDoc);
   const isSupervisor = activeRole === 'supervisor' || activeRole === 'admin' || staffDoc?.role === 'supervisor' || staffDoc?.role === 'admin';
+
+  const roster = useStaffRosterStore(s => s.roster);
+  const assignedRider = order?.riderId ? roster.riders.find(r => r.uid === order.riderId) : null;
+  const assignedRiderName = assignedRider?.name || order?.riderName;
+  const pickupInfo = useMemo(() => getPickupInfo(order), [order]);
   const isAssignee = isSupervisor || (curStage?.assignee === user?.id);
 
   // If the stage is changed/completed, reset the local state
@@ -1386,6 +1392,77 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       );
     }
 
+    if (order?.status === 'placed' || order?.status === 'confirmed') {
+      return (
+        <View className="bg-white rounded-2xl p-5 mb-4 border border-slate-200 shadow-sm">
+          <View className="flex-row items-center justify-between mb-3">
+            <View className="flex-row items-center gap-2.5">
+              <View className={`w-9 h-9 rounded-full items-center justify-center ${pickupInfo.isInstant ? 'bg-amber-100' : 'bg-blue-100'}`}>
+                {pickupInfo.isInstant ? <Zap size={18} color="#b45309" /> : <Calendar size={18} color="#1d4ed8" />}
+              </View>
+              <View>
+                <Text className="text-slate-900 font-black text-base">
+                  Awaiting Pickup Handover
+                </Text>
+                <Text className="text-slate-500 text-xs font-medium mt-0.5">
+                  {pickupInfo.isInstant
+                    ? 'Instant order • Fast-track rider assignment'
+                    : `Scheduled pickup • ${pickupInfo.dateLabel ? `${pickupInfo.dateLabel}, ` : ''}${pickupInfo.timeLabel || 'Slot booked'}`}
+                </Text>
+              </View>
+            </View>
+            <View className={`px-2.5 py-1 rounded-full border ${pickupInfo.isInstant ? 'bg-amber-50 border-amber-300' : 'bg-blue-50 border-blue-200'}`}>
+              <Text className={`text-[10px] font-black uppercase tracking-wider ${pickupInfo.isInstant ? 'text-amber-800' : 'text-blue-800'}`}>
+                {order.status}
+              </Text>
+            </View>
+          </View>
+
+          <View className="bg-slate-50 rounded-xl p-3 border border-slate-100 mb-3 flex-row items-center justify-between">
+            <View className="flex-row items-center gap-2 flex-1 mr-2">
+              <Truck size={15} color="#475569" />
+              <View className="flex-1">
+                <Text className="text-slate-500 text-[10px] font-bold uppercase tracking-wider">Assigned Rider</Text>
+                <Text className="text-slate-900 font-bold text-xs mt-0.5">
+                  {assignedRiderName ? assignedRiderName : 'No rider assigned yet'}
+                </Text>
+              </View>
+            </View>
+            {assignedRider?.phone ? (
+              <TouchableOpacity
+                onPress={() => Linking.openURL(`tel:${assignedRider.phone}`)}
+                className="bg-white border border-slate-200 px-2.5 py-1 rounded-lg flex-row items-center"
+              >
+                <Phone size={11} color="#2563eb" className="mr-1" />
+                <Text className="text-blue-600 text-xs font-bold">Call Rider</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          {isSupervisor && (
+            <View className="flex-row gap-2">
+              <TouchableOpacity
+                onPress={() => setShowAssignRiderModal(true)}
+                className="flex-1 h-12 bg-blue-600 rounded-xl items-center justify-center flex-row shadow-sm active:opacity-90"
+              >
+                <UserPlus size={16} color="#fff" className="mr-1.5" />
+                <Text className="text-white font-bold text-sm">
+                  {assignedRiderName ? 'Reassign Rider' : 'Assign Rider Now'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => setShowRescheduleModal(true)}
+                className="h-12 px-4 bg-slate-100 border border-slate-200 rounded-xl items-center justify-center flex-row active:opacity-90"
+              >
+                <Calendar size={16} color="#334155" className="mr-1.5" />
+                <Text className="text-slate-700 font-bold text-sm">Reschedule</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      );
+    }
+
     return (
       <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
         <Text className="text-gray-500 font-bold">Waiting for {cur ? stepLabel(cur) : 'next step'}</Text>
@@ -1534,6 +1611,109 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   <MessageCircle size={16} color="#059669" />
                 </TouchableOpacity>
               </View>
+            </View>
+
+            {/* Pickup Slot & Scheduling Banner */}
+            <View className={`mt-3.5 rounded-2xl p-3.5 border shadow-sm ${
+              pickupInfo.isInstant
+                ? 'bg-amber-50/90 border-amber-300'
+                : 'bg-blue-50/80 border-blue-200/90'
+            }`}>
+              <View className="flex-row items-center justify-between mb-1.5">
+                <View className="flex-row items-center gap-1.5">
+                  <View className={`w-5 h-5 rounded-full items-center justify-center ${
+                    pickupInfo.isInstant ? 'bg-amber-500' : 'bg-blue-600'
+                  }`}>
+                    {pickupInfo.isInstant ? (
+                      <Zap size={11} color="#ffffff" />
+                    ) : (
+                      <Calendar size={11} color="#ffffff" />
+                    )}
+                  </View>
+                  <Text className={`font-black text-xs uppercase tracking-wide ${
+                    pickupInfo.isInstant ? 'text-amber-950' : 'text-blue-950'
+                  }`}>
+                    {pickupInfo.badgeLabel}
+                  </Text>
+                </View>
+                <View className="flex-row items-center gap-1">
+                  {order.isUrgent && (
+                    <View className="bg-red-500 px-2 py-0.5 rounded-full mr-1">
+                      <Text className="text-white text-[10px] font-black uppercase">⚡ URGENT</Text>
+                    </View>
+                  )}
+                  <View className={`px-2 py-0.5 rounded-full border ${
+                    pickupInfo.isInstant
+                      ? 'bg-amber-100 border-amber-300'
+                      : 'bg-blue-100 border-blue-300'
+                  }`}>
+                    <Text className={`text-[10px] font-black uppercase tracking-wider ${
+                      pickupInfo.isInstant ? 'text-amber-900' : 'text-blue-900'
+                    }`}>
+                      {pickupInfo.isInstant ? '30–45M WINDOW' : (pickupInfo.dateLabel || 'SCHEDULED')}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              <View className="flex-row items-center gap-2 mt-0.5">
+                <Clock size={15} color={pickupInfo.isInstant ? '#b45309' : '#1d4ed8'} />
+                <Text className={`font-black text-sm flex-1 ${
+                  pickupInfo.isInstant ? 'text-amber-950' : 'text-blue-950'
+                }`}>
+                  {pickupInfo.isInstant
+                    ? (pickupInfo.timeLabel || 'Within 30–45 mins')
+                    : `${pickupInfo.dateLabel ? `${pickupInfo.dateLabel} • ` : ''}${pickupInfo.timeLabel || 'Slot pending'}`}
+                </Text>
+              </View>
+
+              {/* Inbound Dispatch & Rider Status (for pre-pickup orders) */}
+              {['placed', 'confirmed', 'in_transit_to_store'].includes(order.status) && (
+                <View className={`mt-2.5 pt-2 border-t flex-row items-center justify-between flex-wrap gap-2 ${
+                  pickupInfo.isInstant ? 'border-amber-200/80' : 'border-blue-200/70'
+                }`}>
+                  <View className="flex-row items-center gap-1.5 flex-1 mr-2">
+                    <Truck size={13} color={pickupInfo.isInstant ? '#b45309' : '#2563eb'} />
+                    <Text className={`text-xs font-semibold ${
+                      pickupInfo.isInstant ? 'text-amber-900' : 'text-blue-900'
+                    }`}>
+                      {assignedRiderName
+                        ? `Rider: ${assignedRiderName}`
+                        : pickupInfo.isInstant
+                        ? 'Searching on-shift riders for immediate pickup'
+                        : 'Parked • Dispatches 75m before slot window'}
+                    </Text>
+                  </View>
+
+                  {isSupervisor && (
+                    <View className="flex-row items-center gap-1.5">
+                      <TouchableOpacity
+                        onPress={() => setShowAssignRiderModal(true)}
+                        className={`px-2.5 py-1 rounded-lg border flex-row items-center ${
+                          pickupInfo.isInstant
+                            ? 'bg-amber-100/90 border-amber-300'
+                            : 'bg-blue-100/90 border-blue-300'
+                        }`}
+                      >
+                        <UserPlus size={11} color={pickupInfo.isInstant ? '#b45309' : '#1d4ed8'} className="mr-1" />
+                        <Text className={`text-[11px] font-bold ${
+                          pickupInfo.isInstant ? 'text-amber-950' : 'text-blue-950'
+                        }`}>
+                          {assignedRiderName ? 'Reassign' : 'Assign Rider'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        onPress={() => setShowRescheduleModal(true)}
+                        className="px-2.5 py-1 rounded-lg border bg-white border-gray-200 flex-row items-center"
+                      >
+                        <Calendar size={11} color="#475569" className="mr-1" />
+                        <Text className="text-[11px] font-bold text-gray-700">Reschedule</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                </View>
+              )}
             </View>
 
             {/* Target Delivery Banner */}

@@ -26,7 +26,16 @@ export interface FeedOrder {
     scheduledDate?: string;
     scheduledTime?: string;
     isInstant?: boolean;
+    slot?: string;
+    time?: string;
+    date?: string;
   };
+  pickupSlot?: any;
+  pickupDate?: string;
+  pickupTime?: string;
+  slot?: string;
+  isInstant?: boolean;
+  riderName?: string;
   deliveryDetails?: {
     scheduledDate?: string;
     scheduledTime?: string;
@@ -541,6 +550,129 @@ export const slotLabel = (o: FeedOrder | PickupSlot | null | undefined): string 
 
   return `${p.scheduledDate || ''} ${p.scheduledTime || ''}`.trim() || '—';
 };
+
+/**
+ * Formats a date string (YYYY-MM-DD or DD/MM/YYYY) into a friendly label:
+ * - "Today" if it matches current local date
+ * - "Tomorrow" if it matches next calendar day
+ * - "DayName, Day Month" (e.g. "Wed, 21 Oct") for future dates
+ */
+export function formatFriendlyDate(dateInput: any, now: Date = new Date()): string {
+  if (!dateInput) return '';
+  if (typeof dateInput === 'string') {
+    const lower = dateInput.trim().toLowerCase();
+    if (lower === 'today') return 'Today';
+    if (lower === 'tomorrow') return 'Tomorrow';
+  }
+
+  const parsed = parseDeliveryDate(dateInput);
+  if (!parsed) {
+    if (typeof dateInput === 'string' && dateInput.trim()) return dateInput.trim();
+    return '';
+  }
+
+  const todayYear = now.getFullYear();
+  const todayMonth = now.getMonth() + 1;
+  const todayDay = now.getDate();
+
+  if (parsed.year === todayYear && parsed.month === todayMonth && parsed.day === todayDay) {
+    return 'Today';
+  }
+
+  const tomorrow = new Date(todayYear, todayMonth - 1, todayDay + 1);
+  if (
+    parsed.year === tomorrow.getFullYear() &&
+    parsed.month === (tomorrow.getMonth() + 1) &&
+    parsed.day === tomorrow.getDate()
+  ) {
+    return 'Tomorrow';
+  }
+
+  const targetDate = new Date(parsed.year, parsed.month - 1, parsed.day);
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const monthName = monthNames[parsed.month - 1] || '';
+  const dayOfWeek = targetDate.toLocaleDateString('en-US', { weekday: 'short' });
+  return `${dayOfWeek}, ${parsed.day} ${monthName}`;
+}
+
+export interface OrderPickupInfo {
+  isInstant: boolean;
+  type: 'instant' | 'scheduled';
+  scheduledDate?: string;
+  scheduledTime?: string;
+  dateLabel: string;
+  timeLabel: string;
+  fullDisplay: string;
+  badgeLabel: string;
+  hasInfo: boolean;
+}
+
+/**
+ * Analyzes and formats pickup information for an order:
+ * Identifies if it is an Instant order or Scheduled order, and extracts the pickup window/slot and date.
+ */
+export function getPickupInfo(order: FeedOrder | any, now: Date = new Date()): OrderPickupInfo {
+  if (!order) {
+    return {
+      isInstant: false,
+      type: 'scheduled',
+      dateLabel: '',
+      timeLabel: '',
+      fullDisplay: 'Standard Pickup',
+      badgeLabel: 'Pickup',
+      hasInfo: false,
+    };
+  }
+
+  const raw = order.pickupDetails || order.pickupSlot || order.pickup || {};
+  const isInstant = Boolean(
+    raw.isInstant ||
+    raw.type === 'instant' ||
+    order.isInstant ||
+    (typeof raw.scheduledTime === 'string' && raw.scheduledTime.toLowerCase().includes('instant')) ||
+    (typeof raw.slot === 'string' && raw.slot.toLowerCase().includes('instant')) ||
+    (typeof order.slot === 'string' && order.slot.toLowerCase().includes('instant'))
+  );
+
+  const rawDate = raw.scheduledDate || raw.date || order.pickupDate;
+  const rawTime = raw.scheduledTime || raw.time || raw.slot || order.pickupTime || order.slot;
+
+  const dateLabel = formatFriendlyDate(rawDate, now);
+
+  let timeLabel = '';
+  if (isInstant) {
+    timeLabel = formatInstantTime(raw, order.createdAt);
+  } else if (rawTime && String(rawTime).trim()) {
+    timeLabel = String(rawTime).trim();
+  }
+
+  const hasInfo = Boolean(isInstant || rawDate || rawTime);
+
+  let fullDisplay = '';
+  if (isInstant) {
+    fullDisplay = `⚡ Instant • ${timeLabel || 'Within 30–45 mins'}`;
+  } else if (dateLabel && timeLabel) {
+    fullDisplay = `📅 Scheduled • ${dateLabel}, ${timeLabel}`;
+  } else if (dateLabel) {
+    fullDisplay = `📅 Scheduled • ${dateLabel}`;
+  } else if (timeLabel) {
+    fullDisplay = `📅 Scheduled • ${timeLabel}`;
+  } else {
+    fullDisplay = 'Standard Pickup';
+  }
+
+  return {
+    isInstant,
+    type: isInstant ? 'instant' : 'scheduled',
+    scheduledDate: rawDate ? String(rawDate) : undefined,
+    scheduledTime: rawTime ? String(rawTime) : undefined,
+    dateLabel,
+    timeLabel,
+    fullDisplay,
+    badgeLabel: isInstant ? '⚡ Instant Pickup' : '📅 Scheduled Pickup',
+    hasInfo,
+  };
+}
 
 export const isToday = (t: any): boolean => {
   const ms = tsToMs(t);

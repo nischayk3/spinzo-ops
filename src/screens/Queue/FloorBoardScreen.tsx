@@ -3,7 +3,7 @@ import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, L
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag, Zap, Clock, Calendar, CheckCircle2 } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders } from '../../utils/orderFeed';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo } from '../../utils/orderFeed';
 import { stepLabel } from '../../utils/opsProcess';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
@@ -197,6 +197,25 @@ export function FloorBoardScreen() {
                         <Text className="text-amber-900 font-extrabold text-[11px]">T-{c.token}</Text>
                       </View>
                     ))}
+                    {['placed', 'confirmed'].includes(item.status) && (() => {
+                      const pInfo = getPickupInfo(item);
+                      return (
+                        <View className={`px-2 py-0.5 rounded-full border flex-row items-center ${
+                          pInfo.isInstant ? 'bg-amber-100/90 border-amber-300' : 'bg-blue-50 border-blue-200'
+                        }`}>
+                          {pInfo.isInstant ? (
+                            <Zap size={9} color="#b45309" className="mr-0.5" />
+                          ) : (
+                            <Calendar size={9} color="#1d4ed8" className="mr-0.5" />
+                          )}
+                          <Text className={`text-[10px] font-black uppercase ${
+                            pInfo.isInstant ? 'text-amber-900' : 'text-blue-900'
+                          }`}>
+                            {pInfo.isInstant ? 'Instant' : (pInfo.dateLabel || 'Scheduled')}
+                          </Text>
+                        </View>
+                      );
+                    })()}
                   </View>
 
                   <View className="flex-row items-center">
@@ -267,6 +286,33 @@ export function FloorBoardScreen() {
                       </View>
                     </View>
                   )}
+
+                  {['placed', 'confirmed', 'in_transit_to_store'].includes(item.status) && (() => {
+                    const pInfo = getPickupInfo(item);
+                    return (
+                      <View className="items-end">
+                        <View className="flex-row items-center gap-1">
+                          {pInfo.isInstant ? (
+                            <Zap size={9} color="#b45309" />
+                          ) : (
+                            <Calendar size={9} color="#1d4ed8" />
+                          )}
+                          <Text className={`text-[10px] uppercase tracking-wider font-extrabold ${
+                            pInfo.isInstant ? 'text-amber-800' : 'text-blue-800'
+                          }`}>
+                            {pInfo.isInstant ? 'Instant Pickup' : 'Pickup Slot'}
+                          </Text>
+                        </View>
+                        <Text className={`font-bold text-xs mt-0.5 ${
+                          pInfo.isInstant ? 'text-amber-700' : 'text-blue-700'
+                        }`}>
+                          {pInfo.isInstant
+                            ? (pInfo.timeLabel || 'Within 30–45m')
+                            : `${pInfo.dateLabel ? `${pInfo.dateLabel}, ` : ''}${pInfo.timeLabel || 'Scheduled'}`}
+                        </Text>
+                      </View>
+                    );
+                  })()}
 
                   {(item.status === 'ready' || item.status === 'out_for_delivery') && (
                     item.deliveryDate ? (

@@ -18,6 +18,8 @@ import {
   parseDeliveryDate,
   getDeliveryTargetTimestamp,
   sortReadyOrders,
+  formatFriendlyDate,
+  getPickupInfo,
   FeedOrder,
 } from '../orderFeed';
 
@@ -140,6 +142,104 @@ describe('slotLabel', () => {
     expect(slotLabel({ id: '1b', userId: 'u1', status: 'placed', pickupDetails: { isInstant: true, scheduledTime: '10:00 - 10:30' } })).toBe('Instant • 10:00 - 10:30');
     expect(slotLabel({ id: '2', userId: 'u2', status: 'placed', pickupDetails: { scheduledDate: '2026-08-07', scheduledTime: '10:00 - 11:00' } })).toBe('2026-08-07 10:00 - 11:00');
     expect(slotLabel({ id: '3', userId: 'u3', status: 'placed' })).toBe('—');
+  });
+});
+
+describe('formatFriendlyDate', () => {
+  const refDate = new Date(2026, 9, 20); // Oct 20, 2026
+
+  it('formats today as Today', () => {
+    expect(formatFriendlyDate('2026-10-20', refDate)).toBe('Today');
+    expect(formatFriendlyDate('today', refDate)).toBe('Today');
+  });
+
+  it('formats tomorrow as Tomorrow', () => {
+    expect(formatFriendlyDate('2026-10-21', refDate)).toBe('Tomorrow');
+    expect(formatFriendlyDate('tomorrow', refDate)).toBe('Tomorrow');
+  });
+
+  it('formats future dates with day of week and month', () => {
+    expect(formatFriendlyDate('2026-10-22', refDate)).toBe('Thu, 22 Oct');
+    expect(formatFriendlyDate('2026-10-25', refDate)).toBe('Sun, 25 Oct');
+  });
+
+  it('handles null and invalid gracefully', () => {
+    expect(formatFriendlyDate(null, refDate)).toBe('');
+    expect(formatFriendlyDate(undefined, refDate)).toBe('');
+  });
+});
+
+describe('getPickupInfo', () => {
+  const refDate = new Date(2026, 9, 20); // Oct 20, 2026
+
+  it('identifies instant orders and formats instant window', () => {
+    const o = makeOrder({
+      pickupDetails: { isInstant: true },
+    });
+    const info = getPickupInfo(o, refDate);
+    expect(info.isInstant).toBe(true);
+    expect(info.type).toBe('instant');
+    expect(info.badgeLabel).toBe('⚡ Instant Pickup');
+    expect(info.timeLabel).toBe('Within 30–45 mins');
+    expect(info.fullDisplay).toBe('⚡ Instant • Within 30–45 mins');
+    expect(info.hasInfo).toBe(true);
+  });
+
+  it('identifies instant orders with custom scheduledTime slot', () => {
+    const o = makeOrder({
+      pickupDetails: { isInstant: true, scheduledTime: '10:00 - 10:30' },
+    });
+    const info = getPickupInfo(o, refDate);
+    expect(info.isInstant).toBe(true);
+    expect(info.timeLabel).toBe('10:00 - 10:30');
+    expect(info.fullDisplay).toBe('⚡ Instant • 10:00 - 10:30');
+  });
+
+  it('identifies scheduled orders for today', () => {
+    const o = makeOrder({
+      pickupDetails: { scheduledDate: '2026-10-20', scheduledTime: '17:00 - 18:00' },
+    });
+    const info = getPickupInfo(o, refDate);
+    expect(info.isInstant).toBe(false);
+    expect(info.type).toBe('scheduled');
+    expect(info.badgeLabel).toBe('📅 Scheduled Pickup');
+    expect(info.dateLabel).toBe('Today');
+    expect(info.timeLabel).toBe('17:00 - 18:00');
+    expect(info.fullDisplay).toBe('📅 Scheduled • Today, 17:00 - 18:00');
+    expect(info.hasInfo).toBe(true);
+  });
+
+  it('identifies scheduled orders for tomorrow and future dates', () => {
+    const oTomorrow = makeOrder({
+      pickupDetails: { scheduledDate: '2026-10-21', scheduledTime: '10:00 - 11:00' },
+    });
+    const infoTomorrow = getPickupInfo(oTomorrow, refDate);
+    expect(infoTomorrow.dateLabel).toBe('Tomorrow');
+    expect(infoTomorrow.fullDisplay).toBe('📅 Scheduled • Tomorrow, 10:00 - 11:00');
+
+    const oFuture = makeOrder({
+      pickupDetails: { scheduledDate: '2026-10-25', scheduledTime: '14:00 - 15:00' },
+    });
+    const infoFuture = getPickupInfo(oFuture, refDate);
+    expect(infoFuture.dateLabel).toBe('Sun, 25 Oct');
+    expect(infoFuture.fullDisplay).toBe('📅 Scheduled • Sun, 25 Oct, 14:00 - 15:00');
+  });
+
+  it('handles orders with only scheduledTime', () => {
+    const o = makeOrder({
+      pickupDetails: { scheduledTime: '18:00 - 19:00' },
+    });
+    const info = getPickupInfo(o, refDate);
+    expect(info.isInstant).toBe(false);
+    expect(info.timeLabel).toBe('18:00 - 19:00');
+    expect(info.fullDisplay).toBe('📅 Scheduled • 18:00 - 19:00');
+  });
+
+  it('handles null/missing orders gracefully', () => {
+    const info = getPickupInfo(null);
+    expect(info.isInstant).toBe(false);
+    expect(info.hasInfo).toBe(false);
+    expect(info.fullDisplay).toBe('Standard Pickup');
   });
 });
 
