@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { taskTransition, isAwaitingPickup, checkPaymentGate, isIroningEligible, IRONING_PRIORITY_PHONES } = require('./dispatch');
+const { taskTransition, isAwaitingPickup, checkPaymentGate, isIroningEligible, IRONING_PRIORITY_PHONES, isOrderEditable, isMachineNudgeDue } = require('./dispatch');
 
 test('isIroningEligible: allows Samsul and Abdur', () => {
   assert.strictEqual(isIroningEligible('+916369768237'), true); // Samsul
@@ -233,7 +233,7 @@ test('selectHelperForStage (Packaging): Abdul is 1st preference, falls back if b
   assert.strictEqual(res3.error, 'all_packagers_busy');
 });
 
-const { isDeliveryDueToday } = require('./dispatch');
+const { isDeliveryDueToday, parseSlotStartMinutes, isSlotDueForDispatch } = require('./dispatch');
 
 test('isDeliveryDueToday: customer slot validation', () => {
   const today = '2026-10-17';
@@ -253,6 +253,79 @@ test('isDeliveryDueToday: customer slot validation', () => {
   // Overdue from a past day -> due for immediate catch-up
   assert.strictEqual(isDeliveryDueToday('2026-10-16', today), true);
 });
+
+test('parseSlotStartMinutes: time format parsing', () => {
+  assert.strictEqual(parseSlotStartMinutes('20:00 - 21:00'), 1200);
+  assert.strictEqual(parseSlotStartMinutes('08:00 - 09:00'), 480);
+  assert.strictEqual(parseSlotStartMinutes('8:00 PM - 9:00 PM'), 1200);
+  assert.strictEqual(parseSlotStartMinutes('8:00 - 9:00 PM'), 1200);
+  assert.strictEqual(parseSlotStartMinutes('8:00 AM - 9:00 AM'), 480);
+  assert.strictEqual(parseSlotStartMinutes('12:00 PM - 1:00 PM'), 720);
+  assert.strictEqual(parseSlotStartMinutes('12:00 AM'), 0);
+  assert.strictEqual(parseSlotStartMinutes('Instant'), 0);
+  assert.strictEqual(parseSlotStartMinutes('Anytime'), 0);
+  assert.strictEqual(parseSlotStartMinutes(null), null);
+});
+
+test('isSlotDueForDispatch: instant and scheduled window validation', () => {
+  const today = '2026-10-20';
+  const leadTime = 75; // 75 mins buffer
+
+  // 1. Instant pickup: ALWAYS due immediately regardless of time
+  assert.strictEqual(isSlotDueForDispatch({ isInstant: true }), true);
+  assert.strictEqual(isSlotDueForDispatch({ type: 'instant' }), true);
+
+  // 2. Future day (tomorrow): NOT due
+  assert.strictEqual(isSlotDueForDispatch({ scheduledDate: '2026-10-21', scheduledTime: '20:00 - 21:00' }, leadTime, { todayStr: today }), false);
+  assert.strictEqual(isSlotDueForDispatch({ deliveryDate: '2026-10-22', deliveryTime: '10:00 - 11:00' }, leadTime, { todayStr: today }), false);
+
+  // 3. Past day (overdue): ALWAYS due immediately
+  assert.strictEqual(isSlotDueForDispatch({ scheduledDate: '2026-10-19', scheduledTime: '20:00 - 21:00' }, leadTime, { todayStr: today }), true);
+
+  // 4. Today (2026-10-20), slot is 8:00 PM (1200 mins):
+  // At 11:00 AM (660 mins): 540 mins away -> NOT due!
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: today, scheduledTime: '20:00 - 21:00' },
+    leadTime,
+    { todayStr: today, currentMinutesIST: 660 }
+  ), false);
+
+  // At 2:00 PM (840 mins): 360 mins away -> NOT due!
+  assert.strictEqual(isSlotDueForDispatch(
+    { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
+    leadTime,
+    { todayStr: today, currentMinutesIST: 840 }
+  ), false);
+
+  // At 6:40 PM (1120 mins): 80 mins away -> NOT due yet (lead time is 75)
+  assert.strictEqual(isSlotDueForDispatch(
+    { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
+    leadTime,
+    { todayStr: today, currentMinutesIST: 1120 }
+  ), false);
+
+  // At 6:45 PM (1125 mins): exactly 75 mins away -> DUE FOR DISPATCH!
+  assert.strictEqual(isSlotDueForDispatch(
+    { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
+    leadTime,
+    { todayStr: today, currentMinutesIST: 1125 }
+  ), true);
+
+  // At 7:00 PM (1140 mins): 60 mins away -> DUE FOR DISPATCH!
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: today, scheduledTime: '8:00 PM - 9:00 PM' },
+    leadTime,
+    { todayStr: today, currentMinutesIST: 1140 }
+  ), true);
+
+  // At 8:15 PM (1215 mins): currently happening / running -> DUE!
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: today, scheduledTime: '8:00 PM - 9:00 PM' },
+    leadTime,
+    { todayStr: today, currentMinutesIST: 1215 }
+  ), true);
+});
+
 
 test('selectHelperForStage (Washing): assigns free washer even when all helpers are hands-on busy', () => {
   // Abdul is packaging, Samsul is ironing, Abdur is tagging
@@ -383,6 +456,115 @@ test('selectHelperForStage (Packaging Parity): Samsul can be assigned packaging 
   assert.strictEqual(res.ok, true);
   assert.strictEqual(res.helper.uid, 'h_samsul');
 });
+
+test('isOrderEditable: allows pre-processing orders and tagging state', () => {
+  // Pre-processing statuses always allowed
+  assert.strictEqual(isOrderEditable({ status: 'placed' }), true);
+  assert.strictEqual(isOrderEditable({ status: 'confirmed' }), true);
+  assert.strictEqual(isOrderEditable({ status: 'in_transit_to_store' }), true);
+  assert.strictEqual(isOrderEditable({ status: 'pickup_completed' }), true);
+
+  // Processing status with tagging step
+  assert.strictEqual(isOrderEditable({ status: 'processing', processingStep: 'tagging' }), true);
+
+  // Processing status with process doc currently in tagging
+  const liveTagging = [
+    {
+      id: 'p1',
+      status: 'tagging',
+      stages: { tagging: { startedAt: 1000 } }
+    }
+  ];
+  assert.strictEqual(isOrderEditable({ status: 'processing' }, liveTagging), true);
+
+  // Processing status where tagging has not completed yet
+  const liveTaggingIncomplete = [
+    {
+      id: 'p1',
+      status: 'tagging',
+      stages: { tagging: { startedAt: 1000 } }
+    }
+  ];
+  assert.strictEqual(isOrderEditable({ status: 'processing' }, liveTaggingIncomplete), true);
+});
+
+test('isOrderEditable: rejects orders that completed tagging or are post-processing', () => {
+  // Physical washing started (tagging completed) -> cannot edit items
+  const liveWashing = [
+    {
+      id: 'p1',
+      status: 'getting_washed',
+      stages: { tagging: { completedAt: 1000 } }
+    }
+  ];
+  assert.strictEqual(isOrderEditable({ status: 'processing', processingStep: 'getting_washed' }, liveWashing), false);
+
+  // Post-processing statuses
+  assert.strictEqual(isOrderEditable({ status: 'ready' }), false);
+  assert.strictEqual(isOrderEditable({ status: 'out_for_delivery' }), false);
+  assert.strictEqual(isOrderEditable({ status: 'delivered' }), false);
+  assert.strictEqual(isOrderEditable({ status: 'cancelled' }), false);
+
+  // Invalid / null
+  assert.strictEqual(isOrderEditable(null), false);
+  assert.strictEqual(isOrderEditable({}), false);
+});
+
+test('isMachineNudgeDue: unstarted wash/dry tasks after 5m grace window', () => {
+  const now = 1000000000;
+  const fourMinAgo = now - 4 * 60 * 1000;
+  const fiveMinAgo = now - 5 * 60 * 1000;
+  const sixMinAgo = now - 6 * 60 * 1000;
+
+  // Not washing or drying
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo }, 'tagging', now), false);
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo }, 'getting_ironed', now), false);
+
+  // No assignee or not accepted
+  assert.strictEqual(isMachineNudgeDue({ acceptedAt: sixMinAgo }, 'getting_washed', now), false);
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1' }, 'getting_washed', now), false);
+
+  // Accepted only 4 minutes ago (within 5m grace period)
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: fourMinAgo }, 'getting_washed', now), false);
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: fourMinAgo }, 'getting_dried', now), false);
+
+  // Accepted 5+ minutes ago, not started -> DUE
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: fiveMinAgo }, 'getting_washed', now), true);
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo }, 'getting_dried', now), true);
+
+  // Machine already started or completed -> NOT due
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo, startedAt: now - 1000 }, 'getting_washed', now), false);
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo, completedAt: now - 1000 }, 'getting_washed', now), false);
+
+  // Snoozed 2 minutes ago -> NOT due (in snooze window)
+  assert.strictEqual(isMachineNudgeDue({
+    assignee: 'u1',
+    acceptedAt: sixMinAgo,
+    nudge: { accepted: { lastSnoozedAt: now - 2 * 60 * 1000 } }
+  }, 'getting_washed', now), false);
+
+  // Snoozed 5+ minutes ago -> DUE again
+  assert.strictEqual(isMachineNudgeDue({
+    assignee: 'u1',
+    acceptedAt: sixMinAgo,
+    nudge: { accepted: { lastSnoozedAt: now - 5 * 60 * 1000 } }
+  }, 'getting_washed', now), true);
+
+  // Server push sent 2 minutes ago -> NOT due (suppresses spamming every minute)
+  assert.strictEqual(isMachineNudgeDue({
+    assignee: 'u1',
+    acceptedAt: sixMinAgo,
+    nudge: { accepted: { lastSentAt: now - 2 * 60 * 1000 } }
+  }, 'getting_washed', now), false);
+
+  // Server push sent 5+ minutes ago -> DUE
+  assert.strictEqual(isMachineNudgeDue({
+    assignee: 'u1',
+    acceptedAt: sixMinAgo,
+    nudge: { accepted: { lastSentAt: now - 5 * 60 * 1000 } }
+  }, 'getting_washed', now), true);
+});
+
 
 
 

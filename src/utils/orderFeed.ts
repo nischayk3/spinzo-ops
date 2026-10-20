@@ -218,7 +218,20 @@ export function formatItemSummary(it: any): { title: string; details: string; pr
     // Wash & Iron is strictly weight-based. Do NOT display default clothesCount (e.g. 18 pcs).
   } else if (sid.includes('ironing') || sid.includes('iron')) {
     const count = it.ironingCount || it.clothesCount || it.quantity;
-    if (count) parts.push(`${count} pcs`);
+    if (count) {
+      if ((it.mediumCount && it.mediumCount > 0) || (it.heavyCount && it.heavyCount > 0)) {
+        const medium = it.mediumCount || 0;
+        const heavy = it.heavyCount || 0;
+        const light = Math.max(0, count - medium - heavy);
+        const tierParts: string[] = [];
+        if (light > 0) tierParts.push(`${light} Light`);
+        if (medium > 0) tierParts.push(`${medium} Med`);
+        if (heavy > 0) tierParts.push(`${heavy} Heavy`);
+        parts.push(`${count} pcs (${tierParts.join(', ')})`);
+      } else {
+        parts.push(`${count} pcs`);
+      }
+    }
   } else if (sid.includes('blanket')) {
     if (it.singleBlanketCount || it.doubleBlanketCount) {
       const bParts: string[] = [];
@@ -275,6 +288,200 @@ export function sortNewestFirst(orders: FeedOrder[]): FeedOrder[] {
     return isNaN(parsed) ? 0 : parsed;
   };
   return [...orders].sort((a, b) => getMs(b.createdAt) - getMs(a.createdAt));
+}
+
+/**
+ * Parses the start time from a slot string into minutes from midnight (0..1439).
+ * Supports 12-hour (e.g. "5:00 PM - 6:00 PM", "8 - 9 pm", "12:00 PM"),
+ * 24-hour (e.g. "17:00 - 18:00", "20:00 - 21:00"), and keywords ("instant").
+ */
+export function parseSlotStartMinutes(slotText?: string | null): number | null {
+  if (!slotText || typeof slotText !== 'string') return null;
+  const lower = slotText.toLowerCase().trim();
+  if (!lower) return null;
+  if (lower.includes('instant') || lower.includes('immediate')) {
+    return 0;
+  }
+  if (lower === 'anytime') {
+    return 1439;
+  }
+
+  // Extract start portion (before dash, en-dash, or 'to')
+  const parts = lower.split(/[-–—]| to /);
+  const startPart = parts[0].trim();
+
+  // If startPart doesn't contain am/pm, look for meridiem in endPart (e.g. "5:00 - 6:00 pm")
+  let assumedMeridiem: string | null = null;
+  const endPart = parts[1] || '';
+  if (!startPart.includes('am') && !startPart.includes('pm')) {
+    if (endPart.includes('pm')) {
+      const endHourMatch = endPart.match(/(\d{1,2})/);
+      const endHour = endHourMatch ? parseInt(endHourMatch[1], 10) : 0;
+      if (endHour === 12) {
+        assumedMeridiem = 'am';
+      } else {
+        assumedMeridiem = 'pm';
+      }
+    } else if (endPart.includes('am')) {
+      assumedMeridiem = 'am';
+    }
+  }
+
+  const match = startPart.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (!match) return null;
+
+  let hour = parseInt(match[1], 10);
+  const minute = match[2] ? parseInt(match[2], 10) : 0;
+  const meridiem = match[3] || assumedMeridiem;
+
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  return hour * 60 + minute;
+}
+
+/**
+ * Extracts year, month (1-indexed), and day from diverse date formats:
+ * - ISO string: "2026-10-20" or "2026-10-20T..."
+ * - DMY string: "20-10-2026" or "20/10/2026"
+ * - Firestore Timestamp / Date object
+ */
+export function parseDeliveryDate(dateInput: any): { year: number; month: number; day: number } | null {
+  if (!dateInput) return null;
+
+  if (typeof dateInput === 'string') {
+    const trimmed = dateInput.trim();
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) {
+      return {
+        year: parseInt(isoMatch[1], 10),
+        month: parseInt(isoMatch[2], 10),
+        day: parseInt(isoMatch[3], 10),
+      };
+    }
+    const dmyMatch = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+    if (dmyMatch) {
+      return {
+        year: parseInt(dmyMatch[3], 10),
+        month: parseInt(dmyMatch[2], 10),
+        day: parseInt(dmyMatch[1], 10),
+      };
+    }
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime())) {
+      return {
+        year: d.getFullYear(),
+        month: d.getMonth() + 1,
+        day: d.getDate(),
+      };
+    }
+    return null;
+  }
+
+  if (typeof dateInput.toDate === 'function') {
+    const d = dateInput.toDate();
+    return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+  }
+  if (dateInput instanceof Date && !isNaN(dateInput.getTime())) {
+    return { year: dateInput.getFullYear(), month: dateInput.getMonth() + 1, day: dateInput.getDate() };
+  }
+
+  return null;
+}
+
+/**
+ * Calculates a millisecond timestamp representing when a scheduled delivery window begins.
+ * Returns null for orders that have no scheduled date or time slot.
+ */
+export function getDeliveryTargetTimestamp(order: FeedOrder): number | null {
+  const dateStr =
+    order.deliveryDate ||
+    (typeof (order as any).deliverySlot === 'string' &&
+    (order as any).deliverySlot.includes('-') &&
+    (order as any).deliverySlot.length === 10
+      ? (order as any).deliverySlot
+      : undefined) ||
+    (order as any).deliverySlot?.date;
+
+  const timeStr =
+    order.deliveryTime ||
+    (order as any).deliverySlot?.time ||
+    (typeof (order as any).deliverySlot === 'string' &&
+    !(order as any).deliverySlot.includes('-')
+      ? (order as any).deliverySlot
+      : undefined);
+
+  if (!dateStr && !timeStr) return null;
+
+  const parsedDate = parseDeliveryDate(dateStr);
+  const startMinutes = parseSlotStartMinutes(timeStr);
+
+  if (parsedDate) {
+    // If specific time slot is given, use its start minute; otherwise default to end of day (23:59)
+    // so dated orders with specific slots sort before unslotted dated orders.
+    const hour = startMinutes !== null ? Math.floor(startMinutes / 60) : 23;
+    const minute = startMinutes !== null ? startMinutes % 60 : 59;
+    const d = new Date(parsedDate.year, parsedDate.month - 1, parsedDate.day, hour, minute, 0, 0);
+    return d.getTime();
+  }
+
+  if (startMinutes !== null) {
+    const now = new Date();
+    const hour = Math.floor(startMinutes / 60);
+    const minute = startMinutes % 60;
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+    return d.getTime();
+  }
+
+  return null;
+}
+
+/**
+ * Arranges orders in the supervisor-ready section:
+ * 1. Customers who have booked delivery slots are shown FIRST, sorted in ASCENDING order of delivery
+ *    target time (e.g. 11:00 AM before 12:00 PM before 5:00 PM before 8:00 PM; today before tomorrow).
+ * 2. Unscheduled orders (customers awaiting slot booking) are shown AFTER scheduled orders,
+ *    prioritizing urgent orders and newest placements.
+ */
+export function sortReadyOrders(orders: FeedOrder[]): FeedOrder[] {
+  const getMs = (t: any): number => {
+    if (!t) return 0;
+    if (typeof t === 'number') return t;
+    if (typeof t.toMillis === 'function') return t.toMillis();
+    if (typeof t.toDate === 'function') return t.toDate().getTime();
+    if (t.seconds) return t.seconds * 1000;
+    if (typeof t.getTime === 'function') return t.getTime();
+    const parsed = new Date(t).getTime();
+    return isNaN(parsed) ? 0 : parsed;
+  };
+
+  return [...orders].sort((a, b) => {
+    const targetA = getDeliveryTargetTimestamp(a);
+    const targetB = getDeliveryTargetTimestamp(b);
+
+    // 1. Both have scheduled delivery targets:
+    // Ascending order: earliest delivery target first (e.g. 5:00 PM before 8:00 PM)
+    if (targetA !== null && targetB !== null) {
+      if (targetA !== targetB) {
+        return targetA - targetB;
+      }
+      // Tie-break: urgent orders first
+      if (a.isUrgent && !b.isUrgent) return -1;
+      if (!a.isUrgent && b.isUrgent) return 1;
+      // Tie-break: older orders first
+      return getMs(a.createdAt) - getMs(b.createdAt);
+    }
+
+    // 2. Customers who have scheduled delivery ALWAYS come first
+    if (targetA !== null && targetB === null) return -1;
+    if (targetA === null && targetB !== null) return 1;
+
+    // 3. Neither has scheduled delivery (awaiting customer slot booking):
+    // Urgent first, then newest first
+    if (a.isUrgent && !b.isUrgent) return -1;
+    if (!a.isUrgent && b.isUrgent) return 1;
+    return getMs(b.createdAt) - getMs(a.createdAt);
+  });
 }
 
 export const timeAgo = (v: any): string => {

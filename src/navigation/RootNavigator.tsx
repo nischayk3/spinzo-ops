@@ -198,7 +198,12 @@ export function RootNavigator() {
         if (pending && pending.orderId) {
           SpinzoOverlay.clearPendingAcceptedOrder();
           console.log('[SpinzoOverlay] Processing pending accept from native overlay:', pending);
-          await acceptTask(pending.orderId, pending.isDelivery);
+          if (pending.taskType === 'stage_nudge') {
+            // Stage nudge was tapped to bring app forward; StageNudgeModal will handle the response
+            console.log('[SpinzoOverlay] Stage nudge opened app for #', pending.orderId);
+          } else {
+            await acceptTask(pending.orderId, pending.isDelivery);
+          }
         }
       } catch (err) {
         console.warn('[SpinzoOverlay] Failed to accept pending order:', err);

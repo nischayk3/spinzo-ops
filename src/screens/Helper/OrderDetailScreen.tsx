@@ -1,8 +1,9 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Image } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
+import { EditOrderModal } from '../../components/EditOrderModal';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
 import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
@@ -245,6 +246,93 @@ function WasherCycleMonitor({
   );
 }
 
+function DryerCycleMonitor({
+  startedAt,
+}: {
+  startedAt: any;
+}) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const startMs = typeof startedAt?.toMillis === 'function'
+    ? startedAt.toMillis()
+    : startedAt?.seconds
+    ? startedAt.seconds * 1000
+    : new Date(startedAt).getTime();
+
+  const elapsedMs = Math.max(0, now - startMs);
+  const elapsedSec = Math.floor(elapsedMs / 1000);
+  const totalSec = 30 * 60; // 1800 seconds (standard 30-min drying cycle)
+  const progressPercent = Math.min(100, Math.round((elapsedSec / totalSec) * 100));
+
+  const formatMinSec = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const isCycleDone = elapsedSec >= 1800;
+  const lockMinutesLeft = Math.max(1, Math.ceil((1800 - elapsedSec) / 60));
+
+  return (
+    <View className={`mb-4 rounded-2xl p-4 border shadow-sm ${isCycleDone ? 'bg-emerald-50/70 border-emerald-200' : 'bg-purple-50/60 border-purple-100'}`}>
+      <View className="flex-row items-center justify-between mb-3">
+        <View className="flex-row items-center gap-2">
+          <Wind size={18} color={isCycleDone ? '#059669' : '#994bff'} />
+          <Text className="text-gray-900 font-bold text-sm">30-Min Drying Cycle</Text>
+        </View>
+        <Text className={`font-black text-base ${isCycleDone ? 'text-emerald-700' : 'text-[#994bff]'}`}>
+          {formatMinSec(elapsedSec)} / 30:00
+        </Text>
+      </View>
+
+      {/* Progress Bar */}
+      <View className="h-2.5 bg-gray-200 rounded-full overflow-hidden mb-3">
+        <View
+          className={`h-full rounded-full ${isCycleDone ? 'bg-emerald-500' : 'bg-[#994bff]'}`}
+          style={{ width: `${progressPercent}%` }}
+        />
+      </View>
+
+      {/* Status banner */}
+      {isCycleDone ? (
+        <View className="bg-emerald-100/80 border border-emerald-300 p-3 rounded-xl flex-row items-center gap-2.5">
+          <CheckCircle2 size={18} color="#059669" />
+          <View className="flex-1">
+            <Text className="text-emerald-900 font-extrabold text-xs uppercase tracking-wider">
+              Drying Cycle Complete
+            </Text>
+            <Text className="text-emerald-800 text-xs mt-0.5">
+              Cool-down finished. Clothes are dry and ready to unload.
+            </Text>
+          </View>
+        </View>
+      ) : (
+        <View className="bg-amber-50/90 border border-amber-200 p-3 rounded-xl flex-row items-center gap-2.5">
+          <Lock size={16} color="#d97706" />
+          <View className="flex-1">
+            <View className="flex-row items-center justify-between">
+              <Text className="text-amber-900 font-bold text-xs uppercase tracking-wider">
+                Machine Running · Tumble & Heat
+              </Text>
+              <Text className="text-amber-800 font-black text-xs">
+                {lockMinutesLeft}m lock left
+              </Text>
+            </View>
+            <Text className="text-amber-700 text-[11px] mt-0.5">
+              Allow cycle to finish for optimal drying and fabric care.
+            </Text>
+          </View>
+        </View>
+      )}
+    </View>
+  );
+}
+
 export function OrderDetailScreen({ route, navigation }: Props) {
   const { orderId, processId: initialProcessId } = route.params;
   const user = useAuthStore(s => s.user);
@@ -305,8 +393,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [showReturnDeliveryModal, setShowReturnDeliveryModal] = useState(false);
   const [showEmergencyOverrideModal, setShowEmergencyOverrideModal] = useState(false);
   const [showResetMachineModal, setShowResetMachineModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
+  const isTaggingState = useMemo(() => {
+    if (!order) return false;
+    const preProcessing = ['placed', 'confirmed', 'in_transit_to_store', 'pickup_completed'];
+    if (preProcessing.includes(order.status)) return true;
+    if (order.status === 'processing') {
+      return cur === 'tagging' || !process?.stages?.tagging?.completedAt;
+    }
+    return false;
+  }, [order?.status, cur, process?.stages?.tagging?.completedAt]);
 
   const [previewImage, setPreviewImage] = useState<string | null>(null);
 
@@ -341,6 +439,13 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const effectiveRegisteredSeqs = useMemo(() => Array.from(new Set([...registeredSeqs, ...optimisticSeqs])), [registeredKey, optimisticSeqs]);
   const effectiveCount = effectiveRegisteredSeqs.length;
   const registeredCount = effectiveCount;
+
+  const customerInitials = useMemo(() => {
+    if (!order?.customerName) return 'C';
+    const parts = order.customerName.trim().split(/\s+/);
+    if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  }, [order?.customerName]);
 
   const isCurrentMachineStep = cur === 'getting_washed' || cur === 'getting_dried';
   const cycleStartedAtMs = curStage?.startedAt
@@ -771,7 +876,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     if (garments?.count == null) {
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
-          <Text className="text-gray-900 font-bold mb-4 text-lg">Garment Registration</Text>
+          <View className="flex-row items-center justify-between mb-4">
+            <Text className="text-gray-900 font-bold text-lg">Garment Registration</Text>
+            {isTaggingState && (
+              <TouchableOpacity
+                onPress={() => setShowEditModal(true)}
+                className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
+              >
+                <Pencil size={12} color="#2563eb" />
+                <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
+              </TouchableOpacity>
+            )}
+          </View>
           <Text className="text-gray-500 mb-2">How many garments are in this order?</Text>
           <View className="flex-row gap-3">
             <TextInput
@@ -799,7 +915,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
     return (
       <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
-        <Text className="text-gray-900 font-bold mb-4 text-lg">Garment Scanning</Text>
+        <View className="flex-row items-center justify-between mb-4">
+          <Text className="text-gray-900 font-bold text-lg">Garment Scanning</Text>
+          {isTaggingState && (
+            <TouchableOpacity
+              onPress={() => setShowEditModal(true)}
+              className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
+            >
+              <Pencil size={12} color="#2563eb" />
+              <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
+            </TouchableOpacity>
+          )}
+        </View>
         
         <View className="flex-row items-center justify-between mb-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
           <View>
@@ -861,7 +988,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       const isSupervisor = activeRole === 'supervisor' || activeRole === 'admin';
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
-          <Text className="text-gray-900 font-bold mb-3 text-base">Ready for Tagging</Text>
+          <View className="flex-row items-center justify-between mb-3">
+            <Text className="text-gray-900 font-bold text-base">Ready for Tagging</Text>
+            {isTaggingState && (
+              <TouchableOpacity
+                onPress={() => setShowEditModal(true)}
+                className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
+              >
+                <Pencil size={12} color="#2563eb" />
+                <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
+              </TouchableOpacity>
+            )}
+          </View>
           <View className="flex-col gap-3">
             <TouchableOpacity
               onPress={handleClaim}
@@ -995,7 +1133,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       }
 
       const isMachineStep = cur === 'getting_washed' || cur === 'getting_dried';
-      const MachineIcon = cur === 'getting_washed' ? Droplets : Sun;
+      const MachineIcon = cur === 'getting_washed' ? Droplets : Wind;
 
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
@@ -1065,6 +1203,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                     }
                   }}
                 />
+              ) : cur === 'getting_dried' ? (
+                <DryerCycleMonitor
+                  startedAt={curStage?.startedAt}
+                />
               ) : isMachineStep ? (
                 <View className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-4 items-center flex-row justify-center">
                   <ActivityIndicator color="#f97316" size="small" className="mr-2" />
@@ -1080,17 +1222,31 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   : 0;
                 const machineElapsedSec = cycleStartedAtMs > 0 ? Math.floor((Date.now() - cycleStartedAtMs) / 1000) : 0;
                 const elapsedMin = Math.floor(machineElapsedSec / 60);
+                const isCycleLocked = isMachineStep && machineElapsedSec < 1800;
 
                 return (
                   <View>
                     <TouchableOpacity
-                      onPress={handleComplete}
+                      onPress={() => {
+                        if (isCycleLocked) {
+                          Alert.alert(
+                            'Cycle in Progress',
+                            `The machine has only run for ${elapsedMin} minutes. The standard cycle is 30 minutes. Are you sure clothes are ready to unload?`,
+                            [
+                              { text: 'Wait for Cycle', style: 'cancel' },
+                              { text: 'Yes, Unload Now', style: 'destructive', onPress: handleComplete }
+                            ]
+                          );
+                        } else {
+                          handleComplete();
+                        }
+                      }}
                       disabled={busy}
-                      className={`h-14 rounded-xl items-center justify-center flex-row mb-2 ${busy ? 'bg-gray-200' : 'bg-green-500'} active:opacity-90`}
+                      className={`h-14 rounded-xl items-center justify-center flex-row mb-2 ${busy ? 'bg-gray-200' : isCycleLocked ? 'bg-amber-600' : 'bg-green-500'} active:opacity-90 shadow-sm`}
                     >
                       {busy ? <ActivityIndicator color="#fff" /> : (
                         <View className="flex-row items-center gap-2">
-                          {isMachineStep && <Check size={20} color="#fff" />}
+                          {isMachineStep && (isCycleLocked ? <Lock size={20} color="#fff" /> : <Check size={20} color="#fff" />)}
                           <Text className="text-white font-bold text-lg">
                             {isMachineStep ? `Unload & Complete (${elapsedMin}m run)` : `Complete ${stepLabel(cur)}`}
                           </Text>
@@ -1340,191 +1496,180 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
         )}
 
-        {/* Enhanced Customer Info for Supervisor — all relevant order details */}
-        <View className="mb-6 bg-white p-5 rounded-xl shadow-sm border border-gray-100 z-0">
-          <View className="items-center mb-4">
-            <Text className="text-gray-900 text-lg font-bold">{order?.customerName || 'Unknown customer'}</Text>
-            <Text className="text-gray-500 text-sm mt-1">{order ? serviceSummary(order) : '—'}</Text>
-          </View>
-
-          {(activeRole === 'supervisor' || activeRole === 'admin') && order && (
-            <View className="border-t border-gray-100 pt-4 mt-2">
-              {/* Order identity */}
-              <View className="flex-row items-center mb-3 justify-between">
+        {/* Enhanced Customer & Order Hero Card */}
+        {order && (
+          <View className="mb-5 bg-white p-5 rounded-3xl shadow-sm border border-gray-100 z-0">
+            {/* Top Row: Customer Avatar, Name, Service & Contact Actions */}
+            <View className="flex-row items-center justify-between pb-4 border-b border-gray-100">
+              <View className="flex-row items-center flex-1 mr-3">
+                <View className="w-12 h-12 rounded-2xl bg-[#994bff]/10 border border-[#994bff]/20 items-center justify-center mr-3">
+                  <Text className="text-[#994bff] font-extrabold text-base">{customerInitials}</Text>
+                </View>
                 <View className="flex-1">
-                  <View className="flex-row items-center gap-2">
-                    <Text className="text-gray-900 font-bold text-lg">#{orderId.slice(-6).toUpperCase()}</Text>
-                    {order.isUrgent && (
-                      <View className="bg-red-500 px-2 py-0.5 rounded-full">
-                        <Text className="text-white text-[10px] font-black tracking-wide uppercase">⚡ URGENT</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text className="text-gray-500 text-xs">Order ID: {orderId}</Text>
-                </View>
-                <View className="items-end">
-                  {(() => {
-                    const tokenChips = parseOrderTokens(order.tokens, order.tokenNumber, order.items);
-                    if (tokenChips.length === 0) return null;
-                    return (
-                      <View className="items-end gap-1 mb-1">
-                        {tokenChips.map((c, i) => (
-                          <View key={i} className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
-                            <Text className="text-amber-800 font-bold text-xs">
-                              Token #{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
-                            </Text>
-                          </View>
-                        ))}
-                      </View>
-                    );
-                  })()}
-                  <View className="bg-gray-100 px-2 py-0.5 rounded-full mt-1">
-                    <Text className="text-xs font-bold text-gray-600 uppercase">{order.status.replace(/_/g, ' ')}</Text>
-                  </View>
+                  <Text className="text-gray-900 font-extrabold text-lg leading-tight" numberOfLines={1}>
+                    {order.customerName || 'Unknown Customer'}
+                  </Text>
+                  <Text className="text-gray-500 font-medium text-xs mt-0.5">
+                    {serviceSummary(order)}
+                  </Text>
                 </View>
               </View>
 
-              {order.pickupNote ? (
-                <View className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-3">
-                  <Text className="text-amber-800 text-xs font-bold uppercase mb-0.5">Rider Pickup Note</Text>
-                  <Text className="text-amber-900 text-sm font-medium">{order.pickupNote}</Text>
-                </View>
-              ) : null}
-
-              {/* Dates / timelines */}
-              <View className="bg-gray-50 rounded-xl p-3 mb-3">
-                <View className="flex-row justify-between mb-1">
-                  <Text className="text-gray-500 text-xs">Placed</Text>
-                  <Text className="text-gray-700 text-xs font-medium">{fmtDT(order.createdAt)}</Text>
-                </View>
-                {order.pickupDetails ? (
-                  <View className="flex-row justify-between mb-1">
-                    <Text className="text-gray-500 text-xs">Pickup slot</Text>
-                    <Text className={`text-xs font-bold ${order.pickupDetails.isInstant ? 'text-amber-600' : 'text-gray-700'}`}>
-                      {slotLabel(order)}
-                    </Text>
-                  </View>
+              {/* Direct Call & WhatsApp Buttons */}
+              <View className="flex-row items-center gap-2 shrink-0">
+                {order.customerPhone ? (
+                  <TouchableOpacity
+                    onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}
+                    className="w-10 h-10 rounded-full bg-blue-50 border border-blue-200 items-center justify-center active:scale-95"
+                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  >
+                    <Phone size={16} color="#2563eb" />
+                  </TouchableOpacity>
                 ) : null}
-                {order.deliveryDate ? (
-                  <View className="flex-row justify-between mb-1">
-                    <Text className="text-gray-500 text-xs">Delivery</Text>
-                    <Text className="text-gray-700 text-xs font-medium">{order.deliveryDate} {order.deliveryTime || ''}</Text>
-                  </View>
-                ) : null}
-                {order && (order as any).pickedUpAt ? (
-                  <View className="flex-row justify-between">
-                    <Text className="text-gray-500 text-xs">Picked up</Text>
-                    <Text className="text-gray-700 text-xs font-medium">{fmtDT((order as any).pickedUpAt)}</Text>
-                  </View>
-                ) : null}
-              </View>
-
-              {/* Customer contact */}
-              <View className="flex-row items-center mb-3">
-                <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
-                  <Phone size={14} color="#994bff" />
-                </View>
                 <TouchableOpacity
-                  onPress={(e) => {
-                    e?.stopPropagation?.();
-                    Linking.openURL(`tel:${order.customerPhone}`);
-                  }}
-                  className="self-start py-0.5"
-                  style={{ alignSelf: 'flex-start' }}
+                  onPress={handleWhatsApp}
+                  className="w-10 h-10 rounded-full bg-emerald-50 border border-emerald-200 items-center justify-center active:scale-95"
                   hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                 >
-                  <Text className="text-gray-900 font-medium">{order.customerPhone}</Text>
-                  <Text className="text-gray-500 text-xs">Tap to call</Text>
+                  <MessageCircle size={16} color="#059669" />
                 </TouchableOpacity>
               </View>
+            </View>
 
-              {/* OTPs */}
-              <View className="flex-row flex-wrap gap-2 mb-3">
-                {order.pickupOTP ? (
-                  <View className="bg-blue-50 px-2 py-1 rounded border border-blue-200">
-                    <Text className="text-blue-700 text-xs font-bold">Pickup OTP: {order.pickupOTP}</Text>
+            {/* Target Delivery Banner */}
+            {(order.deliveryDate || order.deliverySlot || order.deliveryTime) ? (
+              <View className="mt-3.5 bg-blue-50/80 border border-blue-200/80 rounded-2xl px-3.5 py-2.5 flex-row items-center justify-between">
+                <View className="flex-row items-center gap-2 flex-1 mr-2">
+                  <Clock size={15} color="#2563eb" />
+                  <View className="flex-1">
+                    <Text className="text-blue-900 font-bold text-xs">
+                      Target Delivery: {order.deliveryDate || ''} {order.deliverySlot || order.deliveryTime || ''}
+                    </Text>
                   </View>
-                ) : null}
-                {order.storeOTP ? (
-                  <View className="bg-purple-50 px-2 py-1 rounded border border-purple-200">
-                    <Text className="text-purple-700 text-xs font-bold">Store OTP: {order.storeOTP}</Text>
-                  </View>
-                ) : null}
-                {order.deliveryOTP ? (
-                  <View className="bg-green-50 px-2 py-1 rounded border border-green-200">
-                    <Text className="text-green-700 text-xs font-bold">Delivery OTP: {order.deliveryOTP}</Text>
-                  </View>
-                ) : null}
-              </View>
-
-              {/* Address + directions */}
-              <View className="flex-row items-center mb-3">
-                <View className="w-8 h-8 rounded-full bg-purple-50 items-center justify-center mr-3">
-                  <MapPin size={14} color="#994bff" />
                 </View>
+                {order.isUrgent && (
+                  <View className="bg-red-500 px-2 py-0.5 rounded-full">
+                    <Text className="text-white text-[10px] font-black tracking-wide uppercase">⚡ URGENT</Text>
+                  </View>
+                )}
+              </View>
+            ) : null}
+
+            {/* Rider Pickup Note */}
+            {Boolean(order.pickupNote || (process as any)?.pickupNote) && (
+              <View className="mt-2.5 bg-amber-50/90 border border-amber-300 rounded-2xl p-3.5 flex-row items-start gap-2.5">
+                <AlertCircle size={16} color="#d97706" className="mt-0.5" />
                 <View className="flex-1">
-                  <Text className="text-gray-900 font-medium leading-tight">
-                    {typeof order.address === 'string' ? order.address : (order.address?.formattedAddress || order.address?.line1 || 'No address')}
+                  <Text className="text-amber-900 font-extrabold text-xs uppercase tracking-wider">
+                    Rider Pickup Note
                   </Text>
-                  <TouchableOpacity
-                    onPress={() => {
-                      const dest = order.latitude ? `${order.latitude},${order.longitude}` : (order.address?.formattedAddress || order.address?.line1 || order.address);
-                      Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}`).catch(() => {});
-                    }}
-                    className="flex-row items-center mt-1"
-                  >
-                    <Navigation size={12} color="#3b82f6" />
-                    <Text className="text-info text-xs font-bold ml-1">Get Directions</Text>
-                  </TouchableOpacity>
+                  <Text className="text-amber-950 text-sm font-medium mt-0.5">
+                    {order.pickupNote || (process as any)?.pickupNote}
+                  </Text>
                 </View>
               </View>
+            )}
 
-              {/* Item breakdown */}
-              <View className="bg-gray-50 rounded-lg p-3 mt-2">
-                <Text className="text-xs font-bold text-gray-500 uppercase mb-2">Item Breakdown</Text>
-                {order.items?.map((item: any, idx: number) => {
-                  const { title, details } = formatItemSummary(item);
-                  const sid = String(item.serviceType || item.serviceId || '').toLowerCase();
-                  const itemToken = order.tokens?.[item.serviceType] || order.tokens?.[item.serviceId] || order.tokens?.[sid];
-                  return (
-                    <View key={idx} className="flex-row justify-between mb-2 pb-1.5 border-b border-gray-200/60 last:border-b-0">
-                      <View className="flex-1 mr-2">
-                        <View className="flex-row items-center flex-wrap gap-1.5">
-                          <Text className="text-gray-900 font-bold text-sm">{title}</Text>
-                          {details ? (
-                            <View className="bg-gray-200/80 px-1.5 py-0.5 rounded">
-                              <Text className="text-gray-700 text-xs font-medium">{details}</Text>
-                            </View>
-                          ) : null}
-                          {itemToken ? (
-                            <View className="bg-amber-100 border border-amber-300 px-1.5 py-0.5 rounded">
-                              <Text className="text-amber-800 text-xs font-bold">Token #{itemToken}</Text>
-                            </View>
-                          ) : null}
-                        </View>
-                        {item.specialInstructions ? <Text className="text-gray-400 text-xs mt-0.5">{item.specialInstructions}</Text> : null}
-                      </View>
-                      <Text className="text-gray-700 font-bold text-sm">
-                        {item.totalPrice ? `₹${item.totalPrice}` : ''}
+            {/* Tokens & Order IDs */}
+            <View className="mt-3 pt-3 border-t border-gray-100 flex-row items-center justify-between flex-wrap gap-2">
+              <View className="flex-row items-center gap-1.5 flex-wrap">
+                <Text className="text-gray-900 font-black text-sm">#{orderId.slice(-6).toUpperCase()}</Text>
+                {(() => {
+                  const tokenChips = parseOrderTokens(order.tokens, order.tokenNumber || process?.tokenNumber, order.items);
+                  return tokenChips.map((c, i) => (
+                    <View key={i} className="bg-amber-100 border border-amber-200 px-2 py-0.5 rounded">
+                      <Text className="text-amber-800 font-bold text-xs">
+                        T-{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
                       </Text>
                     </View>
-                  );
-                })}
-                <View className="flex-row justify-between pt-2 mt-1 border-t border-gray-200">
-                  <Text className="text-gray-900 font-bold text-sm">Total</Text>
-                  <Text className="text-gray-900 font-bold">₹{orderTotal(order)}</Text>
-                </View>
-                {order.paymentStatus ? (
-                  <View className="mt-2">
-                    <View className="self-start bg-gray-200 px-2 py-0.5 rounded">
-                      <Text className="text-xs font-bold text-gray-700 uppercase">{order.paymentStatus}</Text>
-                    </View>
-                  </View>
-                ) : null}
+                  ));
+                })()}
+              </View>
+              <View className="bg-gray-100 px-2.5 py-0.5 rounded-full">
+                <Text className="text-xs font-bold text-gray-600 uppercase">{order.status?.replace(/_/g, ' ') || 'ACTIVE'}</Text>
               </View>
             </View>
-          )}
-        </View>
+
+            {/* Address & Directions */}
+            {order.address && (
+              <View className="mt-3 flex-row items-center bg-gray-50 p-3 rounded-xl border border-gray-100">
+                <View className="w-7 h-7 rounded-full bg-purple-50 items-center justify-center mr-2.5 shrink-0">
+                  <MapPin size={13} color="#994bff" />
+                </View>
+                <View className="flex-1 mr-2">
+                  <Text className="text-gray-800 text-xs font-medium" numberOfLines={2}>
+                    {typeof order.address === 'string' ? order.address : (order.address?.formattedAddress || order.address?.line1 || 'No address')}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => {
+                    const dest = order.latitude ? `${order.latitude},${order.longitude}` : (order.address?.formattedAddress || order.address?.line1 || order.address);
+                    Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}`).catch(() => {});
+                  }}
+                  className="bg-white px-2 py-1 rounded-lg border border-gray-200 flex-row items-center shrink-0"
+                >
+                  <Navigation size={11} color="#2563eb" className="mr-1" />
+                  <Text className="text-blue-600 text-xs font-bold">Map</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
+            {/* Item Breakdown */}
+            <View className="mt-3 bg-gray-50 rounded-xl p-3 border border-gray-100">
+              <View className="flex-row items-center justify-between mb-2">
+                <Text className="text-xs font-extrabold text-gray-500 uppercase tracking-wider">Garment / Item Breakdown</Text>
+                {isTaggingState && (
+                  <TouchableOpacity
+                    onPress={() => setShowEditModal(true)}
+                    className="flex-row items-center bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-lg active:opacity-70"
+                  >
+                    <Pencil size={11} color="#2563eb" />
+                    <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+              {order.items?.map((item: any, idx: number) => {
+                const { title, details } = formatItemSummary(item);
+                const sid = String(item.serviceType || item.serviceId || '').toLowerCase();
+                const itemToken = order.tokens?.[item.serviceType] || order.tokens?.[item.serviceId] || order.tokens?.[sid];
+                return (
+                  <View key={idx} className="flex-row justify-between mb-1.5 pb-1 border-b border-gray-200/50 last:border-b-0">
+                    <View className="flex-1 mr-2">
+                      <View className="flex-row items-center flex-wrap gap-1">
+                        <Text className="text-gray-900 font-bold text-xs">{title}</Text>
+                        {details ? (
+                          <View className="bg-gray-200/70 px-1 py-0.5 rounded">
+                            <Text className="text-gray-700 text-[10px] font-medium">{details}</Text>
+                          </View>
+                        ) : null}
+                        {itemToken ? (
+                          <View className="bg-amber-100 border border-amber-200 px-1 py-0.5 rounded">
+                            <Text className="text-amber-800 text-[10px] font-bold">Token #{itemToken}</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                      {item.specialInstructions ? <Text className="text-gray-400 text-[10px] mt-0.5">{item.specialInstructions}</Text> : null}
+                    </View>
+                    <Text className="text-gray-700 font-bold text-xs">
+                      {item.totalPrice ? `₹${item.totalPrice}` : ''}
+                    </Text>
+                  </View>
+                );
+              })}
+              <View className="flex-row justify-between pt-2 mt-1 border-t border-gray-200">
+                <Text className="text-gray-900 font-bold text-xs">Total Amount</Text>
+                <Text className="text-gray-900 font-extrabold text-sm">₹{orderTotal(order)}</Text>
+              </View>
+              {order.paymentStatus ? (
+                <View className="mt-2">
+                  <View className="self-start bg-gray-200 px-2 py-0.5 rounded">
+                    <Text className="text-[10px] font-bold text-gray-700 uppercase">{order.paymentStatus}</Text>
+                  </View>
+                </View>
+              ) : null}
+            </View>
+          </View>
+        )}
 
         {!!actionError && (
           <View className="bg-red-50 border border-red-200 rounded-xl p-4 mb-4 flex-row items-center gap-2">
@@ -1810,6 +1955,13 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               onUnassign={async () => {
                 await handleUnassignHelper(started);
               }}
+            />
+          )}
+          {order && (
+            <EditOrderModal
+              visible={showEditModal}
+              onClose={() => setShowEditModal(false)}
+              order={order}
             />
           )}
         </>

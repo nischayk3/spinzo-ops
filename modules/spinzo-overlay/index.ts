@@ -3,6 +3,7 @@ import { requireNativeModule, Platform } from 'expo-modules-core';
 export interface PendingAcceptedOrder {
   orderId: string;
   isDelivery: boolean;
+  taskType?: string;
 }
 
 export interface OverlayData {

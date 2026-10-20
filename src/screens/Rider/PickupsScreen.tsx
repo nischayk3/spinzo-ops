@@ -351,18 +351,18 @@ export function PickupsScreen() {
   }, [pending, stopMap]);
 
   return (
-    <SafeAreaView className="flex-1 bg-bgDark">
+    <SafeAreaView className="flex-1 bg-slate-100">
       {/* Header */}
-      <View className="px-4 pt-4 pb-2.5 flex-row items-center justify-between">
+      <View className="px-4 pt-3 pb-2 flex-row items-center justify-between">
         <View>
-          <Text className="text-2xl font-black text-slate-950 tracking-tight">My Pickups</Text>
-          <Text className="text-slate-600 text-xs font-bold mt-0.5">
+          <Text className="text-xl font-black text-slate-950 tracking-tight">My Pickups</Text>
+          <Text className="text-slate-500 text-[11px] font-bold mt-0.5">
             {pending.length} task{pending.length === 1 ? '' : 's'} on circuit • SpinZo BTM Hub
           </Text>
         </View>
-        <View className="bg-emerald-100 border border-emerald-400 px-3 py-1 rounded-full flex-row items-center">
-          <View className="w-2 h-2 rounded-full bg-emerald-600 mr-1.5" />
-          <Text className="text-emerald-950 text-xs font-black">ON DUTY</Text>
+        <View className="bg-emerald-100 border border-emerald-300 px-2.5 py-0.5 rounded-full flex-row items-center">
+          <View className="w-1.5 h-1.5 rounded-full bg-emerald-600 mr-1.5" />
+          <Text className="text-emerald-950 text-[11px] font-black">ON DUTY</Text>
         </View>
       </View>
 
@@ -392,44 +392,39 @@ export function PickupsScreen() {
         }}
       />
 
-      {/* Active Deliveries Quick Switcher */}
+      {/* Active Deliveries Quick Switcher (Sleek notification strip) */}
       {activeDeliveriesCount > 0 ? (
         <TouchableOpacity
-          activeOpacity={0.85}
+          activeOpacity={0.8}
           onPress={() => navigation.navigate('Deliveries')}
-          className="mx-4 mb-3.5 px-4 py-3 bg-blue-600 rounded-2xl flex-row items-center justify-between shadow-md shadow-blue-500/25"
+          className="mx-4 mb-2 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl flex-row items-center justify-between active:bg-blue-100"
         >
           <View className="flex-row items-center flex-1 mr-2">
-            <View className="w-8 h-8 rounded-xl bg-white/20 items-center justify-center mr-2.5">
-              <Package size={16} color="#FFFFFF" />
+            <View className="w-6 h-6 rounded-lg bg-blue-600 items-center justify-center mr-2">
+              <Package size={13} color="#FFFFFF" />
             </View>
-            <View>
-              <Text className="text-white font-black text-xs uppercase tracking-wide">
-                {activeDeliveriesCount} Active Deliver{activeDeliveriesCount > 1 ? 'ies' : 'y'}
-              </Text>
-              <Text className="text-blue-100 text-[11px] font-bold">
-                Ready for dispatch on your route
-              </Text>
-            </View>
+            <Text className="text-blue-950 font-black text-xs">
+              {activeDeliveriesCount} Active Deliver{activeDeliveriesCount > 1 ? 'ies' : 'y'} ready for route
+            </Text>
           </View>
-          <View className="flex-row items-center bg-white px-3 py-1.5 rounded-xl shadow-xs">
-            <Text className="text-blue-700 font-black text-xs mr-1">Switch</Text>
+          <View className="flex-row items-center">
+            <Text className="text-blue-700 font-black text-xs mr-0.5">Switch</Text>
             <ChevronRight size={13} color="#1D4ED8" />
           </View>
         </TouchableOpacity>
       ) : null}
 
-      {/* 3-Way Segmented Tabs */}
-      <View className="flex-row bg-slate-200 p-1 rounded-2xl mx-4 mb-3 border border-slate-300">
+      {/* Modern Segmented Tabs */}
+      <View className="flex-row bg-slate-100 p-1 rounded-xl mx-4 mb-2.5 border border-slate-200">
         <TouchableOpacity
           onPress={() => setFilterTab('route')}
-          className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
-            filterTab === 'route' ? 'bg-slate-950 shadow-xs' : ''
+          className={`flex-1 py-1.5 px-1 rounded-lg items-center justify-center ${
+            filterTab === 'route' ? 'bg-white shadow-xs' : ''
           }`}
         >
           <Text
             className={`text-xs font-black ${
-              filterTab === 'route' ? 'text-white' : 'text-slate-700'
+              filterTab === 'route' ? 'text-slate-950' : 'text-slate-500'
             }`}
           >
             ⚡ Route ({routeSorted.length})
@@ -438,13 +433,13 @@ export function PickupsScreen() {
 
         <TouchableOpacity
           onPress={() => setFilterTab('pickup')}
-          className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
-            filterTab === 'pickup' ? 'bg-slate-950 shadow-xs' : ''
+          className={`flex-1 py-1.5 px-1 rounded-lg items-center justify-center ${
+            filterTab === 'pickup' ? 'bg-white shadow-xs' : ''
           }`}
         >
           <Text
             className={`text-xs font-black ${
-              filterTab === 'pickup' ? 'text-white' : 'text-slate-700'
+              filterTab === 'pickup' ? 'text-slate-950' : 'text-slate-500'
             }`}
           >
             📦 Pick Up ({actionable.length})
@@ -453,13 +448,13 @@ export function PickupsScreen() {
 
         <TouchableOpacity
           onPress={() => setFilterTab('in_bag')}
-          className={`flex-1 py-2 px-1 rounded-xl items-center justify-center ${
-            filterTab === 'in_bag' ? 'bg-slate-950 shadow-xs' : ''
+          className={`flex-1 py-1.5 px-1 rounded-lg items-center justify-center ${
+            filterTab === 'in_bag' ? 'bg-white shadow-xs' : ''
           }`}
         >
           <Text
             className={`text-xs font-black ${
-              filterTab === 'in_bag' ? 'text-white' : 'text-slate-700'
+              filterTab === 'in_bag' ? 'text-slate-950' : 'text-slate-500'
             }`}
           >
             🎒 In Bag ({inTransit.length})

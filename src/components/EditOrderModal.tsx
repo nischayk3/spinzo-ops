@@ -3,7 +3,7 @@ import { View, Text, Modal, ScrollView, TouchableOpacity, ActivityIndicator, Ale
 import { X, Minus, Plus, AlertTriangle } from 'lucide-react-native';
 import { functions, httpsCallable } from '../config/firebase';
 
-import { SHOE_EDIT_CATEGORIES, calculateItemPrice, calculateDeliveryFee } from '../utils/editPricing';
+import { SHOE_EDIT_CATEGORIES, calculateItemPrice, calculateDeliveryFee, getIroningBreakdown } from '../utils/editPricing';
 
 interface EditOrderModalProps {
   visible: boolean;
@@ -33,7 +33,9 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
           weight: it.weight || ((isWF || isWI) ? 5 : undefined),
           ironingEnabled: isWF ? Boolean(it.ironingEnabled) : undefined,
           ironingCount: isWF && it.ironingEnabled ? (it.ironingCount || 0) : (isIroningOnly ? (it.ironingCount || it.clothesCount || it.quantity || 1) : 0),
-          clothesCount: (isWF || isWI) ? undefined : it.clothesCount,
+          clothesCount: (isWF || isWI) ? undefined : (it.clothesCount || it.ironingCount || it.quantity || 1),
+          mediumCount: it.mediumCount || 0,
+          heavyCount: it.heavyCount || 0,
         };
       });
       setItems(initialItems);
@@ -75,7 +77,22 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
       updatedItem.description = parts.join(', ');
     }
     if (sid === 'ironing') {
-      updatedItem.ironingPrice = (updatedItem.ironingCount || updatedItem.clothesCount || 0) * 10;
+      const breakdown = getIroningBreakdown(updatedItem);
+      updatedItem.ironingCount = breakdown.total;
+      updatedItem.clothesCount = breakdown.total;
+      updatedItem.quantity = breakdown.total;
+      updatedItem.mediumCount = breakdown.medium;
+      updatedItem.heavyCount = breakdown.heavy;
+      updatedItem.ironingPrice = breakdown.amount;
+      if (breakdown.medium > 0 || breakdown.heavy > 0) {
+        const parts = [];
+        if (breakdown.light > 0) parts.push(`${breakdown.light} Light`);
+        if (breakdown.medium > 0) parts.push(`${breakdown.medium} Medium`);
+        if (breakdown.heavy > 0) parts.push(`${breakdown.heavy} Heavy`);
+        updatedItem.description = parts.join(', ');
+      } else {
+        delete updatedItem.description;
+      }
     }
     if (sid === 'premium_laundry') {
       const weight = updatedItem.weight || 5;
@@ -115,6 +132,42 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
     setItems(newItems);
   };
 
+  const handleTotalIroningChange = (index: number, newTotal: number) => {
+    const total = Math.max(1, newTotal);
+    const current = items[index];
+    let medium = current.mediumCount || 0;
+    let heavy = current.heavyCount || 0;
+    if (medium + heavy > total) {
+      if (medium > total) {
+        medium = total;
+        heavy = 0;
+      } else {
+        heavy = total - medium;
+      }
+    }
+    updateItem(index, {
+      ironingCount: total,
+      clothesCount: total,
+      quantity: total,
+      mediumCount: medium,
+      heavyCount: heavy,
+    });
+  };
+
+  const handleTierChange = (index: number, tier: 'medium' | 'heavy', delta: number) => {
+    const current = items[index];
+    const bd = getIroningBreakdown(current);
+    if (tier === 'medium') {
+      const maxMedium = bd.total - bd.heavy;
+      const newMedium = Math.max(0, Math.min(maxMedium, bd.medium + delta));
+      updateItem(index, { mediumCount: newMedium });
+    } else if (tier === 'heavy') {
+      const maxHeavy = bd.total - bd.medium;
+      const newHeavy = Math.max(0, Math.min(maxHeavy, bd.heavy + delta));
+      updateItem(index, { heavyCount: newHeavy });
+    }
+  };
+
   const updateShoeCount = (itemIndex: number, categoryId: string, delta: number) => {
     const currentItem = items[itemIndex];
     const existingItems: any[] = currentItem.shoeItems ? [...currentItem.shoeItems] : [];
@@ -147,9 +200,11 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
     if (!order) return;
     setProcessing(true);
     try {
+      const rawOrderId = order.id || '';
+      const orderId = rawOrderId.includes('__') ? rawOrderId.split('__')[0] : rawOrderId;
       const callable = httpsCallable(functions, 'opsProcessing');
       const res: any = await callable({
-        orderId: order.id,
+        orderId,
         userId: order.userId,
         vendorId: order.vendorId || 'vendor_1',
         action: 'editOrder',
@@ -215,7 +270,7 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
         <View className="mx-4 mt-3 flex-row items-center bg-amber-50 border border-amber-200 rounded-xl p-3 gap-2">
           <AlertTriangle size={18} color="#d97706" />
           <Text className="flex-1 text-amber-800 text-xs">
-            Actual weight is verified at pickup. Changes are allowed only before processing starts.
+            Actual weight and piece counts are verified during pickup or tagging. Changes update customer billing.
           </Text>
         </View>
 
@@ -278,22 +333,154 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
                   />
                 )}
 
-                {/* Steam Iron (standalone) */}
-                {sid === 'ironing' && (
-                  <CounterRow
-                    label="Number of Pieces (₹10/pc)"
-                    value={item.ironingCount || item.clothesCount || 0}
-                    onDecrement={() => updateItem(index, {
-                      ironingCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
-                      clothesCount: Math.max(1, (item.ironingCount || item.clothesCount || 0) - 1),
-                    })}
-                    onIncrement={() => updateItem(index, {
-                      ironingCount: (item.ironingCount || item.clothesCount || 0) + 1,
-                      clothesCount: (item.ironingCount || item.clothesCount || 0) + 1,
-                    })}
-                    disableDecrement={(item.ironingCount || item.clothesCount || 0) <= 1}
-                  />
-                )}
+                {/* Steam Iron (standalone) with Tiered Breakdown */}
+                {sid === 'ironing' && (() => {
+                  const bd = getIroningBreakdown(item);
+                  return (
+                    <View className="gap-3">
+                      {/* Total Pieces Counter */}
+                      <CounterRow
+                        label="Total Ironing Pieces"
+                        value={`${bd.total} pcs`}
+                        onDecrement={() => handleTotalIroningChange(index, bd.total - 1)}
+                        onIncrement={() => handleTotalIroningChange(index, bd.total + 1)}
+                        disableDecrement={bd.total <= 1}
+                      />
+
+                      {/* Tier Breakdown Header */}
+                      <View className="pt-2 border-t border-gray-200">
+                        <View className="flex-row items-center justify-between mb-1">
+                          <Text className="text-xs font-bold text-gray-700 uppercase tracking-wide">
+                            Garment Type Breakdown
+                          </Text>
+                          <Text className="text-[11px] text-gray-500 font-medium">
+                            {bd.medium + bd.heavy} / {bd.total} structured
+                          </Text>
+                        </View>
+                        <Text className="text-[11px] text-gray-400 mb-2.5">
+                          Specify medium & heavy garments. Regular clothes are auto-calculated at ₹10/pc.
+                        </Text>
+                      </View>
+
+                      {/* Tier 1: Light / Everyday (₹10/pc) - Derived */}
+                      <View className="bg-white border border-gray-200 rounded-xl p-3 flex-row items-center justify-between">
+                        <View className="flex-1 mr-3">
+                          <View className="flex-row items-center gap-1.5">
+                            <Text className="text-sm font-bold text-gray-900">Light / Everyday</Text>
+                            <View className="bg-blue-50 px-1.5 py-0.5 rounded">
+                              <Text className="text-blue-700 text-[10px] font-bold">₹10/pc</Text>
+                            </View>
+                            <View className="bg-gray-100 px-1.5 py-0.5 rounded">
+                              <Text className="text-gray-500 text-[10px] font-medium">Auto-derived</Text>
+                            </View>
+                          </View>
+                          <Text className="text-[11px] text-gray-500 mt-0.5">
+                            T-shirts, shirts, trousers, tops, everyday wear
+                          </Text>
+                        </View>
+                        <View className="items-end">
+                          <Text className="text-base font-bold text-gray-900">{bd.light} pcs</Text>
+                          <Text className="text-xs text-gray-500 font-medium">₹{bd.light * 10}</Text>
+                        </View>
+                      </View>
+
+                      {/* Tier 2: Medium / Structured (₹30/pc) */}
+                      <View className="bg-white border border-gray-200 rounded-xl p-3">
+                        <View className="flex-row items-center justify-between">
+                          <View className="flex-1 mr-3">
+                            <View className="flex-row items-center gap-1.5">
+                              <Text className="text-sm font-bold text-gray-900">Medium / Structured</Text>
+                              <View className="bg-purple-50 px-1.5 py-0.5 rounded">
+                                <Text className="text-purple-700 text-[10px] font-bold">₹30/pc</Text>
+                              </View>
+                            </View>
+                            <Text className="text-[11px] text-gray-500 mt-0.5">
+                              Blazers, jackets, kurtas, silk/heavy sarees
+                            </Text>
+                          </View>
+                          <View className="flex-row items-center gap-2">
+                            <TouchableOpacity
+                              onPress={() => handleTierChange(index, 'medium', -1)}
+                              disabled={bd.medium <= 0}
+                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.medium <= 0 ? 'bg-gray-100' : 'bg-gray-200'}`}
+                            >
+                              <Minus size={14} color={bd.medium <= 0 ? '#d1d5db' : '#1f2937'} />
+                            </TouchableOpacity>
+                            <Text className="text-base font-bold text-gray-900 min-w-[28px] text-center">
+                              {bd.medium}
+                            </Text>
+                            <TouchableOpacity
+                              onPress={() => handleTierChange(index, 'medium', 1)}
+                              disabled={bd.medium + bd.heavy >= bd.total}
+                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.medium + bd.heavy >= bd.total ? 'bg-gray-100' : 'bg-gray-200'}`}
+                            >
+                              <Plus size={14} color={bd.medium + bd.heavy >= bd.total ? '#d1d5db' : '#1f2937'} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                        {bd.medium > 0 && (
+                          <View className="flex-row justify-between items-center mt-2 pt-1.5 border-t border-gray-100">
+                            <Text className="text-[11px] text-gray-400">{bd.medium} × ₹30</Text>
+                            <Text className="text-xs font-bold text-purple-700">₹{bd.medium * 30}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Tier 3: Heavy / Designer (₹50/pc) */}
+                      <View className="bg-white border border-gray-200 rounded-xl p-3">
+                        <View className="flex-row items-center justify-between">
+                          <View className="flex-1 mr-3">
+                            <View className="flex-row items-center gap-1.5">
+                              <Text className="text-sm font-bold text-gray-900">Heavy / Designer</Text>
+                              <View className="bg-amber-50 px-1.5 py-0.5 rounded">
+                                <Text className="text-amber-800 text-[10px] font-bold">₹50/pc</Text>
+                              </View>
+                            </View>
+                            <Text className="text-[11px] text-gray-500 mt-0.5">
+                              Sherwanis, heavy lehengas, bridal, suits
+                            </Text>
+                          </View>
+                          <View className="flex-row items-center gap-2">
+                            <TouchableOpacity
+                              onPress={() => handleTierChange(index, 'heavy', -1)}
+                              disabled={bd.heavy <= 0}
+                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.heavy <= 0 ? 'bg-gray-100' : 'bg-gray-200'}`}
+                            >
+                              <Minus size={14} color={bd.heavy <= 0 ? '#d1d5db' : '#1f2937'} />
+                            </TouchableOpacity>
+                            <Text className="text-base font-bold text-gray-900 min-w-[28px] text-center">
+                              {bd.heavy}
+                            </Text>
+                            <TouchableOpacity
+                              onPress={() => handleTierChange(index, 'heavy', 1)}
+                              disabled={bd.medium + bd.heavy >= bd.total}
+                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.medium + bd.heavy >= bd.total ? 'bg-gray-100' : 'bg-gray-200'}`}
+                            >
+                              <Plus size={14} color={bd.medium + bd.heavy >= bd.total ? '#d1d5db' : '#1f2937'} />
+                            </TouchableOpacity>
+                          </View>
+                        </View>
+                        {bd.heavy > 0 && (
+                          <View className="flex-row justify-between items-center mt-2 pt-1.5 border-t border-gray-100">
+                            <Text className="text-[11px] text-gray-400">{bd.heavy} × ₹50</Text>
+                            <Text className="text-xs font-bold text-amber-700">₹{bd.heavy * 50}</Text>
+                          </View>
+                        )}
+                      </View>
+
+                      {/* Pricing Formula Bar */}
+                      <View className="bg-blue-50/70 border border-blue-100 rounded-lg p-2.5 mt-1">
+                        <View className="flex-row items-center justify-between">
+                          <Text className="text-xs text-blue-900 font-semibold">Ironing Breakdown:</Text>
+                          <Text className="text-xs font-bold text-blue-700">₹{bd.amount}</Text>
+                        </View>
+                        <Text className="text-[11px] text-blue-800/80 mt-0.5">
+                          {bd.light} Light (₹{bd.light * 10}) + {bd.medium} Med (₹{bd.medium * 30}) + {bd.heavy} Heavy (₹{bd.heavy * 50})
+                        </Text>
+                      </View>
+                    </View>
+                  );
+                })()}
 
                 {/* Ironing Add-on */}
                 {(sid === 'ironing_addon' || (item.serviceName?.toLowerCase().includes('ironing') && sid !== 'ironing')) && (

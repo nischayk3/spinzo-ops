@@ -14,6 +14,10 @@ import {
   parseOrderTokens,
   matchOrderSearch,
   formatDisplayPhone,
+  parseSlotStartMinutes,
+  parseDeliveryDate,
+  getDeliveryTargetTimestamp,
+  sortReadyOrders,
   FeedOrder,
 } from '../orderFeed';
 
@@ -189,6 +193,21 @@ describe('formatItemSummary', () => {
     expect(summary.title).toBe('Steam Iron');
     expect(summary.details).toBe('15 pcs');
     expect(summary.price).toBe('₹270');
+  });
+
+  it('formats tiered steam iron with tier breakdown in details', () => {
+    const item = {
+      serviceType: 'ironing',
+      serviceName: 'Steam Iron',
+      clothesCount: 10,
+      mediumCount: 2,
+      heavyCount: 1,
+      totalPrice: 210,
+    };
+    const summary = formatItemSummary(item);
+    expect(summary.title).toBe('Steam Iron');
+    expect(summary.details).toBe('10 pcs (7 Light, 2 Med, 1 Heavy)');
+    expect(summary.price).toBe('₹210');
   });
 
   it('formats blanket wash with single and double counts', () => {
@@ -370,6 +389,126 @@ describe('matchOrderSearch', () => {
     it('falls back to trimmed string for unusual numbers', () => {
       expect(formatDisplayPhone('12345')).toBe('12345');
       expect(formatDisplayPhone('+1-555-0192')).toBe('+1-555-0192');
+    });
+  });
+
+  describe('parseSlotStartMinutes', () => {
+    it('parses 12-hour slots with explicit meridiem', () => {
+      expect(parseSlotStartMinutes('5:00 PM - 6:00 PM')).toBe(1020);
+      expect(parseSlotStartMinutes('8:00 PM - 9:00 PM')).toBe(1200);
+      expect(parseSlotStartMinutes('11:00 AM - 12:00 PM')).toBe(660);
+      expect(parseSlotStartMinutes('12:00 PM - 1:00 PM')).toBe(720);
+    });
+
+    it('parses slots where meridiem is only on the end portion', () => {
+      expect(parseSlotStartMinutes('5:00 - 6:00 PM')).toBe(1020);
+      expect(parseSlotStartMinutes('8 - 9 pm')).toBe(1200);
+      expect(parseSlotStartMinutes('11 - 12 pm')).toBe(660);
+    });
+
+    it('parses 24-hour military slots', () => {
+      expect(parseSlotStartMinutes('17:00 - 18:00')).toBe(1020);
+      expect(parseSlotStartMinutes('20:00 - 21:00')).toBe(1200);
+      expect(parseSlotStartMinutes('11:00 - 12:00')).toBe(660);
+    });
+
+    it('handles instant, immediate, and invalid input', () => {
+      expect(parseSlotStartMinutes('Instant')).toBe(0);
+      expect(parseSlotStartMinutes('Immediate')).toBe(0);
+      expect(parseSlotStartMinutes(null)).toBeNull();
+      expect(parseSlotStartMinutes(undefined)).toBeNull();
+      expect(parseSlotStartMinutes('')).toBeNull();
+    });
+  });
+
+  describe('parseDeliveryDate', () => {
+    it('parses ISO date string YYYY-MM-DD', () => {
+      expect(parseDeliveryDate('2026-10-20')).toEqual({ year: 2026, month: 10, day: 20 });
+    });
+
+    it('parses DD-MM-YYYY and DD/MM/YYYY', () => {
+      expect(parseDeliveryDate('20-10-2026')).toEqual({ year: 2026, month: 10, day: 20 });
+      expect(parseDeliveryDate('20/10/2026')).toEqual({ year: 2026, month: 10, day: 20 });
+    });
+
+    it('returns null for empty/invalid input', () => {
+      expect(parseDeliveryDate(null)).toBeNull();
+      expect(parseDeliveryDate(undefined)).toBeNull();
+      expect(parseDeliveryDate('invalid-date')).toBeNull();
+    });
+  });
+
+  describe('sortReadyOrders', () => {
+    it('orders 5:00 PM today before 8:00 PM today (user requirement)', () => {
+      const order5PM = makeOrder({
+        id: 'ord_5pm',
+        status: 'ready',
+        deliveryDate: '2026-10-20',
+        deliveryTime: '5:00 PM - 6:00 PM',
+      });
+      const order8PM = makeOrder({
+        id: 'ord_8pm',
+        status: 'ready',
+        deliveryDate: '2026-10-20',
+        deliveryTime: '8:00 PM - 9:00 PM',
+      });
+
+      const sorted = sortReadyOrders([order8PM, order5PM]);
+      expect(sorted.map(o => o.id)).toEqual(['ord_5pm', 'ord_8pm']);
+    });
+
+    it('orders 17:00 - 18:00 before 20:00 - 21:00 in 24-hr format', () => {
+      const order5PM = makeOrder({
+        id: 'ord_17',
+        status: 'ready',
+        deliveryDate: '2026-10-20',
+        deliveryTime: '17:00 - 18:00',
+      });
+      const order8PM = makeOrder({
+        id: 'ord_20',
+        status: 'ready',
+        deliveryDate: '2026-10-20',
+        deliveryTime: '20:00 - 21:00',
+      });
+
+      const sorted = sortReadyOrders([order8PM, order5PM]);
+      expect(sorted.map(o => o.id)).toEqual(['ord_17', 'ord_20']);
+    });
+
+    it('orders ascending across the entire day: 11:00, 12:00, 17:00 (5 PM), 20:00 (8 PM)', () => {
+      const ord11 = makeOrder({ id: '11am', deliveryDate: '2026-10-20', deliveryTime: '11:00 - 12:00' });
+      const ord12 = makeOrder({ id: '12pm', deliveryDate: '2026-10-20', deliveryTime: '12:00 - 13:00' });
+      const ord5pm = makeOrder({ id: '5pm', deliveryDate: '2026-10-20', deliveryTime: '5:00 PM - 6:00 PM' });
+      const ord8pm = makeOrder({ id: '8pm', deliveryDate: '2026-10-20', deliveryTime: '8:00 PM - 9:00 PM' });
+
+      const sorted = sortReadyOrders([ord8pm, ord12, ord5pm, ord11]);
+      expect(sorted.map(o => o.id)).toEqual(['11am', '12pm', '5pm', '8pm']);
+    });
+
+    it('places customers who have scheduled delivery FIRST before unbooked orders', () => {
+      const unbookedOld = makeOrder({ id: 'unbooked_old', createdAt: 1000 });
+      const scheduled5PM = makeOrder({ id: 'sched_5pm', deliveryDate: '2026-10-20', deliveryTime: '5:00 PM - 6:00 PM' });
+      const scheduled8PM = makeOrder({ id: 'sched_8pm', deliveryDate: '2026-10-20', deliveryTime: '8:00 PM - 9:00 PM' });
+      const unbookedNew = makeOrder({ id: 'unbooked_new', createdAt: 3000 });
+
+      const sorted = sortReadyOrders([unbookedOld, scheduled8PM, unbookedNew, scheduled5PM]);
+      expect(sorted.map(o => o.id)).toEqual(['sched_5pm', 'sched_8pm', 'unbooked_new', 'unbooked_old']);
+    });
+
+    it('sorts today before tomorrow', () => {
+      const today8PM = makeOrder({ id: 'today_8pm', deliveryDate: '2026-10-20', deliveryTime: '8:00 PM - 9:00 PM' });
+      const tomorrow11AM = makeOrder({ id: 'tomorrow_11am', deliveryDate: '2026-10-21', deliveryTime: '11:00 - 12:00' });
+
+      const sorted = sortReadyOrders([tomorrow11AM, today8PM]);
+      expect(sorted.map(o => o.id)).toEqual(['today_8pm', 'tomorrow_11am']);
+    });
+
+    it('places overdue deliveries at the very top (highest priority)', () => {
+      const yesterday = makeOrder({ id: 'yesterday', deliveryDate: '2026-10-19', deliveryTime: '20:00 - 21:00' });
+      const today11AM = makeOrder({ id: 'today_11am', deliveryDate: '2026-10-20', deliveryTime: '11:00 - 12:00' });
+
+      const sorted = sortReadyOrders([today11AM, yesterday]);
+      expect(sorted.map(o => o.id)).toEqual(['yesterday', 'today_11am']);
     });
   });
 });

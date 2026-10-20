@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateItemPrice, calculateDeliveryFee, SHOE_EDIT_CATEGORIES } from '../editPricing';
+import { calculateItemPrice, calculateDeliveryFee, SHOE_EDIT_CATEGORIES, getIroningBreakdown, IRONING_RATES } from '../editPricing';
 
 describe('calculateItemPrice', () => {
   it('prices wash_fold by weight plus optional ironing addon', () => {
@@ -19,8 +19,20 @@ describe('calculateItemPrice', () => {
     expect(calculateItemPrice({ serviceId: 'wash_iron', weight: 6 })).toBe(6 * 140);
   });
 
-  it('prices standalone ironing at ₹10/pc', () => {
+  it('prices standalone ironing at ₹10/pc for flat/unspecified tiers', () => {
     expect(calculateItemPrice({ serviceId: 'ironing', ironingCount: 5 })).toBe(50);
+  });
+
+  it('prices standalone ironing with tiers (Light ₹10, Medium ₹30, Heavy ₹50)', () => {
+    // 10 total: 2 heavy (₹100), 3 medium (₹90), remaining 5 light (₹50) = ₹240
+    expect(
+      calculateItemPrice({
+        serviceId: 'ironing',
+        ironingCount: 10,
+        mediumCount: 3,
+        heavyCount: 2,
+      })
+    ).toBe(240);
   });
 
   it('prices ironing addon at ₹18/pc', () => {
@@ -91,5 +103,60 @@ describe('SHOE_EDIT_CATEGORIES', () => {
       'crocs_sandals',
       'slippers',
     ]);
+  });
+});
+
+describe('getIroningBreakdown', () => {
+  it('defines the correct standard tier rates', () => {
+    expect(IRONING_RATES).toEqual({
+      light: 10,
+      medium: 30,
+      heavy: 50,
+    });
+  });
+
+  it('defaults to all light when no medium or heavy is provided', () => {
+    const res = getIroningBreakdown({ ironingCount: 7 });
+    expect(res).toEqual({
+      total: 7,
+      light: 7,
+      medium: 0,
+      heavy: 0,
+      amount: 70,
+    });
+  });
+
+  it('correctly calculates mixed tiers', () => {
+    const res = getIroningBreakdown({
+      ironingCount: 12,
+      mediumCount: 4,
+      heavyCount: 2,
+    });
+    // light = 12 - 4 - 2 = 6
+    // amount = 6*10 + 4*30 + 2*50 = 60 + 120 + 100 = 280
+    expect(res).toEqual({
+      total: 12,
+      light: 6,
+      medium: 4,
+      heavy: 2,
+      amount: 280,
+    });
+  });
+
+  it('clamps medium and heavy if they exceed total', () => {
+    const res = getIroningBreakdown({
+      ironingCount: 5,
+      mediumCount: 4,
+      heavyCount: 3,
+    });
+    // total = 5, medium clamped to 4, heavy clamped to min(3, 5-4) = 1, light = 0
+    // amount = 0*10 + 4*30 + 1*50 = 170
+    expect(res).toEqual({
+      total: 5,
+      light: 0,
+      medium: 4,
+      heavy: 1,
+      amount: 170,
+    });
   });
 });

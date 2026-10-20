@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -85,6 +85,59 @@ async function sendFCMOrderAssignment({
   }
 }
 
+/**
+ * Send high-priority FCM stage nudge message to staff member's device.
+ * Triggers native overlay / heads-up alert outside the app even when app is closed.
+ */
+async function sendFCMStageNudge({
+  staffId,
+  orderId,
+  title = '⏰ Washing Status Check',
+  message = 'Are you still doing pre-stain treatment, or ready to load and start the washer?',
+  step = 'getting_washed',
+  phase = 'accepted',
+  actionLabel = 'START WASHER',
+}) {
+  if (!staffId) return;
+  try {
+    const staffDoc = await db.doc(`ops_staff/${staffId}`).get();
+    if (!staffDoc.exists) {
+      console.log(`[FCM] Staff doc not found for: ${staffId}`);
+      return;
+    }
+    const staffData = staffDoc.data();
+    const fcmToken = staffData.fcmToken;
+    if (!fcmToken) {
+      console.log(`[FCM] Staff ${staffId} has no fcmToken registered`);
+      return;
+    }
+
+    const payload = {
+      token: fcmToken,
+      data: {
+        type: 'stage_nudge',
+        taskType: 'stage_nudge',
+        orderId: String(orderId || ''),
+        customerName: String(title || ''),
+        title: String(title || ''),
+        address: String(message || ''),
+        stepName: String(actionLabel || 'START MACHINE'),
+        step: String(step || ''),
+        phase: String(phase || 'accepted'),
+      },
+      android: {
+        priority: 'high',
+        ttl: 60 * 1000,
+      },
+    };
+
+    const response = await admin.messaging().send(payload);
+    console.log(`[FCM] Sent stage nudge push to ${staffId} for #${orderId} (${step}_${phase}):`, response);
+  } catch (err) {
+    console.error(`[FCM] Failed to send stage nudge push to ${staffId}:`, err);
+  }
+}
+
 async function selectRider() {
   // Authorized rider phones from the roster.
   let rosterPhones = {};
@@ -151,7 +204,9 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const orderId = event.params.orderId;
   const order = event.data.data();
 
-  const assignee = await selectRider();
+  const pickupSlot = (order && (order.pickupDetails || order.pickup)) || null;
+  const isDueForDispatch = isSlotDueForDispatch(pickupSlot, 75);
+  const assignee = isDueForDispatch ? await selectRider() : null;
   const userId = event.params.userId;
   const vendorId = order.vendorId || 'default';
   const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
@@ -161,11 +216,11 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
         orderId,
         userId,
         vendorId,
-        status: 'pending',
+        status: isDueForDispatch ? 'pending' : 'scheduled',
         customerName: (order && (order.customerName || order.userName)) || '',
         customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
         pickupAddress: pickupAddressFromOrder(order),
-        pickupSlot: (order && order.pickupDetails) || null,
+        pickupSlot,
         tokenNumber: (order && order.tokenNumber) || null,
         tokens: (order && order.tokens) || null,
         pickupOTP: (order && order.pickupOTP) || null,
@@ -203,6 +258,8 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
       slot,
       isInstant,
     });
+  } else if (!isDueForDispatch) {
+    console.log(`[autoAssignRider] Order ${orderId} scheduled for later (${(pickupSlot && pickupSlot.scheduledDate) || ''} ${(pickupSlot && pickupSlot.scheduledTime) || ''}). Parked in ops_queue.`);
   }
 });
 
@@ -215,13 +272,13 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const wentOnShift = before && before.onShift !== true && after.onShift === true;
   if (!wentOnShift) return;
 
-  // Helper went on shift: drain all waiting stage queues
-  if (after.role === 'helper') {
+  // Helper or Iron specialist went on shift: drain all waiting stage queues
+  if (after.role === 'helper' || after.role === 'iron') {
     const helperUid = event.params.staffId;
     const helperName = after.name || '';
     try {
       await drainWaitingOpsQueues();
-      console.log(`[onShiftCatchUp] Drained waiting ops queues for newly on-shift helper ${helperName}`);
+      console.log(`[onShiftCatchUp] Drained waiting ops queues for newly on-shift helper/iron specialist ${helperName}`);
     } catch (hErr) {
       console.error(`[onShiftCatchUp] Failed for helper ${helperUid}:`, hErr);
     }
@@ -267,7 +324,11 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
   // Oldest parked orders first (top-level collection, single-field index — no composite index).
   const queue = await db.collection('ops_queue').orderBy('createdAt', 'asc').limit(50).get();
-  const pending = queue.docs.filter((d) => d.data().status === 'pending');
+  const pending = queue.docs.filter((d) => {
+    const entryData = d.data();
+    if (entryData.status !== 'pending' && entryData.status !== 'scheduled') return false;
+    return isSlotDueForDispatch(entryData.pickupSlot, 75);
+  });
 
   for (const entry of pending) {
     const orderId = entry.id;
@@ -327,7 +388,6 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
   // Also catch up any pending unassigned outbound delivery tasks
   try {
-    const todayStr = getTodayDateString();
     const pendingDelSnap = await db.collection('ops_delivery_tasks')
       .where('status', 'in', ['pending', 'scheduled'])
       .limit(50)
@@ -335,8 +395,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
-      // Only assign if the customer HAS picked a slot AND that slot is due TODAY (or overdue)
-      if (!delData.assignee && delData.deliveryDate && isDeliveryDueToday(delData.deliveryDate, todayStr)) {
+      // Only assign if the customer HAS picked a slot AND that slot is due NOW (within 75 mins or overdue)
+      if (!delData.assignee && delData.deliveryDate && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 75)) {
         await delDoc.ref.update({
           assignee: newRiderUid,
           status: 'assigned',
@@ -471,12 +531,14 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
     if (isUrgent !== undefined) {
       taskPatch.isUrgent = isUrgent;
       orderPatch['opsMeta.isUrgent'] = isUrgent;
+      orderPatch.isUrgent = isUrgent;
       orderPatch['opsMeta.urgentUpdatedAt'] = now;
       orderPatch['opsMeta.urgentUpdatedBy'] = auth.uid;
     }
     if (pickupNote !== undefined) {
       taskPatch.pickupNote = pickupNote;
       orderPatch['opsMeta.pickupNote'] = pickupNote;
+      orderPatch.pickupNote = pickupNote;
       orderPatch['opsMeta.pickupNoteUpdatedAt'] = now;
       orderPatch['opsMeta.pickupNoteUpdatedBy'] = auth.uid;
     }
@@ -492,6 +554,22 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
       const vendorId = task?.vendorId || data.vendorId || 'default';
       await db.doc(`vendors/${vendorId}/orders/${orderId}`).set(orderPatch, { merge: true });
     }
+
+    // Sync to all active ops_process documents so floor helpers see the rider note immediately
+    try {
+      const processSnap = await db.collection('ops_process').where('parentOrderId', '==', orderId).get();
+      if (!processSnap.empty) {
+        const processBatch = db.batch();
+        const procPatch = {};
+        if (isUrgent !== undefined) procPatch.isUrgent = isUrgent;
+        if (pickupNote !== undefined) procPatch.pickupNote = pickupNote;
+        processSnap.forEach(d => processBatch.update(d.ref, procPatch));
+        await processBatch.commit();
+      }
+    } catch (procErr) {
+      console.warn('[updatePickupMeta] Failed to sync ops_process:', procErr);
+    }
+
     return { ok: true, isUrgent, pickupNote };
   }
 
@@ -796,15 +874,17 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
     const resSnap = await db.doc('config/storeResources').get();
     const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
 
-    // Find on-shift helpers from ops_staff
+    // Find on-shift helpers and iron specialists from ops_staff
     const staffSnap = await db.collection('ops_staff')
       .where('onShift', '==', true)
-      .where('role', '==', 'helper')
       .get();
 
     const onShiftHelpers = [];
     staffSnap.forEach(d => {
-      onShiftHelpers.push({ uid: d.id, ...d.data() });
+      const data = d.data();
+      if (data.role === 'helper' || data.role === 'iron') {
+        onShiftHelpers.push({ uid: d.id, ...data });
+      }
     });
 
     // Fetch active live processes to determine real-time hands-on occupancy
@@ -879,6 +959,8 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         garments: { count: null, labelsPrintedAt: null, labels: [], registered: [], submittedAt: null },
         createdAt: now,
         customerName: order.customerName || order.userName || '',
+        isUrgent: Boolean(order.opsMeta?.isUrgent ?? order.isUrgent ?? false),
+        pickupNote: String(order.opsMeta?.pickupNote ?? order.pickupNote ?? ''),
       });
     }
 
@@ -955,13 +1037,17 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     const resSnap = await db.doc('config/storeResources').get();
     const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
 
-    // 2. Fetch on-shift helpers
+    // 2. Fetch on-shift helpers & iron specialists
     const staffSnap = await db.collection('ops_staff')
       .where('onShift', '==', true)
-      .where('role', '==', 'helper')
       .get();
     const onShiftHelpers = [];
-    staffSnap.forEach(d => onShiftHelpers.push({ uid: d.id, ...d.data() }));
+    staffSnap.forEach(d => {
+      const data = d.data();
+      if (data.role === 'helper' || data.role === 'iron') {
+        onShiftHelpers.push({ uid: d.id, ...data });
+      }
+    });
 
     if (onShiftHelpers.length === 0) {
       console.log(`[AutoAssignStage] No helpers on shift for ${processId} (${targetStage})`);
@@ -1102,14 +1188,227 @@ async function drainWaitingOpsQueues(stageList = null, options = {}) {
 }
 
 /**
- * 1-minute heartbeat cron: guarantees that unassigned machine tasks across washing
- * and drying are automatically dispatched as soon as any machine frees up.
+ * Automatically drains scheduled/parked pickup and delivery tasks as soon as their
+ * time slot enters the 75-minute advance dispatch window.
+ * - Auto-assigns on-shift riders
+ * - Moves pickups from ops_queue to ops_tasks
+ * - Transitions deliveries from status 'scheduled' to 'assigned'
+ * - Fires FCM push notifications to the assigned riders
+ */
+async function drainScheduledRiderTasks() {
+  try {
+    // 1. DRAIN DUE PICKUPS FROM ops_queue
+    const queueSnap = await db.collection('ops_queue').limit(50).get();
+    for (const entry of queueSnap.docs) {
+      const data = entry.data();
+      const orderId = entry.id;
+
+      // Check if order is still awaiting pickup
+      if (data.userId) {
+        const orderSnap = await db.doc(`users/${data.userId}/orders/${orderId}`).get();
+        if (orderSnap.exists && !isAwaitingPickup(orderSnap.data().status)) {
+          await entry.ref.delete();
+          continue;
+        }
+      }
+
+      // Check if slot is due (within 75 min or overdue)
+      if (!isSlotDueForDispatch(data.pickupSlot, 75)) {
+        continue; // not due yet, keep parked
+      }
+
+      const assignee = await selectRider();
+      if (!assignee) continue; // no rider on shift right now
+
+      let assignedSuccessfully = false;
+      await db.runTransaction(async (tx) => {
+        const taskRef = db.doc(`ops_tasks/${orderId}`);
+        const taskSnap = await tx.get(taskRef);
+        if (taskSnap.exists) {
+          tx.delete(entry.ref);
+          return;
+        }
+        tx.set(taskRef, {
+          orderId,
+          userId: data.userId || null,
+          vendorId: data.vendorId || null,
+          assignee,
+          status: 'pending',
+          customerName: data.customerName || '',
+          customerPhone: data.customerPhone || '',
+          pickupAddress: data.pickupAddress || '',
+          pickupSlot: data.pickupSlot || null,
+          tokenNumber: data.tokenNumber || null,
+          tokens: data.tokens || null,
+          pickupOTP: data.pickupOTP || null,
+          items: data.items || [],
+          totalAmount: data.totalAmount || 0,
+          paymentStatus: data.paymentStatus || 'pending',
+          paymentMode: data.paymentMode || '',
+          notes: data.notes || '',
+          latitude: data.latitude || null,
+          longitude: data.longitude || null,
+          assignedAt: TS(),
+          createdAt: data.createdAt || TS(),
+        });
+        tx.delete(entry.ref);
+        assignedSuccessfully = true;
+      });
+
+      if (assignedSuccessfully) {
+        const isInstant = Boolean(data.pickupSlot && data.pickupSlot.isInstant);
+        const slot = (data.pickupSlot && data.pickupSlot.type === 'instant')
+          ? 'Instant Pickup'
+          : (data.pickupSlot && data.pickupSlot.scheduledTime) || '';
+        await sendFCMOrderAssignment({
+          staffId: assignee,
+          orderId,
+          taskType: isInstant ? 'Instant Pickup' : 'Pickup',
+          customerName: data.customerName || '',
+          address: data.pickupAddress || '',
+          slot,
+          isInstant,
+        });
+        console.log(`[drainScheduledRiderTasks] Auto-dispatched due pickup ${orderId} (slot: ${slot}) to rider ${assignee}`);
+      }
+    }
+
+    // 2. DRAIN DUE DELIVERIES FROM ops_delivery_tasks
+    const pendingDelSnap = await db.collection('ops_delivery_tasks')
+      .where('status', 'in', ['pending', 'scheduled'])
+      .limit(50)
+      .get();
+
+    for (const delDoc of pendingDelSnap.docs) {
+      const delData = delDoc.data();
+      if (delData.assignee) continue; // already assigned
+      if (!delData.deliveryDate) continue; // customer hasn't selected a date yet (awaiting_slot)
+
+      // Check if slot has arrived / is within 75 min
+      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 75)) {
+        continue; // not due yet, keep holding on store shelf
+      }
+
+      const riderUid = await selectRider();
+      if (!riderUid) continue; // no rider on shift right now
+
+      await delDoc.ref.update({
+        assignee: riderUid,
+        status: 'assigned',
+        assignedAt: TS(),
+        updatedAt: TS(),
+      });
+
+      await sendFCMOrderAssignment({
+        staffId: riderUid,
+        orderId: delDoc.id,
+        taskType: 'delivery',
+        customerName: delData.customerName || '',
+        address: delData.deliveryAddress || '',
+        slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim(),
+        isInstant: false,
+      });
+      console.log(`[drainScheduledRiderTasks] Auto-dispatched due delivery ${delDoc.id} (slot: ${delData.deliveryDate} ${delData.deliveryTime}) to rider ${riderUid}`);
+    }
+  } catch (err) {
+    console.error('[drainScheduledRiderTasks] Error dispatching scheduled tasks:', err);
+  }
+}
+
+/**
+ * 1-minute cron check: identifies active wash and dry stages where a helper accepted
+ * the task >= 5 minutes ago, but hasn't pressed "Start Washer" / "Start Dryer" (startedAt is null).
+ * Dispatches high-priority FCM data message so native Android overlay & heads-up alarm
+ * alert the helper outside the app ("Are they still doing pre-stain or do they have to start?").
+ */
+async function checkUnstartedMachineNudges() {
+  try {
+    const stages = ['getting_washed', 'getting_dried'];
+    const now = Date.now();
+
+    for (const step of stages) {
+      const snap = await db.collection('ops_process')
+        .where('status', '==', step)
+        .limit(25)
+        .get();
+
+      if (snap.empty) continue;
+
+      for (const doc of snap.docs) {
+        const p = doc.data();
+        const stageData = p.stages?.[step];
+        if (!stageData || !stageData.assignee) continue;
+
+        if (isMachineNudgeDue(stageData, step, now)) {
+          const assigneeId = stageData.assignee;
+
+          // Check if helper is actively doing hands-on work (tagging, ironing, packaging)
+          // If so, do not interrupt them while they handle clothes/ironing
+          const staffDoc = await db.doc(`ops_staff/${assigneeId}`).get();
+          if (staffDoc.exists) {
+            const sd = staffDoc.data();
+            const activeTask = sd.activeHelperTask;
+            if (activeTask && ['tagging', 'getting_ironed', 'packaging'].includes(activeTask.step)) {
+              // Defer nudge while actively handling clothes
+              continue;
+            }
+          }
+
+          const isWash = step === 'getting_washed';
+          const title = isWash ? '⏰ Washing Status Check' : '⏰ Drying Status Check';
+          const message = isWash
+            ? 'It has been 5+ minutes since this wash task was assigned. Are you still doing pre-stain treatment, or ready to load and start the washer?'
+            : 'It has been 5+ minutes since this drying task was assigned. Are you still transferring/sorting clothes, or ready to start the dryer?';
+          const actionLabel = isWash ? 'START WASHER' : 'START DRYER';
+
+          console.log(`[StageNudge] Dispatching FCM machine nudge to ${assigneeId} for order ${p.orderId || doc.id} (${step})`);
+
+          await sendFCMStageNudge({
+            staffId: assigneeId,
+            orderId: p.orderId || doc.id,
+            title,
+            message,
+            step,
+            phase: 'accepted',
+            actionLabel,
+          });
+
+          // Record lastSentAt in Firestore to suppress repeated FCM alerts for 5 minutes
+          await doc.ref.set({
+            stages: {
+              [step]: {
+                nudge: {
+                  accepted: {
+                    lastSentAt: admin.firestore.Timestamp.now(),
+                    sendCount: admin.firestore.FieldValue.increment(1),
+                  }
+                }
+              }
+            }
+          }, { merge: true });
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[checkUnstartedMachineNudges] Error checking unstarted machine nudges:', err);
+  }
+}
+
+/**
+ * 1-minute heartbeat cron: guarantees that unassigned operations tasks across washing,
+ * drying, ironing, and packaging, as well as scheduled rider pickups and deliveries entering their
+ * dispatch window, are automatically dispatched.
+ * Also checks for unstarted machine tasks (5m grace window) and alerts helpers outside the app.
  */
 exports.scheduleDrainWaitingQueues = onSchedule({
   schedule: 'every 1 minutes',
   timeZone: 'Asia/Kolkata',
 }, async (event) => {
-  await drainWaitingOpsQueues(['getting_washed', 'getting_dried']);
+  await Promise.allSettled([
+    drainWaitingOpsQueues(['getting_washed', 'getting_dried', 'getting_ironed', 'packaging']),
+    drainScheduledRiderTasks(),
+    checkUnstartedMachineNudges(),
+  ]);
 });
 
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
@@ -1266,9 +1565,8 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     const deliveryDate = after.deliveryDate || after.deliverySlot || null;
     const deliveryTime = after.deliveryTime || null;
 
-    const todayStr = getTodayDateString();
     const hasSlot = Boolean(deliveryDate);
-    const isDueToday = hasSlot && isDeliveryDueToday(deliveryDate, todayStr);
+    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime }, 75);
 
     // 1. If customer has NOT picked a slot yet:
     // Order sits on store rack waiting for customer to select slot.
@@ -1300,9 +1598,9 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       return;
     }
 
-    // 2. Customer picked a slot, but it is for a FUTURE DATE (tomorrow or later):
-    // Keep in store holding, do not dispatch to today's rider.
-    if (!isDueToday) {
+    // 2. Customer picked a slot, but it is NOT DUE YET (future date or later today):
+    // Keep in store holding, do not dispatch to rider until dispatch window opens (75 mins before slot).
+    if (!isDueForDispatch) {
       const payload = {
         orderId,
         userId,
@@ -1325,11 +1623,11 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         ...(!existingTask ? { createdAt: TS() } : {}),
       };
       await deliveryTaskRef.set(payload, { merge: true });
-      console.log(`[syncDeliveryTask] Order ${orderId} scheduled for future date ${deliveryDate} (${deliveryTime}). Holding on shelf.`);
+      console.log(`[syncDeliveryTask] Order ${orderId} scheduled for later (${deliveryDate} ${deliveryTime || ''}). Holding on shelf.`);
       return;
     }
 
-    // 3. Customer scheduled for TODAY (or overdue):
+    // 3. Customer scheduled slot is DUE NOW (within 75 mins or overdue):
     // Auto-dispatch to on-shift rider now!
     let riderUid = existingTask?.assignee || null;
     if (riderUid) {
@@ -1502,9 +1800,18 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     if (!orderSnap.exists) return { ok: false, error: 'not_found' };
     const order = orderSnap.data();
 
-    // Only allow edits before processing starts (placed, confirmed, in_transit_to_store, pickup_completed)
-    const editableStatuses = ['placed', 'confirmed', 'in_transit_to_store', 'pickup_completed'];
-    if (!editableStatuses.includes(order.status)) {
+    // Check if order is editable: allowed during pre-processing or actively in tagging stage
+    let procDocs = [];
+    if (order.status === 'processing') {
+      const procSnap = await db.collection('ops_process')
+        .where('orderId', '==', realOrderId)
+        .get();
+      if (!procSnap.empty) {
+        procDocs = procSnap.docs.map(d => d.data());
+      }
+    }
+
+    if (!isOrderEditable(order, procDocs)) {
       return { ok: false, error: 'order_already_processing' };
     }
 
@@ -1518,7 +1825,40 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       };
       await orderRef.update(updateData);
       // Also update the vendor mirror
-      await db.doc(`vendors/${vendorId}/orders/${orderId}`).set(updateData, { merge: true });
+      await db.doc(`vendors/${vendorId}/orders/${realOrderId}`).set(updateData, { merge: true });
+
+      // Update rider task mirror if it exists
+      try {
+        const taskRef = db.doc(`ops_tasks/${realOrderId}`);
+        const tSnap = await taskRef.get();
+        if (tSnap.exists) {
+          await taskRef.set({
+            items,
+            totalAmount: updateData.totalAmount,
+            billDetails: updateData.billDetails,
+            updatedAt: updateData.updatedAt,
+          }, { merge: true });
+        }
+      } catch (taskErr) {
+        console.warn('Failed to mirror editOrder to ops_tasks', taskErr);
+      }
+
+      // Update ops_queue mirror if it exists
+      try {
+        const queueRef = db.doc(`ops_queue/${realOrderId}`);
+        const qSnap = await queueRef.get();
+        if (qSnap.exists) {
+          await queueRef.set({
+            items,
+            totalAmount: updateData.totalAmount,
+            billDetails: updateData.billDetails,
+            updatedAt: updateData.updatedAt,
+          }, { merge: true });
+        }
+      } catch (queueErr) {
+        console.warn('Failed to mirror editOrder to ops_queue', queueErr);
+      }
+
       return { ok: true };
     } catch (err) {
       console.error('opsProcessing editOrder failed', err);
@@ -2278,10 +2618,18 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
       });
 
-      // After tagging is done, orders come to pending first.
-      // If a washer slot is available, drainWaitingOpsQueues will dispatch the oldest queued order.
+      // Immediately auto-assign next stage (e.g. getting_ironed or getting_washed)
+      if (result && result.ok && result.status && result.status !== 'done') {
+        try {
+          await autoAssignStage(processRef.id, result.status, { previousAssignee: auth.uid });
+        } catch (autoErr) {
+          console.error(`[submitTagging] autoAssignStage failed:`, autoErr);
+        }
+      }
+
+      // Drain queued orders across all operational stages
       try {
-        await drainWaitingOpsQueues(['getting_washed', 'tagging', 'packaging']);
+        await drainWaitingOpsQueues();
       } catch (drainErr) {
         console.error(`[submitTagging] drainWaitingOpsQueues failed:`, drainErr);
       }

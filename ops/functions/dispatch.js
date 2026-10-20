@@ -629,9 +629,197 @@ function isDeliveryDueToday(deliveryDate, todayStr = getTodayDateString()) {
   return clean <= todayStr;
 }
 
+/**
+ * Parse the starting time of a time slot string into minutes from midnight (0 - 1439).
+ * Supports:
+ * - "20:00 - 21:00" -> 1200
+ * - "08:00 - 09:00" -> 480
+ * - "8:00 PM - 9:00 PM" -> 1200
+ * - "8:00 AM - 9:00 AM" -> 480
+ * - "8:00 - 9:00 PM" -> 1200
+ * - "12:00 PM - 1:00 PM" -> 720
+ * - "12:00 AM" -> 0
+ * @param {string|null|undefined} slotText
+ * @returns {number|null} minutes from midnight, or null if unparseable
+ */
+function parseSlotStartMinutes(slotText) {
+  if (!slotText || typeof slotText !== 'string') return null;
+  const lower = slotText.toLowerCase().trim();
+  if (!lower || lower.includes('instant') || lower.includes('immediate') || lower === 'anytime') {
+    return 0;
+  }
+
+  // Extract the start portion (before dash, en-dash, or 'to')
+  const parts = lower.split(/[-–—]| to /);
+  const startPart = parts[0].trim();
+
+  // Check if meridiem (am/pm) exists in the end part if not in startPart (e.g. "8 - 9 pm" or "8:00 - 9:00 pm")
+  let assumedMeridiem = null;
+  if (!startPart.includes('am') && !startPart.includes('pm')) {
+    const endPart = parts[1] || '';
+    if (endPart.includes('pm')) assumedMeridiem = 'pm';
+    else if (endPart.includes('am')) assumedMeridiem = 'am';
+  }
+
+  // Match hour and optional minute and optional am/pm
+  const match = startPart.match(/(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (!match) return null;
+
+  let hour = parseInt(match[1], 10);
+  const minute = match[2] ? parseInt(match[2], 10) : 0;
+  const meridiem = match[3] || assumedMeridiem;
+
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  return hour * 60 + minute;
+}
+
+/**
+ * Determine if a pickup or delivery task is due for rider dispatch.
+ * 
+ * Rules:
+ * 1. Instant orders (isInstant: true or type === 'instant') are ALWAYS due immediately.
+ * 2. If no scheduled date is specified, it's due immediately.
+ * 3. Overdue dates (date < todayStr): ALWAYS due immediately.
+ * 4. Future dates (date > todayStr, e.g. tomorrow): NOT due yet.
+ * 5. Today (date === todayStr):
+ *    - If no time slot or 'Anytime': due immediately.
+ *    - If time slot specified (e.g. 20:00 - 21:00):
+ *      Calculates difference between slot start time and current IST time.
+ *      If (slotStartMinutes - currentMinutesIST) <= leadTimeMinutes, it is DUE!
+ *      Otherwise it is NOT due yet (held for later dispatch).
+ *
+ * @param {object|null|undefined} slotObj - e.g. { scheduledDate, scheduledTime, isInstant, type } or { deliveryDate, deliveryTime }
+ * @param {number} [leadTimeMinutes=75] - advance dispatch window (default 75 mins, i.e. 1h 15m)
+ * @param {object} [options] - for testing / deterministic time
+ * @param {string} [options.todayStr]
+ * @param {number} [options.currentMinutesIST]
+ * @returns {boolean}
+ */
+function isSlotDueForDispatch(slotObj, leadTimeMinutes = 75, options = {}) {
+  if (!slotObj) return true; // fallback: unslotted orders dispatch immediately
+
+  // 1. Instant pickups always due
+  if (slotObj.isInstant === true || slotObj.type === 'instant') {
+    return true;
+  }
+
+  // Extract scheduled date
+  const dateStr = (slotObj.scheduledDate || slotObj.deliveryDate || '').trim();
+  if (!dateStr) return true; // no date specified -> dispatch immediately
+
+  // IST Reference Date
+  const todayStr = options.todayStr || getTodayDateString();
+
+  // 2. Overdue from a previous day
+  if (dateStr < todayStr) return true;
+
+  // 3. Scheduled for tomorrow or later
+  if (dateStr > todayStr) return false;
+
+  // 4. Scheduled for today: check time slot
+  const timeStr = slotObj.scheduledTime || slotObj.deliveryTime || slotObj.deliverySlot || slotObj.time || '';
+  if (!timeStr || typeof timeStr !== 'string' || !timeStr.trim() || timeStr.toLowerCase() === 'anytime') {
+    return true; // no specific slot constraint for today
+  }
+
+  const slotStartMinutes = parseSlotStartMinutes(timeStr);
+  if (slotStartMinutes === null) {
+    return true; // if slot cannot be parsed, fail open so order isn't stuck
+  }
+
+  // Get current IST time in minutes from midnight
+  let currentMinutesIST;
+  if (typeof options.currentMinutesIST === 'number') {
+    currentMinutesIST = options.currentMinutesIST;
+  } else {
+    const istDate = new Date(Date.now() + (5.5 * 3600 * 1000));
+    currentMinutesIST = istDate.getUTCHours() * 60 + istDate.getUTCMinutes();
+  }
+
+  const diffMinutes = slotStartMinutes - currentMinutesIST;
+
+  // If slot start is within leadTimeMinutes (or already started/past), dispatch now!
+  return diffMinutes <= leadTimeMinutes;
+}
+
+/**
+ * Determine if an order is in an editable state (pre-processing or active tagging stage).
+ * @param {object} order
+ * @param {Array<object>} [processes]
+ * @returns {boolean}
+ */
+function isOrderEditable(order, processes = []) {
+  if (!order || !order.status) return false;
+  const preProcessingStatuses = ['placed', 'confirmed', 'in_transit_to_store', 'pickup_completed'];
+  if (preProcessingStatuses.includes(order.status)) return true;
+
+  if (order.status === 'processing') {
+    if (order.processingStep === 'tagging') return true;
+    if (Array.isArray(processes) && processes.length > 0) {
+      return processes.some(p => p.status === 'tagging' || !p.stages?.tagging?.completedAt);
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Determines whether a 5-minute unstarted machine nudge notification is due for a stage.
+ * Checks whether helper accepted the stage >= 5 minutes ago and has not yet started the machine.
+ * Respects snooze and server push suppression windows (5 minutes).
+ * @param {object} stageData - e.g. stages.getting_washed or stages.getting_dried
+ * @param {'getting_washed' | 'getting_dried'} step
+ * @param {number} nowMs - current timestamp in ms
+ * @returns {boolean}
+ */
+function isMachineNudgeDue(stageData, step, nowMs = Date.now()) {
+  if (!stageData || !stageData.assignee) return false;
+  if (step !== 'getting_washed' && step !== 'getting_dried') return false;
+  // If machine was already started or completed, no nudge
+  if (stageData.startedAt || stageData.completedAt) return false;
+
+  const acceptedMs = stageData.acceptedAt
+    ? (typeof stageData.acceptedAt.toMillis === 'function'
+      ? stageData.acceptedAt.toMillis()
+      : (typeof stageData.acceptedAt === 'number' ? stageData.acceptedAt : new Date(stageData.acceptedAt).getTime()))
+    : 0;
+  if (!acceptedMs) return false;
+
+  const DELAY_MS = 5 * 60 * 1000; // 5 minutes grace window
+  const REPEAT_MS = 5 * 60 * 1000; // 5 minutes snooze / repeat interval
+
+  // Check last snooze timestamp
+  const lastSnoozeMs = stageData.nudge?.accepted?.lastSnoozedAt
+    ? (typeof stageData.nudge.accepted.lastSnoozedAt.toMillis === 'function'
+      ? stageData.nudge.accepted.lastSnoozedAt.toMillis()
+      : (typeof stageData.nudge.accepted.lastSnoozedAt === 'number' ? stageData.nudge.accepted.lastSnoozedAt : new Date(stageData.nudge.accepted.lastSnoozedAt).getTime()))
+    : 0;
+
+  // Check last sent timestamp (suppression window to avoid spamming every minute)
+  const lastSentMs = stageData.nudge?.accepted?.lastSentAt
+    ? (typeof stageData.nudge.accepted.lastSentAt.toMillis === 'function'
+      ? stageData.nudge.accepted.lastSentAt.toMillis()
+      : (typeof stageData.nudge.accepted.lastSentAt === 'number' ? stageData.nudge.accepted.lastSentAt : new Date(stageData.nudge.accepted.lastSentAt).getTime()))
+    : 0;
+
+  const effectiveWindowMs = Math.max(lastSnoozeMs, lastSentMs);
+
+  if (effectiveWindowMs > 0) {
+    return nowMs >= effectiveWindowMs + REPEAT_MS;
+  }
+
+  return nowMs >= acceptedMs + DELAY_MS;
+}
+
 module.exports = {
+  isMachineNudgeDue,
   getTodayDateString,
   isDeliveryDueToday,
+  parseSlotStartMinutes,
+  isSlotDueForDispatch,
+  isOrderEditable,
   checkPaymentGate,
   pickRider,
   normalizePhone,
@@ -659,4 +847,5 @@ module.exports = {
   allocateMachineName,
   selectHelperForStage,
 };
+
 

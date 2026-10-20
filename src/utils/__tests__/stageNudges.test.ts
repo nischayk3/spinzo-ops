@@ -33,7 +33,7 @@ describe('stageNudges', () => {
     const nudge = getProcessNudge(process, UID, baseTime + 5 * 60 * 1000);
     expect(nudge).not.toBeNull();
     expect(nudge?.phase).toBe('accepted');
-    expect(nudge?.snoozeLabel).toBe('Still loading (+5m)');
+    expect(nudge?.snoozeLabel).toBe('Still Pre-staining (+5m)');
     expect(nudge?.actionLabel).toBe('Start Washing');
   });
 
@@ -57,7 +57,7 @@ describe('stageNudges', () => {
     // 5 minutes after snooze: fires again!
     const nudge = getProcessNudge(process, UID, snoozedAt + 5 * 60 * 1000);
     expect(nudge).not.toBeNull();
-    expect(nudge?.snoozeLabel).toBe('Still loading (+5m)');
+    expect(nudge?.snoozeLabel).toBe('Still Pre-staining (+5m)');
   });
 
   it('triggers wash started nudge after 37 minutes and allows 5-min snooze', () => {
@@ -89,7 +89,7 @@ describe('stageNudges', () => {
     // Dry accept: fires after 5m
     expect(getProcessNudge(dryProcess, UID, baseTime + 4 * 60 * 1000)).toBeNull();
     const dryAcceptNudge = getProcessNudge(dryProcess, UID, baseTime + 5 * 60 * 1000);
-    expect(dryAcceptNudge?.snoozeLabel).toBe('Still loading (+5m)');
+    expect(dryAcceptNudge?.snoozeLabel).toBe('Still transferring (+5m)');
     expect(dryAcceptNudge?.actionLabel).toBe('Start Drying');
 
     // Dry start: fires after 46m

@@ -18,8 +18,8 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
     initialDelayMs: 5 * 60 * 1000, // 5 minutes grace window to walk over and start
     repeatIntervalMs: 5 * 60 * 1000, // 5 minutes repeating loop (no 2m spam)
     title: 'Washing Status Check',
-    message: 'It has been 5+ minutes since this wash task was assigned. Please load the machine and tap Start Washing.',
-    snoozeLabel: 'Still loading (+5m)',
+    message: 'It has been 5+ minutes since this wash task was assigned. Are you still doing pre-stain treatment, or ready to load and start the washer?',
+    snoozeLabel: 'Still Pre-staining (+5m)',
     actionLabel: 'Start Washing',
   },
   getting_washed_started: {
@@ -38,8 +38,8 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
     initialDelayMs: 5 * 60 * 1000,  // 5 minutes grace window
     repeatIntervalMs: 5 * 60 * 1000, // 5 minutes repeating loop (no 2m spam)
     title: 'Drying Status Check',
-    message: 'It has been 5+ minutes since this drying task was assigned. Please transfer clothes and tap Start Drying.',
-    snoozeLabel: 'Still loading (+5m)',
+    message: 'It has been 5+ minutes since this drying task was assigned. Are you still transferring/sorting clothes, or ready to start the dryer?',
+    snoozeLabel: 'Still transferring (+5m)',
     actionLabel: 'Start Drying',
   },
   getting_dried_started: {
@@ -162,7 +162,7 @@ export function getProcessNudge(
     if (isDue) {
       const helperTag = (isSupervisor && stage.assignee !== uid && stage.assigneeName) ? ` (${stage.assigneeName})` : '';
       const customMsg = (isSupervisor && stage.assignee !== uid && stage.assigneeName)
-        ? `It has been 5+ minutes since ${stage.assigneeName} was assigned this task. Did they start the machine?`
+        ? `It has been 5+ minutes since ${stage.assigneeName} was assigned this ${cur === 'getting_washed' ? 'washing' : 'drying'} task. Are they still doing pre-stain / sorting, or ready to start the machine?`
         : rule.message;
 
       return {

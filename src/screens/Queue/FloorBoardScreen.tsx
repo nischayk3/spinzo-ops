@@ -3,7 +3,7 @@ import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, L
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag, Zap, Clock, Calendar, CheckCircle2 } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch } from '../../utils/orderFeed';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders } from '../../utils/orderFeed';
 import { stepLabel } from '../../utils/opsProcess';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
@@ -66,9 +66,9 @@ export function FloorBoardScreen() {
     } else if (activeTab === 'Processing') {
       result = result.filter(o => String(o.status).toLowerCase() === 'processing');
     } else if (activeTab === 'Ready') {
-      result = result.filter(o => String(o.status).toLowerCase() === 'ready');
+      result = sortReadyOrders(result.filter(o => String(o.status).toLowerCase() === 'ready'));
     } else if (activeTab === 'Out for Delivery') {
-      result = result.filter(o => String(o.status).toLowerCase() === 'out_for_delivery');
+      result = sortReadyOrders(result.filter(o => String(o.status).toLowerCase() === 'out_for_delivery'));
     } else if (activeTab === 'Delivered') {
       result = result.filter(o => String(o.status).toLowerCase() === 'delivered');
     } else if (activeTab === 'Cancelled') {
@@ -268,21 +268,30 @@ export function FloorBoardScreen() {
                     </View>
                   )}
 
-                  {(item.status === 'ready' || item.status === 'out_for_delivery') && item.deliveryDate && (
-                    <View className="items-end">
-                      <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Delivery Target</Text>
-                      <Text className="text-green-700 font-bold text-xs mt-0.5">
-                        {item.deliveryDate} {item.deliveryTime || ''}
-                      </Text>
-                    </View>
+                  {(item.status === 'ready' || item.status === 'out_for_delivery') && (
+                    item.deliveryDate ? (
+                      <View className="items-end">
+                        <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Delivery Target</Text>
+                        <Text className="text-green-700 font-bold text-xs mt-0.5">
+                          {item.deliveryDate} {item.deliveryTime || ''}
+                        </Text>
+                      </View>
+                    ) : (
+                      <View className="items-end">
+                        <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Delivery Target</Text>
+                        <Text className="text-amber-600 font-bold text-xs mt-0.5">
+                          Awaiting Slot
+                        </Text>
+                      </View>
+                    )
                   )}
                 </View>
 
                 {/* Pickup / Staff Footer */}
-                {item.pickupNote ? (
-                  <View className="bg-amber-50 border border-amber-200 rounded-lg p-2 mt-1">
+                {(item.pickupNote || (item as any).opsMeta?.pickupNote) ? (
+                  <View className="bg-amber-50 border border-amber-300 rounded-xl p-2 mt-1.5">
                     <Text className="text-amber-800 text-xs">
-                      <Text className="font-bold">Pickup Note: </Text>{item.pickupNote}
+                      <Text className="font-bold">📝 Note: </Text>{item.pickupNote || (item as any).opsMeta?.pickupNote}
                     </Text>
                   </View>
                 ) : null}

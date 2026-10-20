@@ -164,18 +164,18 @@ export function DeliveriesScreen() {
   }
 
   return (
-    <SafeAreaView className="flex-1 bg-bgDark">
+    <SafeAreaView className="flex-1 bg-slate-100">
       {/* Header */}
-      <View className="px-4 pt-4 pb-2.5 flex-row items-center justify-between">
+      <View className="px-4 pt-3 pb-2 flex-row items-center justify-between">
         <View>
-          <Text className="text-2xl font-black text-slate-950 tracking-tight">Deliveries</Text>
-          <Text className="text-slate-600 text-xs font-bold mt-0.5">
-            {activeDeliveries.length} active delivery tasks • SpinZo BTM Hub
+          <Text className="text-xl font-black text-slate-950 tracking-tight">Deliveries</Text>
+          <Text className="text-slate-500 text-[11px] font-bold mt-0.5">
+            {activeDeliveries.length} active delivery task{activeDeliveries.length === 1 ? '' : 's'} • SpinZo BTM Hub
           </Text>
         </View>
-        <View className="bg-emerald-100 border border-emerald-400 px-3 py-1 rounded-full flex-row items-center">
-          <View className="w-2 h-2 rounded-full bg-emerald-600 mr-1.5" />
-          <Text className="text-emerald-950 text-xs font-black">ON DUTY</Text>
+        <View className="bg-emerald-100 border border-emerald-300 px-2.5 py-0.5 rounded-full flex-row items-center">
+          <View className="w-1.5 h-1.5 rounded-full bg-emerald-600 mr-1.5" />
+          <Text className="text-emerald-950 text-[11px] font-black">ON DUTY</Text>
         </View>
       </View>
 
@@ -199,27 +199,23 @@ export function DeliveriesScreen() {
         }}
       />
 
+      {/* Pending Pickups Quick Switcher (Sleek notification strip) */}
       {livePickupsCount > 0 ? (
         <TouchableOpacity
-          activeOpacity={0.85}
+          activeOpacity={0.8}
           onPress={() => navigation.navigate('Pickups')}
-          className="mx-4 mb-3.5 px-4 py-3 bg-purple-600 rounded-2xl flex-row items-center justify-between shadow-md shadow-purple-500/25"
+          className="mx-4 mb-2 px-3 py-1.5 bg-purple-50 border border-purple-200 rounded-xl flex-row items-center justify-between active:bg-purple-100"
         >
           <View className="flex-row items-center flex-1 mr-2">
-            <View className="w-8 h-8 rounded-xl bg-white/20 items-center justify-center mr-2.5">
-              <Bike size={16} color="#FFFFFF" />
+            <View className="w-6 h-6 rounded-lg bg-purple-600 items-center justify-center mr-2">
+              <Bike size={13} color="#FFFFFF" />
             </View>
-            <View>
-              <Text className="text-white font-black text-xs uppercase tracking-wide">
-                {livePickupsCount} Pending Pickup{livePickupsCount > 1 ? 's' : ''}
-              </Text>
-              <Text className="text-purple-100 text-[11px] font-bold">
-                Assigned on your current route
-              </Text>
-            </View>
+            <Text className="text-purple-950 font-black text-xs">
+              {livePickupsCount} Pending Pickup{livePickupsCount > 1 ? 's' : ''} assigned on circuit
+            </Text>
           </View>
-          <View className="flex-row items-center bg-white px-3 py-1.5 rounded-xl shadow-xs">
-            <Text className="text-purple-700 font-black text-xs mr-1">Switch</Text>
+          <View className="flex-row items-center">
+            <Text className="text-purple-700 font-black text-xs mr-0.5">Switch</Text>
             <ChevronRight size={13} color="#7C3AED" />
           </View>
         </TouchableOpacity>
@@ -230,7 +226,7 @@ export function DeliveriesScreen() {
         keyExtractor={() => 'list'}
         renderItem={() => null}
         className="flex-1 px-4"
-        contentContainerStyle={{ paddingBottom: 24 }}
+        contentContainerStyle={{ paddingBottom: 28 }}
         ListEmptyComponent={
           <View className="items-center justify-center mt-20">
             <Package size={36} color="#64748B" />
@@ -246,60 +242,48 @@ export function DeliveriesScreen() {
               const stop = stopMap.get(t.orderId || t.id);
               const rawAddr = t.deliveryAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined));
               const locality = stop?.locality || extractLocality(rawAddr);
+              const total = order ? orderTotal(order) : (t.totalAmount || 0);
+              const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
+              const isCredit = order?.paymentMode === "credit";
+              const unpaidAmt = total > 0 && !isPaid && !isCredit ? total : undefined;
 
               return (
-                <View key={t.id}>
-                  {overdue ? (
-                    <View className="bg-red-500/15 border border-red-500/40 rounded-lg px-3 py-1.5 mb-2 items-center">
-                      <Text className="text-red-400 text-xs font-bold">OVERDUE — pending delivery</Text>
-                    </View>
-                  ) : null}
-                  {(() => {
-                    const total = order ? orderTotal(order) : (t.totalAmount || 0);
-                    const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
-                    const isCredit = order?.paymentMode === "credit";
-                    if (total > 0 && !isPaid && !isCredit) {
-                      return (
-                        <View className="bg-amber-500/15 border border-amber-500/40 rounded-lg px-3 py-1.5 mb-2 flex-row items-center justify-between">
-                          <Text className="text-amber-400 text-xs font-bold">⚠️ UNPAID: ₹{total}</Text>
-                          <Text className="text-amber-300 text-xs">Customer must pay in app</Text>
-                        </View>
-                      );
+                <RiderTaskCard
+                  key={t.id}
+                  type="delivery"
+                  orderNumber={safeShortId(t.orderId)}
+                  customerName={t.customerName || order?.customerName}
+                  customerPhone={t.customerPhone || order?.customerPhone}
+                  status={t.status}
+                  createdAt={t.createdAt || order?.createdAt}
+                  items={order?.items || t.items}
+                  totalAmount={order ? orderTotal(order) : t.totalAmount}
+                  paymentStatus={order?.paymentStatus}
+                  deliveryAddress={t.deliveryAddress}
+                  deliveryDate={t.deliveryDate}
+                  deliveryTime={t.deliveryTime}
+                  notes={order?.notes}
+                  tokenNumber={t.tokenNumber || order?.tokenNumber}
+                  tokens={t.tokens || order?.tokens}
+                  lat={order?.latitude}
+                  lng={order?.longitude}
+                  bundleCount={t.bundleCount}
+                  stopNumber={stop?.stopNumber}
+                  locality={locality}
+                  loadUnits={stop?.loadUnits}
+                  isUrgent={Boolean(order?.isUrgent || (t as any).isUrgent)}
+                  pickupNote={order?.pickupNote || (t as any).pickupNote}
+                  isOverdue={Boolean(overdue)}
+                  unpaidAmount={unpaidAmt}
+                  onPrimary={() => {
+                    if (t.status === "assigned") {
+                      setShowPickupScanner(t.id);
+                    } else {
+                      setActiveTaskId(t.id);
                     }
-                    return null;
-                  })()}
-                  <RiderTaskCard
-                    type="delivery"
-                    orderNumber={safeShortId(t.orderId)}
-                    customerName={t.customerName || order?.customerName}
-                    customerPhone={t.customerPhone || order?.customerPhone}
-                    status={t.status}
-                    createdAt={t.createdAt || order?.createdAt}
-                    items={order?.items || t.items}
-                    totalAmount={order ? orderTotal(order) : t.totalAmount}
-                    paymentStatus={order?.paymentStatus}
-                    deliveryAddress={t.deliveryAddress}
-                    deliveryDate={t.deliveryDate}
-                    deliveryTime={t.deliveryTime}
-                    notes={order?.notes}
-                    tokenNumber={t.tokenNumber || order?.tokenNumber}
-                    tokens={t.tokens || order?.tokens}
-                    lat={order?.latitude}
-                    lng={order?.longitude}
-                    bundleCount={t.bundleCount}
-                    stopNumber={stop?.stopNumber}
-                    locality={locality}
-                    loadUnits={stop?.loadUnits}
-                    onPrimary={() => {
-                      if (t.status === "assigned") {
-                        setShowPickupScanner(t.id);
-                      } else {
-                        setActiveTaskId(t.id);
-                      }
-                    }}
-                    primaryLabel={t.status === 'assigned' ? '🏬 Scan Store Handover' : '🔐 Verify Delivery OTP (4-Digit)'}
-                  />
-                </View>
+                  }}
+                  primaryLabel={t.status === 'assigned' ? '🏬 Scan Store Handover' : '🔐 Verify Delivery OTP (4-Digit)'}
+                />
               );
             })}
           </>

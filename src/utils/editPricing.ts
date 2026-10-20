@@ -11,6 +11,9 @@ export interface EditLineItem {
   ironingCount?: number;
   clothesCount?: number;
   quantity?: number;
+  mediumCount?: number;
+  heavyCount?: number;
+  ironingPrice?: number;
   unit?: string;
   isCreditItem?: boolean;
   singleBlanketCount?: number;
@@ -22,6 +25,30 @@ export interface EditLineItem {
   deliveryFee?: number;
   totalPrice?: number;
   [key: string]: any;
+}
+
+export const IRONING_RATES = {
+  light: 10,
+  medium: 30,
+  heavy: 50,
+} as const;
+
+export interface IroningTierCounts {
+  ironingCount?: number;
+  clothesCount?: number;
+  quantity?: number;
+  mediumCount?: number;
+  heavyCount?: number;
+  [key: string]: any;
+}
+
+export function getIroningBreakdown(item: IroningTierCounts) {
+  const total = item.ironingCount || item.clothesCount || item.quantity || 0;
+  const medium = Math.max(0, Math.min(item.mediumCount || 0, total));
+  const heavy = Math.max(0, Math.min(item.heavyCount || 0, Math.max(0, total - medium)));
+  const light = Math.max(0, total - medium - heavy);
+  const amount = (light * IRONING_RATES.light) + (medium * IRONING_RATES.medium) + (heavy * IRONING_RATES.heavy);
+  return { light, medium, heavy, total, amount };
 }
 
 export const SHOE_EDIT_CATEGORIES = [
@@ -48,8 +75,7 @@ export const calculateItemPrice = (item: EditLineItem): number => {
   }
 
   if (sid === 'ironing') {
-    const count = item.ironingCount || item.clothesCount || 0;
-    return count * 10;
+    return getIroningBreakdown(item).amount;
   }
 
   if (sid === 'ironing_addon' || (item.serviceName || '').toLowerCase().includes('ironing')) {

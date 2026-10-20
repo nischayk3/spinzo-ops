@@ -3,7 +3,7 @@ import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Linking } 
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Inbox, Clock, Phone, MapPin, ChevronDown, User, AlertTriangle, Zap, Tag, Shirt } from 'lucide-react-native';
+import { Inbox, Clock, Phone, MapPin, ChevronDown, User, AlertTriangle, Zap, Tag, Shirt, Check, CheckCircle2, Wind } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
@@ -322,16 +322,27 @@ function SupervisorFeed() {
       return null;
     })();
 
+    const accentBorderClass = isCycleDone
+      ? 'border-l-4 border-l-emerald-500'
+      : (isMachine && curStage?.startedAt)
+      ? 'border-l-4 border-l-[#994bff]'
+      : cur === 'tagging'
+      ? 'border-l-4 border-l-blue-500'
+      : cur === 'getting_ironed'
+      ? 'border-l-4 border-l-amber-500'
+      : 'border-l-4 border-l-gray-200';
+
     return (
       <TouchableOpacity
         key={item.key}
         onPress={() => handleItemPress(item)}
-        className="bg-bgSurface rounded-3xl p-5 mb-3 border border-bgSurfaceLight active:opacity-90 shadow-xs"
+        className={`bg-white rounded-2xl p-4 mb-3 border border-gray-100 ${accentBorderClass} shadow-xs active:opacity-90`}
       >
-        <View className="flex-row justify-between mb-2">
+        {/* Top Header Row: Order ID, Tokens, Urgency & Status Badge */}
+        <View className="flex-row items-center justify-between mb-2">
           <View className="flex-1 mr-2">
-            <View className="flex-row items-center flex-wrap gap-y-1 gap-x-2 mb-1">
-              <Text className="text-gray-900 font-bold text-lg shrink-1" numberOfLines={1}>
+            <View className="flex-row items-center flex-wrap gap-y-1 gap-x-1.5 mb-1">
+              <Text className="text-gray-900 font-extrabold text-base shrink-1" numberOfLines={1}>
                 #{order?.shortId?.toUpperCase() || item.orderId.substring(0,6).toUpperCase()}{p && p.siblingCount && p.siblingCount > 1 ? `-${p.serviceType?.toUpperCase().substring(0,2)}` : ''}
               </Text>
               {isUrgent && (
@@ -341,47 +352,53 @@ function SupervisorFeed() {
                 </View>
               )}
               {!!p?.serviceLabel && (
-                <View className="bg-blue-100 px-2 py-0.5 rounded border border-blue-200">
-                  <Text className="text-blue-800 font-bold text-xs">{p.serviceLabel}</Text>
+                <View className="bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                  <Text className="text-blue-700 font-bold text-xs">{p.serviceLabel}</Text>
                 </View>
               )}
               {(() => {
                 const sToken = p?.tokenNumber || (p?.serviceType && order?.tokens?.[p.serviceType]) || order?.tokenNumber;
                 if (!sToken) return null;
                 return (
-                  <View className="bg-amber-500/15 px-2 py-0.5 rounded border border-amber-500/30">
-                    <Text className="text-warning font-bold text-xs">T-{sToken}</Text>
+                  <View className="bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                    <Text className="text-amber-800 font-bold text-xs">T-{sToken}</Text>
                   </View>
                 );
               })()}
               {!!stationLabel && (
-                <View className="bg-purple-100 px-2 py-0.5 rounded border border-purple-200">
-                  <Text className="text-purple-800 font-bold text-xs">{stationLabel}</Text>
+                <View className="bg-purple-50 px-2 py-0.5 rounded border border-purple-200">
+                  <Text className="text-[#994bff] font-bold text-xs">{stationLabel}</Text>
                 </View>
               )}
             </View>
             {p && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
           </View>
           <View className="items-end justify-start shrink-0">
-            <View className={`px-2 py-1 rounded-md ${
-              done ? 'bg-green-500/15' :
-              isCycleDone ? 'bg-emerald-500/20 border border-emerald-500/40' :
-              (isMachine && !curStage?.startedAt) ? 'bg-slate-100 border border-slate-200' :
-              'bg-primary/10'
-            }`}>
-              <Text className={`text-xs font-bold ${
-                done ? 'text-green-700' :
-                isCycleDone ? 'text-emerald-700' :
-                (isMachine && !curStage?.startedAt) ? 'text-slate-600' :
-                'text-primary'
-              }`}>{badge}</Text>
-            </View>
+            {isCycleDone ? (
+              <View className="bg-emerald-500 px-2.5 py-1 rounded-full flex-row items-center gap-1 shadow-xs">
+                <Check size={11} color="#ffffff" />
+                <Text className="text-white font-extrabold text-xs uppercase tracking-wider">Ready to Unload</Text>
+              </View>
+            ) : done ? (
+              <View className="bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
+                <Text className="text-emerald-700 font-bold text-xs">Complete</Text>
+              </View>
+            ) : (isMachine && !curStage?.startedAt) ? (
+              <View className="bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-full">
+                <Text className="text-slate-600 font-bold text-xs">Queued</Text>
+              </View>
+            ) : (
+              <View className="bg-[#994bff]/10 border border-[#994bff]/20 px-2.5 py-1 rounded-full">
+                <Text className="text-[#994bff] font-bold text-xs">{badge}</Text>
+              </View>
+            )}
           </View>
         </View>
 
-        <View className="flex-row items-center justify-between mb-3 border-b border-bgSurfaceLight pb-3">
-          <View className="flex-1">
-            <Text className="text-textPrimary font-medium text-base mb-1">{order?.customerName || 'Unknown Customer'}</Text>
+        {/* Customer & Staff / Machine Meta */}
+        <View className="flex-row items-start justify-between mb-2.5 border-b border-gray-100 pb-2.5">
+          <View className="flex-1 mr-2">
+            <Text className="text-gray-900 font-bold text-base mb-0.5">{order?.customerName || 'Unknown Customer'}</Text>
             {!!order?.customerPhone && (
               <TouchableOpacity
                 onPress={(e) => {
@@ -389,27 +406,32 @@ function SupervisorFeed() {
                   Linking.openURL(`tel:${order.customerPhone}`);
                 }}
                 className="flex-row items-center self-start py-0.5"
-                style={{ alignSelf: 'flex-start' }}
                 hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
               >
-                <Phone size={12} color="#94A3B8" className="mr-1" />
-                <Text className="text-textSecondary text-xs">{order.customerPhone}</Text>
+                <Phone size={12} color="#64748B" className="mr-1" />
+                <Text className="text-gray-500 text-xs">{order.customerPhone}</Text>
               </TouchableOpacity>
             )}
-            <View className="flex-row items-center mt-1 flex-wrap gap-y-1">
-              {qty > 0 && <Text className="text-textSecondary text-xs mr-2">{qty} units (kgs/pcs)</Text>}
-              {!!p?.garments?.count && <Text className="text-primary font-bold text-xs bg-primary/10 px-1.5 py-0.5 rounded mr-2">{p.garments.count} garments</Text>}
+            <View className="flex-row items-center mt-1 flex-wrap gap-1.5">
+              {!!p?.garments?.count && (
+                <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-md flex-row items-center">
+                  <Shirt size={11} color="#994bff" className="mr-1" />
+                  <Text className="text-[#994bff] font-bold text-xs">{p.garments.count} garments</Text>
+                </View>
+              )}
+              {qty > 0 && !p?.garments?.count && (
+                <Text className="text-gray-500 text-xs bg-gray-100 px-1.5 py-0.5 rounded font-medium">{qty} units</Text>
+              )}
               {!!pickupTimeStr && (
-                <View className="flex-row items-center mr-2 bg-gray-100 px-1.5 py-0.5 rounded">
+                <View className="flex-row items-center bg-gray-100 px-2 py-0.5 rounded-md">
                   <Clock size={11} color="#64748B" className="mr-1" />
                   <Text className="text-gray-600 text-xs font-medium">{pickupTimeStr}</Text>
                 </View>
               )}
             </View>
 
-            {/* Assigned Helper Chip / Alert */}
-            {/* Assigned Helper Chip / Alert & Machine Chip */}
-            <View className="flex-row items-center flex-wrap">
+            {/* Assigned Helper Chip & Machine Chip */}
+            <View className="flex-row items-center flex-wrap gap-1.5 mt-2">
               {curStage?.assignee ? (
                 <TouchableOpacity
                   disabled={role !== 'supervisor' && role !== 'admin'}
@@ -425,7 +447,7 @@ function SupervisorFeed() {
                       });
                     }
                   }}
-                  className="flex-row items-center bg-[#994bff]/10 px-2.5 py-1 rounded-full self-start mt-2 border border-[#994bff]/25 active:opacity-70"
+                  className="flex-row items-center bg-[#994bff]/10 px-2.5 py-1 rounded-full border border-[#994bff]/25 active:opacity-70"
                 >
                   <User size={12} color="#994bff" className="mr-1.5" />
                   <Text className="text-[#994bff] font-bold text-xs">
@@ -446,7 +468,7 @@ function SupervisorFeed() {
                       userId: order?.userId || '',
                     });
                   }}
-                  className="flex-row items-center bg-slate-100 px-2.5 py-1 rounded-full self-start mt-2 border border-slate-200 active:opacity-70"
+                  className="flex-row items-center bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200 active:opacity-70"
                 >
                   <Clock size={12} color="#64748B" className="mr-1.5" />
                   <Text className="text-slate-600 font-bold text-xs">
@@ -466,7 +488,7 @@ function SupervisorFeed() {
                       userId: order?.userId || '',
                     });
                   }}
-                  className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full self-start mt-2 border border-purple-200 active:opacity-70"
+                  className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full border border-purple-200 active:opacity-70"
                 >
                   <AlertTriangle size={12} color="#994bff" className="mr-1.5" />
                   <Text className="text-[#994bff] font-bold text-xs">
@@ -475,7 +497,7 @@ function SupervisorFeed() {
                 </TouchableOpacity>
               )}
               {!!curStage?.machineName && (!isMachine || !!curStage?.startedAt) && (
-                <View className="flex-row items-center bg-teal-500/10 px-2.5 py-1 rounded-full self-start mt-2 ml-2 border border-teal-500/30">
+                <View className="flex-row items-center bg-teal-50 px-2.5 py-1 rounded-full border border-teal-200">
                   <Text className="text-teal-700 font-bold text-xs">
                     {curStage.machineName.includes('Washer') ? '🫧 ' : curStage.machineName.includes('Dryer') ? '💨 ' : '👔 '}
                     {curStage.machineName}
@@ -484,22 +506,32 @@ function SupervisorFeed() {
               )}
             </View>
           </View>
-          <View className="items-end">
-            <Text className="text-textPrimary font-medium">{p ? p.serviceLabel : (order ? serviceSummary(order) : '—')}</Text>
-            {!!order && orderTotal(order) > 0 && <Text className="text-textSecondary text-xs">₹{orderTotal(order)}</Text>}
+
+          <View className="items-end shrink-0">
+            <Text className="text-gray-900 font-extrabold text-base">₹{order ? orderTotal(order) : '—'}</Text>
+            <Text className="text-gray-400 text-xs">{p?.serviceLabel || (order ? serviceSummary(order) : '')}</Text>
           </View>
         </View>
 
+        {/* Footer: Target Slot, Pickup Notes, SLA & Live Clocks */}
         <View className="flex-row items-center justify-between">
           <View className="flex-1 mr-2">
             {(order?.deliverySlot || order?.deliveryDate) ? (
-              <View className="flex-row items-center mb-1.5 bg-blue-50/80 border border-blue-200/60 px-2 py-0.5 rounded-md self-start">
+              <View className="flex-row items-center mb-1 bg-blue-50/80 border border-blue-200/60 px-2 py-0.5 rounded-md self-start">
                 <MapPin size={11} color="#2563eb" className="mr-1" />
                 <Text className="text-blue-800 font-semibold text-xs">
                   Target: {order?.deliveryDate || ''} {order?.deliverySlot || order?.deliveryTime || ''}
                 </Text>
               </View>
             ) : null}
+
+            {Boolean((p as any)?.pickupNote || order?.pickupNote) && (
+              <View className="bg-amber-50 border border-amber-300 rounded-lg p-2 mb-1.5">
+                <Text className="text-amber-800 text-xs">
+                  <Text className="font-bold">📝 Note: </Text>{(p as any)?.pickupNote || order?.pickupNote}
+                </Text>
+              </View>
+            )}
             
             {/* Tagging SLA / Urgency */}
             {!p && order?.createdAt && <UrgencyCountdown createdAt={order.createdAt} />}
@@ -516,17 +548,27 @@ function SupervisorFeed() {
           </View>
           
           {/* Actions / Timers */}
-          {isMine && startMs > 0 && (
-            <View className="bg-primary/10 px-3 py-2 rounded-xl flex-row items-center gap-2">
-              <View className="w-2 h-2 rounded-full bg-error" />
+          {isCycleDone ? (
+            <TouchableOpacity
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                handleItemPress(item);
+              }}
+              className="bg-emerald-500 px-3.5 py-2 rounded-xl flex-row items-center gap-1.5 active:scale-95 shadow-sm"
+            >
+              <Check size={14} color="#ffffff" />
+              <Text className="text-white font-extrabold text-xs">Unload</Text>
+            </TouchableOpacity>
+          ) : isMine && startMs > 0 ? (
+            <View className="bg-[#994bff]/10 border border-[#994bff]/20 px-3 py-1.5 rounded-xl flex-row items-center gap-2">
+              <View className="w-2 h-2 rounded-full bg-red-500" />
               <LiveTimer startTimeMs={startMs} />
             </View>
-          )}
-          {!isMine && cur === 'tagging' && (
-             <View className="bg-primary px-4 py-2.5 rounded-xl">
+          ) : !isMine && cur === 'tagging' ? (
+             <View className="bg-[#994bff] px-4 py-2 rounded-xl">
                <Text className="text-white font-bold text-xs">Start Tagging</Text>
              </View>
-          )}
+          ) : null}
         </View>
       </TouchableOpacity>
     );
@@ -589,7 +631,7 @@ function SupervisorFeed() {
       </View>
 
       {/* List */}
-      <ScrollView className="flex-1 px-4 pt-4" contentContainerStyle={{ paddingBottom: 100 }}>
+      <ScrollView className="flex-1 px-4 pt-4" contentContainerStyle={{ paddingBottom: 170 }}>
         <View style={maxContainerStyle}>
           {myItems.length > 0 && (
             <View className="mb-5">

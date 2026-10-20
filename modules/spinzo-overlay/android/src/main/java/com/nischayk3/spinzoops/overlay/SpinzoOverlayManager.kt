@@ -30,18 +30,21 @@ object SpinzoOverlayManager {
     private var vibrator: Vibrator? = null
     private var pendingAcceptedOrderId: String? = null
     private var pendingIsDelivery: Boolean = false
+    private var pendingTaskType: String? = null
 
     fun getPendingAcceptedOrder(): Map<String, Any>? {
         val id = pendingAcceptedOrderId ?: return null
         return mapOf(
             "orderId" to id,
-            "isDelivery" to pendingIsDelivery
+            "isDelivery" to pendingIsDelivery,
+            "taskType" to (pendingTaskType ?: "")
         )
     }
 
     fun clearPendingAcceptedOrder() {
         pendingAcceptedOrderId = null
         pendingIsDelivery = false
+        pendingTaskType = null
     }
 
     fun showOverlay(context: Context, data: Map<String, String>) {
@@ -72,7 +75,8 @@ object SpinzoOverlayManager {
         val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
 
         if (isNudge) {
-            tvTitle.text = if (stepName.isNotEmpty()) "⏰ $stepName" else "⏰ Operations Check"
+            val titleText = data["customerName"] ?: data["title"]
+            tvTitle.text = if (!titleText.isNullOrEmpty()) "⏰ $titleText" else if (stepName.isNotEmpty()) "⏰ $stepName" else "⏰ Operations Check"
             tvSubtitle.text = "#$shortId • Status Check"
             btnAccept.text = "OPEN & RESPOND"
         } else if (isInstant) {
@@ -102,9 +106,10 @@ object SpinzoOverlayManager {
         }
 
         btnAccept.setOnClickListener {
-            Log.d("SpinzoOverlay", "User tapped ACCEPT ORDER on overlay for #$orderId")
+            Log.d("SpinzoOverlay", "User tapped ACCEPT/RESPOND on overlay for #$orderId")
             pendingAcceptedOrderId = orderId
             pendingIsDelivery = isDelivery
+            pendingTaskType = taskType
             dismissOverlay(context)
 
             val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {

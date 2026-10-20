@@ -58,12 +58,12 @@ export function SmartRouteSheet({
       {/* High-Contrast Mission Control Runner */}
       <Pressable
         onPress={() => setModalVisible(true)}
-        className="mb-3.5 mx-4 rounded-2xl bg-slate-900 border-2 border-slate-800 p-3.5 shadow-lg active:opacity-95 flex-row items-center justify-between"
+        className="mb-2 mx-4 rounded-xl bg-slate-900 border border-slate-800 px-3 py-2 shadow-sm active:opacity-90 flex-row items-center justify-between"
       >
-        <View className="flex-row items-center flex-1 mr-3">
+        <View className="flex-row items-center flex-1 mr-2">
           {/* Left Icon Badge */}
           <View
-            className={`w-11 h-11 rounded-xl items-center justify-center mr-3 shadow-sm ${
+            className={`w-7 h-7 rounded-lg items-center justify-center mr-2 shadow-xs ${
               currentStop.type === 'pickup'
                 ? 'bg-purple-600'
                 : currentStop.type === 'store_dropoff' || currentStop.type === 'store_pickup'
@@ -72,43 +72,43 @@ export function SmartRouteSheet({
             }`}
           >
             {currentStop.type === 'pickup' ? (
-              <Bike size={22} color="#FFFFFF" />
+              <Bike size={14} color="#FFFFFF" />
             ) : currentStop.type === 'store_dropoff' ? (
-              <Store size={22} color="#FFFFFF" />
+              <Store size={14} color="#FFFFFF" />
             ) : (
-              <Package size={22} color="#FFFFFF" />
+              <Package size={14} color="#FFFFFF" />
             )}
           </View>
 
           {/* Center Info */}
           <View className="flex-1">
-            <View className="flex-row items-center gap-1.5 flex-wrap mb-0.5">
-              <Text className="text-white font-black text-sm">
+            <View className="flex-row items-center gap-1.5 mb-0.5">
+              <Text className="text-white font-black text-xs" numberOfLines={1}>
                 STOP 1: {currentStop.customerName || `#${safeShortId(currentStop.orderId)}`}
               </Text>
               {currentStop.isInstant && (
-                <View className="bg-amber-400 px-1.5 py-0.5 rounded shadow-xs">
-                  <Text className="text-slate-950 text-[10px] font-black">⚡ INSTANT</Text>
+                <View className="bg-amber-400 px-1 py-0.2 rounded shadow-xs">
+                  <Text className="text-slate-950 text-[9px] font-black">⚡ INSTANT</Text>
                 </View>
               )}
-              <View className="bg-white px-1.5 py-0.5 rounded">
-                <Text className="text-slate-900 text-[10px] font-black uppercase">
+              <View className="bg-slate-800 border border-slate-700 px-1.5 py-0.2 rounded">
+                <Text className="text-slate-200 text-[9px] font-black uppercase">
                   {currentStop.locality}
                 </Text>
               </View>
             </View>
 
-            <Text className="text-slate-300 text-xs font-semibold" numberOfLines={1}>
-              {stops.length} Stops on Route
-              {nextStop ? ` • Stop 2: ${nextStop.customerName || `#${safeShortId(nextStop.orderId)}`} (${nextStop.locality})` : ''}
+            <Text className="text-slate-400 text-[11px] font-medium" numberOfLines={1}>
+              {stops.length} stop{stops.length > 1 ? 's' : ''} on route
+              {nextStop ? ` • Stop 2: ${nextStop.customerName || `#${safeShortId(nextStop.orderId)}`}` : ''}
             </Text>
           </View>
         </View>
 
         {/* Right Action Button */}
-        <View className="bg-purple-600 active:bg-purple-700 px-3 py-2 rounded-xl flex-row items-center shadow-md shadow-purple-500/40">
-          <Text className="text-white text-xs font-black mr-1">Run Sheet</Text>
-          <ChevronRight size={14} color="#FFFFFF" />
+        <View className="bg-purple-600 active:bg-purple-700 px-2.5 py-1.5 rounded-lg flex-row items-center shadow-xs">
+          <Text className="text-white text-[11px] font-black mr-0.5">Run Sheet</Text>
+          <ChevronRight size={12} color="#FFFFFF" />
         </View>
       </Pressable>
 
