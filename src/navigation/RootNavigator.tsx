@@ -26,6 +26,7 @@ import { stopAlarm } from '../utils/alerts';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
 import { HelperAssignmentModal } from '../components/HelperAssignmentModal';
 import { StageNudgeModal } from '../components/StageNudgeModal';
+import { WasherReminderModal } from '../components/WasherReminderModal';
 import { Home, ClipboardList, Settings, Bike, WashingMachine, Inbox, Package } from 'lucide-react-native';
 import { View, ActivityIndicator, Text, Platform, AppState } from 'react-native';
 import { SpinzoOverlay } from 'spinzo-overlay';
@@ -336,6 +337,7 @@ export function RootNavigator() {
       {isLoggedIn && effectiveRole === 'rider' && <GlobalAssignmentModal />}
       {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron') && <HelperAssignmentModal />}
       {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron' || effectiveRole === 'supervisor' || effectiveRole === 'admin') && <StageNudgeModal />}
+      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron' || effectiveRole === 'supervisor' || effectiveRole === 'admin') && <WasherReminderModal />}
     </>
   );
 }

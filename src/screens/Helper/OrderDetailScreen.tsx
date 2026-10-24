@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Image } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp, Zap, Truck } from 'lucide-react-native';
+import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp, Zap, Truck, KeyRound, Video } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { EditOrderModal } from '../../components/EditOrderModal';
@@ -16,10 +16,11 @@ import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessS
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
-import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel, getPickupInfo } from '../../utils/orderFeed';
+import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel, getPickupInfo, formatDateTime, computePickupBenchmark, computeDeliveryBenchmark } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel, GarmentsRecord } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
+import { verifyStoreOTP } from '../../utils/opsPickup';
 import { canStartStage } from './ProcessingScreen';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
@@ -485,6 +486,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   }, [order, process]);
 
   const bundlesCount = order?.opsDetails?.packagingProof?.bundles ?? order?.packagingProof?.bundles ?? process?.stages?.packaging?.qualityProof?.bundles;
+  const packagingVideoUrl = order?.packagingProof?.videoUrl ?? order?.opsDetails?.packagingProof?.videoUrl ?? process?.stages?.packaging?.qualityProof?.videoUrl ?? null;
+  const pickupBenchmark = useMemo(() => order ? computePickupBenchmark(order) : null, [order]);
+  const deliveryBenchmark = useMemo(() => order ? computeDeliveryBenchmark(order) : null, [order]);
   const garmentCountDisplay = process?.garments?.count ?? order?.garmentCount ?? order?.opsDetails?.garmentCount;
   const isTaggingDone = (process?.currentIndex ?? 0) > 0 || process?.status === 'done' || (order?.status !== 'placed' && order?.status !== 'confirmed' && order?.status !== 'in_transit_to_store');
 
@@ -495,15 +499,29 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       if (activeOrDone.length > 0) return activeOrDone;
     }
     const timings = order?.stageTimings || order?.opsDetails?.stageTimings;
-    if (!timings) return [];
-    const standardSteps = ['tagging', 'getting_washed', 'drying', 'ironing', 'packaging'];
-    const keys = Object.keys(timings);
-    const orderedSteps = standardSteps.filter(s => keys.includes(s));
-    keys.forEach(k => {
+    if (!timings || typeof timings !== 'object') return [];
+
+    // Strictly enforce production workflow order: Tagging -> Washing -> Drying -> Ironing -> Packaging
+    const CANONICAL_ORDER = ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'];
+
+    // Normalize any step aliases (e.g. drying -> getting_dried, ironing -> getting_ironed)
+    const normalized: Record<string, any> = {};
+    Object.entries(timings).forEach(([k, val]) => {
+      if (!val) return;
+      const canonicalKey = k === 'drying' ? 'getting_dried' : (k === 'ironing' ? 'getting_ironed' : (k === 'wash' ? 'getting_washed' : k));
+      normalized[canonicalKey] = { ...(normalized[canonicalKey] || {}), ...val };
+    });
+
+    const presentKeys = Object.keys(normalized);
+    // 1. Strict canonical stages first
+    const orderedSteps = CANONICAL_ORDER.filter(s => presentKeys.includes(s));
+    // 2. Any additional custom stages next
+    presentKeys.forEach(k => {
       if (!orderedSteps.includes(k)) orderedSteps.push(k);
     });
+
     return orderedSteps.map(step => {
-      const s = timings[step] || {};
+      const s = normalized[step] || {};
       return {
         step,
         label: stepLabel(step),
@@ -732,6 +750,25 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         setActionSuccess("Delivery verified successfully.");
         setTimeout(() => setActionSuccess(null), 5000);
       }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirmStoreHandover = async () => {
+    if (!order?.storeOTP) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const res = await verifyStoreOTP(orderId, order.storeOTP);
+      if (!res.ok) {
+        setActionError(friendlyActionError(res.error || 'Failed to verify handover'));
+      } else {
+        setActionSuccess("Store handover verified successfully.");
+        setTimeout(() => setActionSuccess(null), 5000);
+      }
+    } catch (err: any) {
+      setActionError(friendlyActionError(err?.message || 'Handover verification failed'));
     } finally {
       setBusy(false);
     }
@@ -1340,7 +1377,15 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             </View>
 
             <View className="border-t border-gray-100 pt-3">
-              <Text className="text-gray-900 font-bold mb-2 text-sm">Verify Delivery OTP</Text>
+              <View className="flex-row items-center justify-between mb-2">
+                <Text className="text-gray-900 font-bold text-sm">Verify Delivery OTP</Text>
+                {order.deliveryOTP ? (
+                  <View className="bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-lg flex-row items-center gap-1">
+                    <KeyRound size={11} color="#047857" />
+                    <Text className="text-emerald-700 text-xs font-bold">Code: {order.deliveryOTP}</Text>
+                  </View>
+                ) : null}
+              </View>
               <TextInput
                 value={otp}
                 onChangeText={(t) => setOtp(t.replace(/[^0-9]/g, '').slice(0, 4))}
@@ -1418,6 +1463,22 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             </View>
           </View>
 
+          {/* Customer Pickup OTP Highlight */}
+          {order.pickupOTP ? (
+            <View className="bg-blue-50 rounded-xl p-3.5 border border-blue-200 mb-3 flex-row items-center justify-between">
+              <View className="flex-1 mr-2">
+                <View className="flex-row items-center gap-1">
+                  <KeyRound size={12} color="#1d4ed8" />
+                  <Text className="text-blue-900 text-[10px] font-extrabold uppercase tracking-wider">Customer Pickup OTP</Text>
+                </View>
+                <Text className="text-blue-700 text-xs mt-0.5">Share with rider if customer didn't receive code</Text>
+              </View>
+              <View className="bg-white border border-blue-300 px-3 py-1 rounded-lg">
+                <Text className="text-blue-700 font-black text-base tracking-widest">{order.pickupOTP}</Text>
+              </View>
+            </View>
+          ) : null}
+
           <View className="bg-slate-50 rounded-xl p-3 border border-slate-100 mb-3 flex-row items-center justify-between">
             <View className="flex-row items-center gap-2 flex-1 mr-2">
               <Truck size={15} color="#475569" />
@@ -1463,6 +1524,87 @@ export function OrderDetailScreen({ route, navigation }: Props) {
       );
     }
 
+    if (order?.status === 'in_transit_to_store') {
+      return (
+        <View className="bg-white rounded-2xl p-5 mb-4 border border-sky-200 shadow-sm">
+          <View className="flex-row items-center justify-between mb-3">
+            <View className="flex-row items-center gap-2.5">
+              <View className="w-9 h-9 rounded-full bg-sky-100 items-center justify-center">
+                <Truck size={18} color="#0284c7" />
+              </View>
+              <View>
+                <Text className="text-slate-900 font-black text-base">
+                  In Transit to Store
+                </Text>
+                <Text className="text-slate-500 text-xs font-medium mt-0.5">
+                  Rider picked up garments and is en route to store
+                </Text>
+              </View>
+            </View>
+            <View className="px-2.5 py-1 rounded-full border bg-sky-50 border-sky-300">
+              <Text className="text-[10px] font-black uppercase tracking-wider text-sky-800">
+                IN TRANSIT
+              </Text>
+            </View>
+          </View>
+
+          {/* Store Handover OTP Highlight */}
+          {order.storeOTP ? (
+            <View className="bg-purple-50 rounded-xl p-4 border border-purple-200 mb-3 flex-row items-center justify-between">
+              <View className="flex-1 mr-3">
+                <View className="flex-row items-center gap-1 mb-0.5">
+                  <KeyRound size={12} color="#7e22ce" />
+                  <Text className="text-purple-900 text-xs font-extrabold uppercase tracking-wider">Store Handover OTP (For Rider)</Text>
+                </View>
+                <Text className="text-purple-700 text-xs">Share this OTP with rider when they drop garments at the store</Text>
+              </View>
+              <View className="bg-white border-2 border-purple-400 px-3.5 py-1.5 rounded-xl shadow-xs">
+                <Text className="text-purple-700 font-black text-xl tracking-widest">{order.storeOTP}</Text>
+              </View>
+            </View>
+          ) : null}
+
+          <View className="bg-slate-50 rounded-xl p-3 border border-slate-100 mb-3 flex-row items-center justify-between">
+            <View className="flex-row items-center gap-2 flex-1 mr-2">
+              <Truck size={15} color="#475569" />
+              <View className="flex-1">
+                <Text className="text-slate-500 text-[10px] font-bold uppercase tracking-wider">Assigned Rider</Text>
+                <Text className="text-slate-900 font-bold text-xs mt-0.5">
+                  {assignedRiderName ? assignedRiderName : 'Rider assigned'}
+                </Text>
+              </View>
+            </View>
+            {assignedRider?.phone ? (
+              <TouchableOpacity
+                onPress={() => Linking.openURL(`tel:${assignedRider.phone}`)}
+                className="bg-white border border-slate-200 px-2.5 py-1 rounded-lg flex-row items-center"
+              >
+                <Phone size={11} color="#2563eb" className="mr-1" />
+                <Text className="text-blue-600 text-xs font-bold">Call Rider</Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+
+          {isSupervisor && order.storeOTP ? (
+            <TouchableOpacity
+              onPress={handleConfirmStoreHandover}
+              disabled={busy}
+              className={`h-12 bg-purple-600 rounded-xl items-center justify-center flex-row shadow-sm active:opacity-90 ${busy ? 'opacity-70' : ''}`}
+            >
+              {busy ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <CheckCircle2 size={16} color="#fff" className="mr-1.5" />
+                  <Text className="text-white font-bold text-sm">Verify Store Handover ({order.storeOTP})</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          ) : null}
+        </View>
+      );
+    }
+
     return (
       <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
         <Text className="text-gray-500 font-bold">Waiting for {cur ? stepLabel(cur) : 'next step'}</Text>
@@ -1486,7 +1628,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   className={`px-4 py-2 rounded-xl flex-row items-center border ${isSel ? 'bg-[#994bff] border-[#994bff]' : 'bg-white border-gray-200 shadow-sm'}`}
                 >
                   <Text className={`font-bold ${isSel ? 'text-white' : 'text-gray-600'}`}>
-                    {p.serviceLabel || p.serviceType}
+                    {p.serviceLabel || p.serviceType}{p.tokenNumber ? ` · T-${p.tokenNumber}` : ''}
                   </Text>
                 </TouchableOpacity>
               )
@@ -1681,7 +1823,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                         ? `Rider: ${assignedRiderName}`
                         : pickupInfo.isInstant
                         ? 'Searching on-shift riders for immediate pickup'
-                        : 'Parked • Dispatches 75m before slot window'}
+                        : 'Parked • Dispatches 15m before slot window'}
                     </Text>
                   </View>
 
@@ -1716,8 +1858,122 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               )}
             </View>
 
-            {/* Target Delivery Banner */}
-            {(order.deliveryDate || order.deliverySlot || order.deliveryTime) ? (
+            {/* Delivered Order Performance & Rider Ledger */}
+            {order.status === 'delivered' ? (
+              <View className="mt-3.5 bg-emerald-50/70 border border-emerald-200 rounded-2xl p-4 shadow-2xs">
+                {/* Header */}
+                <View className="flex-row items-center justify-between mb-3 pb-2.5 border-b border-emerald-100">
+                  <View className="flex-row items-center gap-2">
+                    <View className="w-7 h-7 rounded-full bg-emerald-600 items-center justify-center">
+                      <Check size={14} color="#fff" />
+                    </View>
+                    <View>
+                      <Text className="text-emerald-950 font-black text-sm">Delivered Successfully</Text>
+                      <Text className="text-emerald-700 text-xs font-bold">
+                        {order.deliveredAt || (order as any).deliveryCompletedAt || (order as any).updatedAt
+                          ? `Delivered at ${formatDateTime(order.deliveredAt || (order as any).deliveryCompletedAt || (order as any).updatedAt)}`
+                          : 'Delivery Complete'}
+                      </Text>
+                    </View>
+                  </View>
+                  {order.deliveryOTP ? (
+                    <View className="bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded flex-row items-center gap-1">
+                      <KeyRound size={10} color="#047857" />
+                      <Text className="text-emerald-800 font-extrabold text-[10px]">OTP: {order.deliveryOTP}</Text>
+                    </View>
+                  ) : null}
+                </View>
+
+                {/* Delivery Timing Benchmark & Rider */}
+                <View className="mb-2.5 bg-white p-3 rounded-xl border border-emerald-100">
+                  <View className="flex-row items-center justify-between mb-1">
+                    <Text className="text-slate-400 font-bold text-[10px] uppercase tracking-wider">Delivery Turnaround</Text>
+                    {deliveryBenchmark && (
+                      <View className={`px-2 py-0.2 rounded-full ${
+                        deliveryBenchmark.status === 'delayed' ? 'bg-amber-100' : 'bg-emerald-100'
+                      }`}>
+                        <Text className={`text-[10px] font-black ${
+                          deliveryBenchmark.status === 'delayed' ? 'text-amber-800' : 'text-emerald-800'
+                        }`}>
+                          {deliveryBenchmark.status === 'delayed' ? 'DELAYED' : 'ON TIME'}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text className="text-slate-900 font-bold text-xs">
+                    {deliveryBenchmark?.label || (order.deliveredAt || (order as any).deliveryCompletedAt || (order as any).updatedAt
+                      ? `Delivered on time at ${formatDateTime(order.deliveredAt || (order as any).deliveryCompletedAt || (order as any).updatedAt)}`
+                      : `Target: ${order.deliveryDate || ''} ${order.deliverySlot || order.deliveryTime || ''}`)}
+                  </Text>
+                  
+                  {/* Delivery Rider */}
+                  {(() => {
+                    const dRiderUid = (order as any).deliveryRiderId || order.riderId;
+                    const dRider = dRiderUid ? roster.riders.find(r => r.uid === dRiderUid) : null;
+                    const dName = (order as any).deliveryRiderName || dRider?.name || assignedRiderName;
+                    const dPhone = (order as any).deliveryRiderPhone || dRider?.phone;
+                    if (!dName) return null;
+                    return (
+                      <View className="mt-2 pt-2 border-t border-slate-100 flex-row items-center justify-between">
+                        <View className="flex-row items-center gap-1.5 flex-1 mr-2">
+                          <Truck size={12} color="#059669" />
+                          <Text className="text-slate-700 text-xs font-semibold">Delivered by: <Text className="font-extrabold text-slate-900">{dName}</Text></Text>
+                        </View>
+                        {dPhone ? (
+                          <TouchableOpacity
+                            onPress={() => Linking.openURL(`tel:${dPhone}`)}
+                            className="bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-lg flex-row items-center gap-1"
+                          >
+                            <Phone size={10} color="#059669" />
+                            <Text className="text-emerald-800 text-[11px] font-bold">Call Rider</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                    );
+                  })()}
+                </View>
+
+                {/* Pickup Timing Benchmark & Rider */}
+                <View className="bg-white p-3 rounded-xl border border-emerald-100">
+                  <View className="flex-row items-center justify-between mb-1">
+                    <Text className="text-slate-400 font-bold text-[10px] uppercase tracking-wider">Pickup Performance</Text>
+                    {pickupBenchmark && (
+                      <View className={`px-2 py-0.2 rounded-full ${
+                        pickupBenchmark.status === 'delayed' ? 'bg-amber-100' : 'bg-emerald-100'
+                      }`}>
+                        <Text className={`text-[10px] font-black ${
+                          pickupBenchmark.status === 'delayed' ? 'text-amber-800' : (pickupBenchmark.status === 'fast' ? 'FAST' : 'ON TIME')
+                        }`}>
+                          {pickupBenchmark.status === 'delayed' ? 'DELAYED' : (pickupBenchmark.status === 'fast' ? 'FAST' : 'ON TIME')}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text className="text-slate-900 font-bold text-xs">
+                    {pickupBenchmark?.label || (order.pickedUpAt ? `Picked up at ${formatDateTime(order.pickedUpAt)}` : 'Pickup Completed')}
+                  </Text>
+
+                  {/* Pickup Rider */}
+                  {assignedRiderName && (
+                    <View className="mt-2 pt-2 border-t border-slate-100 flex-row items-center justify-between">
+                      <View className="flex-row items-center gap-1.5 flex-1 mr-2">
+                        <Truck size={12} color="#2563eb" />
+                        <Text className="text-slate-700 text-xs font-semibold">Picked up by: <Text className="font-extrabold text-slate-900">{assignedRiderName}</Text></Text>
+                      </View>
+                      {assignedRider?.phone ? (
+                        <TouchableOpacity
+                          onPress={() => Linking.openURL(`tel:${assignedRider.phone}`)}
+                          className="bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg flex-row items-center gap-1"
+                        >
+                          <Phone size={10} color="#2563eb" />
+                          <Text className="text-blue-800 text-[11px] font-bold">Call Rider</Text>
+                        </TouchableOpacity>
+                      ) : null}
+                    </View>
+                  )}
+                </View>
+              </View>
+            ) : (order.deliveryDate || order.deliverySlot || order.deliveryTime) ? (
               <View className="mt-3.5 bg-blue-50/80 border border-blue-200/80 rounded-2xl px-3.5 py-2.5 flex-row items-center justify-between">
                 <View className="flex-row items-center gap-2 flex-1 mr-2">
                   <Clock size={15} color="#2563eb" />
@@ -1769,6 +2025,38 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 <Text className="text-xs font-bold text-gray-600 uppercase">{order.status?.replace(/_/g, ' ') || 'ACTIVE'}</Text>
               </View>
             </View>
+
+            {/* Verification OTPs (Customer Pickup, Store Handover, Delivery) */}
+            {Boolean(order.pickupOTP || order.storeOTP || order.deliveryOTP) && (
+              <View className="mt-3 pt-3 border-t border-gray-100">
+                <View className="flex-row items-center gap-1 mb-2">
+                  <KeyRound size={13} color="#64748b" />
+                  <Text className="text-[11px] font-extrabold text-gray-500 uppercase tracking-wider">
+                    Verification OTPs
+                  </Text>
+                </View>
+                <View className="flex-row flex-wrap gap-2">
+                  {order.pickupOTP ? (
+                    <View className="bg-blue-50 border border-blue-200 px-3 py-1.5 rounded-xl flex-row items-center gap-1.5">
+                      <Text className="text-blue-900 text-xs font-semibold">Customer Pickup OTP:</Text>
+                      <Text className="text-blue-700 text-sm font-black tracking-widest">{order.pickupOTP}</Text>
+                    </View>
+                  ) : null}
+                  {order.storeOTP ? (
+                    <View className="bg-purple-50 border border-purple-200 px-3 py-1.5 rounded-xl flex-row items-center gap-1.5">
+                      <Text className="text-purple-900 text-xs font-semibold">Store Handover OTP:</Text>
+                      <Text className="text-purple-700 text-sm font-black tracking-widest">{order.storeOTP}</Text>
+                    </View>
+                  ) : null}
+                  {order.deliveryOTP ? (
+                    <View className="bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xl flex-row items-center gap-1.5">
+                      <Text className="text-emerald-900 text-xs font-semibold">Delivery OTP:</Text>
+                      <Text className="text-emerald-700 text-sm font-black tracking-widest">{order.deliveryOTP}</Text>
+                    </View>
+                  ) : null}
+                </View>
+              </View>
+            )}
 
             {/* Address & Directions */}
             {order.address && (
@@ -1892,8 +2180,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
         )}
 
-        {/* Quality & Packaging Photos Gallery */}
-        {packagingPhotos.length > 0 && (
+        {/* Quality & Packaging Proof (Video & Photos) */}
+        {(packagingPhotos.length > 0 || !!packagingVideoUrl) && (
           <View className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 mb-4">
             <View className="flex-row items-center justify-between mb-2">
               <View className="flex-row items-center gap-2">
@@ -1906,37 +2194,71 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                     <Text className="text-amber-800 text-xs font-bold">📦 {bundlesCount} Bundle{bundlesCount > 1 ? 's' : ''}</Text>
                   </View>
                 ) : null}
-                <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">
-                  <Text className="text-purple-700 text-xs font-bold">{packagingPhotos.length} photo{packagingPhotos.length > 1 ? 's' : ''}</Text>
-                </View>
+                {packagingVideoUrl ? (
+                  <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full flex-row items-center gap-1">
+                    <Video size={10} color="#994bff" />
+                    <Text className="text-purple-700 text-xs font-bold">Video QC</Text>
+                  </View>
+                ) : null}
+                {packagingPhotos.length > 0 ? (
+                  <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">
+                    <Text className="text-purple-700 text-xs font-bold">{packagingPhotos.length} photo{packagingPhotos.length > 1 ? 's' : ''}</Text>
+                  </View>
+                ) : null}
               </View>
             </View>
 
-            <Text className="text-gray-500 text-xs mb-3">
-              Tap any photo to view full-screen packaging proof.
-            </Text>
-
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
-              {packagingPhotos.map((photoUri, idx) => (
-                <TouchableOpacity
-                  key={idx}
-                  onPress={() => setPreviewImage(photoUri)}
-                  activeOpacity={0.8}
-                  className="rounded-xl overflow-hidden border border-gray-200 bg-gray-100 shadow-sm relative"
-                  style={{ width: 96, height: 96 }}
-                >
-                  <Image
-                    source={{ uri: photoUri }}
-                    style={{ width: '100%', height: '100%' }}
-                    resizeMode="cover"
-                  />
-                  <View className="absolute bottom-1 right-1 bg-black/60 rounded px-1.5 py-0.5 flex-row items-center gap-0.5">
-                    <Eye size={10} color="#fff" />
-                    <Text className="text-white text-[9px] font-bold">View</Text>
+            {/* Packaging Video Proof Player Card */}
+            {packagingVideoUrl ? (
+              <View className="my-2 p-3 bg-purple-50/70 border border-purple-200 rounded-xl flex-row items-center justify-between">
+                <View className="flex-row items-center gap-2.5 flex-1 mr-2">
+                  <View className="w-9 h-9 rounded-full bg-purple-600 items-center justify-center">
+                    <Video size={16} color="#fff" />
                   </View>
+                  <View className="flex-1">
+                    <Text className="text-purple-950 font-bold text-xs">Verified QC Video Proof</Text>
+                    <Text className="text-purple-700 text-[10px]">Short packaging recording by helper</Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  onPress={() => Linking.openURL(packagingVideoUrl)}
+                  className="bg-purple-600 px-3 py-1.5 rounded-lg flex-row items-center gap-1 active:opacity-90"
+                >
+                  <Play size={12} color="#fff" />
+                  <Text className="text-white text-xs font-bold">Watch Video</Text>
                 </TouchableOpacity>
-              ))}
-            </ScrollView>
+              </View>
+            ) : null}
+
+            {packagingPhotos.length > 0 ? (
+              <>
+                <Text className="text-gray-500 text-xs mb-3">
+                  Tap any photo to view full-screen packaging proof.
+                </Text>
+
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10 }}>
+                  {packagingPhotos.map((photoUri, idx) => (
+                    <TouchableOpacity
+                      key={idx}
+                      onPress={() => setPreviewImage(photoUri)}
+                      activeOpacity={0.8}
+                      className="rounded-xl overflow-hidden border border-gray-200 bg-gray-100 shadow-sm relative"
+                      style={{ width: 96, height: 96 }}
+                    >
+                      <Image
+                        source={{ uri: photoUri }}
+                        style={{ width: '100%', height: '100%' }}
+                        resizeMode="cover"
+                      />
+                      <View className="absolute bottom-1 right-1 bg-black/60 rounded px-1.5 py-0.5 flex-row items-center gap-0.5">
+                        <Eye size={10} color="#fff" />
+                        <Text className="text-white text-[9px] font-bold">View</Text>
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </>
+            ) : null}
           </View>
         )}
         

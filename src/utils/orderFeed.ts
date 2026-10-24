@@ -79,6 +79,11 @@ export interface FeedOrder {
   deliveryOTP?: string;
   riderId?: string;
   deliveryRiderId?: string;
+  deliveredAt?: any;
+  pickedUpAt?: any;
+  readyAt?: any;
+  outForDeliveryAt?: any;
+  updatedAt?: any;
   createdAt?: any;
   isUrgent?: boolean;
   pickupNote?: string;
@@ -148,6 +153,17 @@ const SERVICE_LABEL_MAP: Record<string, string> = {
   premium_laundry: 'Premium Laundry',
 };
 
+export function getServiceLoadCount(serviceKey?: string, weightKg?: number): number {
+  const sid = String(serviceKey || '').toLowerCase();
+  const isWeightBased = sid.includes('wash_fold') || sid.includes('wash & fold') ||
+                        sid.includes('wash_iron') || sid.includes('wash & iron') ||
+                        sid.includes('premium_laundry') || sid.includes('premium laundry');
+  if (!isWeightBased) return 1;
+  const w = Number(weightKg) || 0;
+  if (w <= 0) return 1;
+  return Math.max(1, Math.ceil(w / 8));
+}
+
 export function parseOrderTokens(
   tokens?: Record<string, string> | null,
   tokenNumber?: string | null,
@@ -156,22 +172,37 @@ export function parseOrderTokens(
   const chips: TokenChip[] = [];
 
   if (tokens && typeof tokens === 'object' && Object.keys(tokens).length > 0) {
+    const hasLoadKeys = Object.keys(tokens).some(k => /__l\d+/i.test(k));
+
     for (const [key, val] of Object.entries(tokens)) {
       const tVal = String(val || '').trim();
       if (!tVal) continue;
+
+      // Skip base key if specific load tokens exist for it to avoid duplicate chips
+      if (hasLoadKeys && !/__l\d+/i.test(key)) {
+        const hasSubLoads = Object.keys(tokens).some(k => k.toLowerCase().startsWith(`${key.toLowerCase()}__l`));
+        if (hasSubLoads) continue;
+      }
+
       const cleanKey = key.toLowerCase();
-      let label = SERVICE_LABEL_MAP[cleanKey];
+      const loadMatch = key.match(/__l(\d+)/i);
+      const baseKey = key.replace(/__l\d+/i, '').toLowerCase();
+
+      let label = SERVICE_LABEL_MAP[baseKey] || SERVICE_LABEL_MAP[cleanKey];
       if (!label && items && items.length > 0) {
         const matchingItem = items.find(i => {
           const s = (i.serviceType || i.serviceId || i.serviceName || '').toLowerCase();
-          return s.includes(cleanKey) || cleanKey.includes(s);
+          return s.includes(baseKey) || baseKey.includes(s) || s.includes(cleanKey) || cleanKey.includes(s);
         });
         if (matchingItem) {
           label = matchingItem.serviceName || matchingItem.name || '';
         }
       }
       if (!label) {
-        label = cleanKey.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        label = baseKey.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      }
+      if (loadMatch) {
+        label = `${label} (Bag ${loadMatch[1]})`;
       }
       chips.push({
         serviceKey: key,
@@ -851,5 +882,173 @@ export function formatDisplayPhone(phone?: string | null): string {
   }
 
   return trimmed;
+}
+
+export function formatDateTime(ts: any, now: Date = new Date()): string {
+  if (!ts) return '';
+  let d: Date;
+  if (ts instanceof Date) {
+    d = ts;
+  } else if (typeof ts === 'number') {
+    d = new Date(ts);
+  } else if (typeof ts.toDate === 'function') {
+    d = ts.toDate();
+  } else if (typeof ts.toMillis === 'function') {
+    d = new Date(ts.toMillis());
+  } else if (ts.seconds) {
+    d = new Date(ts.seconds * 1000);
+  } else {
+    d = new Date(ts);
+  }
+  if (isNaN(d.getTime())) return '';
+
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const targetDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.round((today.getTime() - targetDay.getTime()) / (24 * 60 * 60 * 1000));
+
+  const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+
+  if (diffDays === 0) {
+    return `Today, ${timeStr}`;
+  } else if (diffDays === 1) {
+    return `Yesterday, ${timeStr}`;
+  } else if (diffDays === -1) {
+    return `Tomorrow, ${timeStr}`;
+  } else {
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${d.getDate()} ${monthNames[d.getMonth()]}, ${timeStr}`;
+  }
+}
+
+export interface TimingBenchmark {
+  actualTimeStr: string;
+  slotStr: string;
+  diffMinutes: number;
+  status: 'fast' | 'on_time' | 'delayed';
+  label: string;
+}
+
+export function computePickupBenchmark(order: any): TimingBenchmark | null {
+  const pickedUpAt = order.pickedUpAt || order.pickupCompletedAt;
+  if (!pickedUpAt) return null;
+
+  const actualMs = typeof pickedUpAt.toMillis === 'function'
+    ? pickedUpAt.toMillis()
+    : (pickedUpAt.seconds ? pickedUpAt.seconds * 1000 : new Date(pickedUpAt).getTime());
+  if (!actualMs || isNaN(actualMs)) return null;
+
+  const actualTimeStr = formatDateTime(pickedUpAt);
+
+  const isInstant = Boolean(order.pickupSlot?.isInstant || order.pickupDetails?.isInstant || order.pickupSlot?.type === 'instant');
+  if (isInstant) {
+    const createdMs = order.createdAt ? (typeof order.createdAt.toMillis === 'function' ? order.createdAt.toMillis() : (order.createdAt.seconds ? order.createdAt.seconds * 1000 : new Date(order.createdAt).getTime())) : 0;
+    const durationMin = createdMs ? Math.max(1, Math.round((actualMs - createdMs) / 60000)) : null;
+    const slaTarget = 40;
+    if (durationMin !== null) {
+      const diff = slaTarget - durationMin;
+      if (diff >= 0) {
+        return {
+          actualTimeStr,
+          slotStr: 'Instant (40m SLA)',
+          diffMinutes: diff,
+          status: 'fast',
+          label: `⚡ Picked up in ${durationMin}m • ${diff}m faster than 40m SLA`,
+        };
+      } else {
+        return {
+          actualTimeStr,
+          slotStr: 'Instant (40m SLA)',
+          diffMinutes: diff,
+          status: 'delayed',
+          label: `Picked up in ${durationMin}m • ${Math.abs(diff)}m delayed past SLA`,
+        };
+      }
+    }
+  }
+
+  const slotTime = order.pickupSlot?.scheduledTime || order.pickupDetails?.scheduledTime || order.pickupDetails?.time || order.pickupTime;
+  if (slotTime && typeof slotTime === 'string') {
+    const slotStartMin = parseSlotStartMinutes(slotTime);
+    if (slotStartMin !== null) {
+      const pDate = new Date(actualMs);
+      const actualMinOfDay = pDate.getHours() * 60 + pDate.getMinutes();
+      const diff = slotStartMin - actualMinOfDay;
+      if (actualMinOfDay <= slotStartMin + 60) {
+        return {
+          actualTimeStr,
+          slotStr: slotTime,
+          diffMinutes: diff,
+          status: 'on_time',
+          label: `Picked up on time within ${slotTime} slot`,
+        };
+      } else {
+        const delay = actualMinOfDay - (slotStartMin + 60);
+        return {
+          actualTimeStr,
+          slotStr: slotTime,
+          diffMinutes: -delay,
+          status: 'delayed',
+          label: `${delay}m delayed past ${slotTime} slot`,
+        };
+      }
+    }
+  }
+
+  return {
+    actualTimeStr,
+    slotStr: 'Completed',
+    diffMinutes: 0,
+    status: 'on_time',
+    label: `Picked up at ${actualTimeStr}`,
+  };
+}
+
+export function computeDeliveryBenchmark(order: any): TimingBenchmark | null {
+  const deliveredAt = order.deliveredAt || order.deliveryCompletedAt;
+  if (!deliveredAt) return null;
+
+  const actualMs = typeof deliveredAt.toMillis === 'function'
+    ? deliveredAt.toMillis()
+    : (deliveredAt.seconds ? deliveredAt.seconds * 1000 : new Date(deliveredAt).getTime());
+  if (!actualMs || isNaN(actualMs)) return null;
+
+  const actualTimeStr = formatDateTime(deliveredAt);
+  const slotTime = order.deliverySlot || order.deliveryTime || order.deliveryDetails?.scheduledTime;
+  
+  if (slotTime && typeof slotTime === 'string') {
+    const slotStartMin = parseSlotStartMinutes(slotTime);
+    if (slotStartMin !== null) {
+      const dDate = new Date(actualMs);
+      const actualMinOfDay = dDate.getHours() * 60 + dDate.getMinutes();
+      const slotEndMin = slotStartMin + 60;
+      if (actualMinOfDay <= slotEndMin) {
+        const aheadMin = slotEndMin - actualMinOfDay;
+        return {
+          actualTimeStr,
+          slotStr: slotTime,
+          diffMinutes: aheadMin,
+          status: aheadMin > 20 ? 'fast' : 'on_time',
+          label: `Delivered on time (${aheadMin}m ahead of slot end)`,
+        };
+      } else {
+        const delay = actualMinOfDay - slotEndMin;
+        return {
+          actualTimeStr,
+          slotStr: slotTime,
+          diffMinutes: -delay,
+          status: 'delayed',
+          label: `${delay}m delayed past ${slotTime} slot`,
+        };
+      }
+    }
+  }
+
+  return {
+    actualTimeStr,
+    slotStr: slotTime || 'Delivered',
+    diffMinutes: 0,
+    status: 'on_time',
+    label: `Delivered at ${actualTimeStr}`,
+  };
 }
 

@@ -7,6 +7,7 @@ import { announceStageTransition, announceNewOrder, announceWasherMilestone } fr
 import * as Speech from 'expo-speech';
 import { stepLabel, currentStep } from './opsProcess';
 import { triggerAssignmentNotification } from './systemNotifications';
+import { useWasherReminderStore } from '../store/washerReminderStore';
 
 const seenStates: Record<string, number> = {};
 const seenOrders = new Set<string>();
@@ -88,23 +89,47 @@ export function useLifecycleNotifications() {
 
         // Milestone 1: Detergent at 13 minutes
         const detKey = `${p.id}_detergent`;
-        if (elapsedMinutes >= 13 && !stage.detergentAddedAt && !announcedMilestones.has(detKey)) {
-          announcedMilestones.add(detKey);
-          announceWasherMilestone(p.orderId, 'detergent');
+        if (elapsedMinutes >= 13 && !stage.detergentAddedAt) {
+          useWasherReminderStore.getState().showReminder({
+            orderId: p.orderId,
+            processId: p.id,
+            milestone: 'detergent',
+            elapsedMinutes: Math.round(elapsedMinutes),
+          });
+          if (!announcedMilestones.has(detKey)) {
+            announcedMilestones.add(detKey);
+            announceWasherMilestone(p.orderId, 'detergent');
+          }
         }
 
         // Milestone 2: Softener at 21 minutes
         const softKey = `${p.id}_softener`;
-        if (elapsedMinutes >= 21 && !stage.softenerAddedAt && !announcedMilestones.has(softKey)) {
-          announcedMilestones.add(softKey);
-          announceWasherMilestone(p.orderId, 'softener');
+        if (elapsedMinutes >= 21 && !stage.softenerAddedAt) {
+          useWasherReminderStore.getState().showReminder({
+            orderId: p.orderId,
+            processId: p.id,
+            milestone: 'softener',
+            elapsedMinutes: Math.round(elapsedMinutes),
+          });
+          if (!announcedMilestones.has(softKey)) {
+            announcedMilestones.add(softKey);
+            announceWasherMilestone(p.orderId, 'softener');
+          }
         }
 
         // Milestone 3: Cycle Complete at 35 minutes
         const compKey = `${p.id}_complete`;
-        if (elapsedMinutes >= 35 && !announcedMilestones.has(compKey)) {
-          announcedMilestones.add(compKey);
-          announceWasherMilestone(p.orderId, 'complete');
+        if (elapsedMinutes >= 35) {
+          useWasherReminderStore.getState().showReminder({
+            orderId: p.orderId,
+            processId: p.id,
+            milestone: 'complete',
+            elapsedMinutes: Math.round(elapsedMinutes),
+          });
+          if (!announcedMilestones.has(compKey)) {
+            announcedMilestones.add(compKey);
+            announceWasherMilestone(p.orderId, 'complete');
+          }
         }
       });
     };

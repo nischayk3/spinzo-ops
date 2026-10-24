@@ -50,8 +50,10 @@ object SpinzoOverlayManager {
     fun showOverlay(context: Context, data: Map<String, String>) {
         dismissOverlay(context)
 
-        val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val inflater = LayoutInflater.from(context)
+        val appContext = context.applicationContext ?: context
+        val windowManager = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val themedContext = android.view.ContextThemeWrapper(appContext, android.R.style.Theme_DeviceDefault_NoActionBar)
+        val inflater = LayoutInflater.from(themedContext)
 
         val overlayView = inflater.inflate(R.layout.overlay_assignment_card, null)
         currentOverlayView = overlayView
@@ -78,7 +80,7 @@ object SpinzoOverlayManager {
             val titleText = data["customerName"] ?: data["title"]
             tvTitle.text = if (!titleText.isNullOrEmpty()) "⏰ $titleText" else if (stepName.isNotEmpty()) "⏰ $stepName" else "⏰ Operations Check"
             tvSubtitle.text = "#$shortId • Status Check"
-            btnAccept.text = "OPEN & RESPOND"
+            btnAccept.text = if (stepName.isNotEmpty()) stepName.uppercase() else "OPEN & RESPOND"
         } else if (isInstant) {
             tvTitle.text = "⚡ Instant Pickup!"
             tvSubtitle.text = "#$shortId • Instant Pickup"

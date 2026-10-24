@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, Linking, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag, Zap, Clock, Calendar, CheckCircle2 } from 'lucide-react-native';
+import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag, Zap, Clock, Calendar, CheckCircle2, Truck, AlertTriangle, Video } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo } from '../../utils/orderFeed';
+import { useStaffRosterStore } from '../../store/staffRosterStore';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo, timeAgo, formatDateTime, isToday } from '../../utils/orderFeed';
 import { stepLabel } from '../../utils/opsProcess';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
@@ -27,6 +28,7 @@ const FILTER_TABS = ['All', 'Action Required', 'Processing', 'Ready', 'Out for D
 
 export function FloorBoardScreen() {
   const { orders, isLoading, initialize } = useOrderFeedStore();
+  const roster = useStaffRosterStore(s => s.roster);
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const { isDesktop, isTablet, maxContainerStyle } = useResponsive();
 
@@ -38,13 +40,39 @@ export function FloorBoardScreen() {
     initialize();
   }, [initialize]);
 
+  const parseTimeMs = (ts: any): number => {
+    if (!ts) return 0;
+    if (typeof ts === 'number') return ts;
+    if (typeof ts.toMillis === 'function') return ts.toMillis();
+    if (typeof ts.seconds === 'number') return ts.seconds * 1000;
+    const p = new Date(ts).getTime();
+    return isNaN(p) ? 0 : p;
+  };
+
+  // Last / most recent delivered order for quick access
+  const lastDeliveredOrder = useMemo(() => {
+    const delivered = orders.filter(o => o.status === 'delivered');
+    if (delivered.length === 0) return null;
+    return [...delivered].sort((a, b) => {
+      const tA = parseTimeMs(a.deliveredAt || (a as any).deliveryCompletedAt || a.updatedAt || a.createdAt);
+      const tB = parseTimeMs(b.deliveredAt || (b as any).deliveryCompletedAt || b.updatedAt || b.createdAt);
+      return tB - tA;
+    })[0];
+  }, [orders]);
+
   // Derived filtered orders
   const filteredOrders = useMemo(() => {
     let result = orders;
 
-    // Exclude cancelled and delivered orders from the default view
+    // Exclude cancelled. In All view, include active orders plus recent delivered orders from today
     if (!searchQuery.trim() && activeTab !== 'Delivered' && activeTab !== 'Cancelled') {
-      result = result.filter(o => o.status !== 'cancelled' && o.status !== 'delivered');
+      result = result.filter(o => {
+        if (o.status === 'cancelled') return false;
+        if (o.status === 'delivered') {
+          return isToday(o.deliveredAt || (o as any).deliveryCompletedAt || o.updatedAt || o.createdAt);
+        }
+        return true;
+      });
     }
 
     // Apply Urgent filter
@@ -70,7 +98,13 @@ export function FloorBoardScreen() {
     } else if (activeTab === 'Out for Delivery') {
       result = sortReadyOrders(result.filter(o => String(o.status).toLowerCase() === 'out_for_delivery'));
     } else if (activeTab === 'Delivered') {
-      result = result.filter(o => String(o.status).toLowerCase() === 'delivered');
+      result = result
+        .filter(o => String(o.status).toLowerCase() === 'delivered')
+        .sort((a, b) => {
+          const tA = parseTimeMs(a.deliveredAt || (a as any).deliveryCompletedAt || a.updatedAt || a.createdAt);
+          const tB = parseTimeMs(b.deliveredAt || (b as any).deliveryCompletedAt || b.updatedAt || b.createdAt);
+          return tB - tA;
+        });
     } else if (activeTab === 'Cancelled') {
       result = result.filter(o => String(o.status).toLowerCase() === 'cancelled');
     }
@@ -148,6 +182,37 @@ export function FloorBoardScreen() {
           </ScrollView>
         </View>
 
+        {/* Quick Last Delivered Order Banner */}
+        {lastDeliveredOrder && activeTab === 'All' && !searchQuery.trim() && (
+          <TouchableOpacity
+            onPress={() => navigation.navigate('OrderDetail', { orderId: lastDeliveredOrder.id })}
+            className="mx-6 mb-3.5 bg-emerald-50 border border-emerald-300 rounded-2xl p-3 flex-row items-center justify-between shadow-2xs active:bg-emerald-100/70"
+          >
+            <View className="flex-row items-center flex-1 mr-2">
+              <View className="w-8 h-8 rounded-full bg-emerald-600 items-center justify-center mr-2.5">
+                <CheckCircle2 size={16} color="#ffffff" />
+              </View>
+              <View className="flex-1">
+                <View className="flex-row items-center gap-1.5 flex-wrap">
+                  <Text className="text-emerald-950 font-black text-xs uppercase tracking-wider">Recent Delivered:</Text>
+                  <Text className="text-emerald-900 font-black text-xs">
+                    #{lastDeliveredOrder.id.slice(-6).toUpperCase()}
+                  </Text>
+                  <Text className="text-emerald-700 text-xs font-semibold" numberOfLines={1}>
+                    • {lastDeliveredOrder.customerName || 'Customer'}
+                  </Text>
+                </View>
+                <Text className="text-emerald-700 text-[11px] font-medium mt-0.5">
+                  {lastDeliveredOrder.deliveredAt ? `Delivered ${timeAgo(lastDeliveredOrder.deliveredAt)}` : 'Delivered recently'} • Rider: {lastDeliveredOrder.riderName || 'Hrithik'}
+                </Text>
+              </View>
+            </View>
+            <View className="bg-emerald-600 px-3 py-1 rounded-xl">
+              <Text className="text-white text-[10px] font-black uppercase tracking-wider">View</Text>
+            </View>
+          </TouchableOpacity>
+        )}
+
         {/* Orders List / 2-Column Desktop Grid */}
         <FlatList
           key={isDesktop ? 'desktop-grid' : 'mobile-list'}
@@ -197,6 +262,12 @@ export function FloorBoardScreen() {
                         <Text className="text-amber-900 font-extrabold text-[11px]">T-{c.token}</Text>
                       </View>
                     ))}
+                    {Boolean((item as any).packagingProof?.videoUrl || (item as any).opsDetails?.packagingProof?.videoUrl) && (
+                      <View className="bg-purple-100 border border-purple-300 px-1.5 py-0.5 rounded-md flex-row items-center">
+                        <Video size={9} color="#7e22ce" className="mr-0.5" />
+                        <Text className="text-purple-800 font-extrabold text-[10px]">VIDEO</Text>
+                      </View>
+                    )}
                     {['placed', 'confirmed'].includes(item.status) && (() => {
                       const pInfo = getPickupInfo(item);
                       return (
@@ -314,23 +385,73 @@ export function FloorBoardScreen() {
                     );
                   })()}
 
-                  {(item.status === 'ready' || item.status === 'out_for_delivery') && (
-                    item.deliveryDate ? (
-                      <View className="items-end">
-                        <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Delivery Target</Text>
-                        <Text className="text-green-700 font-bold text-xs mt-0.5">
-                          {item.deliveryDate} {item.deliveryTime || ''}
-                        </Text>
+                  {(item.status === 'ready' || item.status === 'out_for_delivery') && (() => {
+                    const riderUid = (item as any).deliveryRiderId || item.riderId;
+                    const rObj = riderUid ? roster.riders.find(r => r.uid === riderUid) : null;
+                    const riderName = (item as any).deliveryRiderName || rObj?.name || (item as any).riderName;
+                    const isReady = item.status === 'ready';
+
+                    return (
+                      <View className="items-end gap-1">
+                        {/* Ready timestamp */}
+                        {isReady && item.readyAt && (
+                          <View className="flex-row items-center">
+                            <Clock size={10} color="#059669" className="mr-0.5" />
+                            <Text className="text-emerald-700 font-bold text-[10px]">
+                              Ready {timeAgo(item.readyAt)}
+                            </Text>
+                          </View>
+                        )}
+
+                        {/* Delivery Rider Assignment */}
+                        {riderName ? (
+                          <View className="bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded flex-row items-center">
+                            <Truck size={9} color="#1d4ed8" className="mr-0.5" />
+                            <Text className="text-blue-800 font-extrabold text-[10px]">{riderName}</Text>
+                          </View>
+                        ) : isReady ? (
+                          <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex-row items-center">
+                            <AlertTriangle size={9} color="#d97706" className="mr-0.5" />
+                            <Text className="text-amber-800 font-extrabold text-[10px]">Rider Unassigned</Text>
+                          </View>
+                        ) : null}
+
+                        {/* Target Delivery slot */}
+                        {item.deliveryDate ? (
+                          <Text className="text-gray-500 font-semibold text-[10px]">
+                            Target: {item.deliveryDate} {item.deliveryTime || ''}
+                          </Text>
+                        ) : (
+                          <Text className="text-amber-600 font-bold text-[10px]">Awaiting Slot</Text>
+                        )}
                       </View>
-                    ) : (
-                      <View className="items-end">
-                        <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Delivery Target</Text>
-                        <Text className="text-amber-600 font-bold text-xs mt-0.5">
-                          Awaiting Slot
-                        </Text>
+                    );
+                  })()}
+
+                  {item.status === 'delivered' && (() => {
+                    const riderUid = (item as any).deliveryRiderId || item.riderId;
+                    const rObj = riderUid ? roster.riders.find(r => r.uid === riderUid) : null;
+                    const riderName = (item as any).deliveryRiderName || rObj?.name || (item as any).riderName;
+                    const delTime = formatDateTime(item.deliveredAt || (item as any).deliveryCompletedAt || (item as any).updatedAt);
+
+                    return (
+                      <View className="items-end gap-1">
+                        <View className="bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded flex-row items-center">
+                          <CheckCircle2 size={10} color="#059669" className="mr-1" />
+                          <Text className="text-emerald-900 font-black text-[10px]">DELIVERED</Text>
+                        </View>
+                        {delTime ? (
+                          <Text className="text-emerald-700 font-bold text-[10px]">{delTime}</Text>
+                        ) : null}
+                        {riderName ? (
+                          <View className="flex-row items-center">
+                            <Truck size={9} color="#475569" className="mr-1" />
+                            <Text className="text-gray-600 font-semibold text-[10px]">{riderName}</Text>
+                          </View>
+                        ) : null}
                       </View>
-                    )
-                  )}
+                    );
+                  })()}
                 </View>
 
                 {/* Pickup / Staff Footer */}

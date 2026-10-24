@@ -41,13 +41,14 @@ class SpinzoOverlayModule : Module() {
         }
 
         Function("showOverlay") { data: Map<String, String> ->
-            val context = appContext.reactContext ?: return@Function false
+            val context = appContext.reactContext?.applicationContext ?: appContext.reactContext ?: return@Function false
             val canDraw = Settings.canDrawOverlays(context)
             if (canDraw) {
                 Handler(Looper.getMainLooper()).post {
                     try {
                         SpinzoOverlayManager.showOverlay(context, data)
                     } catch (e: Exception) {
+                        android.util.Log.e("SpinzoOverlay", "showOverlay failed: ${e.message}", e)
                         SpinzoOverlayManager.showFallbackNotification(context, data)
                     }
                 }

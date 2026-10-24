@@ -20,6 +20,7 @@ import {
   sortReadyOrders,
   formatFriendlyDate,
   getPickupInfo,
+  getServiceLoadCount,
   FeedOrder,
 } from '../orderFeed';
 
@@ -403,6 +404,36 @@ describe('parseOrderTokens', () => {
     const chips = parseOrderTokens(null, 'Token #23');
     expect(chips).toHaveLength(1);
     expect(chips[0]).toEqual({ token: '23' });
+  });
+
+  it('parses multi-load tokens and deduplicates against base keys', () => {
+    const tokens = {
+      wash_fold__L1: '14',
+      wash_fold__L2: '15',
+      wash_fold: '14, 15', // aggregate key present on order doc
+      dry_clean: '20',
+    };
+    const chips = parseOrderTokens(tokens);
+    expect(chips).toHaveLength(3);
+    expect(chips[0]).toEqual({ serviceKey: 'wash_fold__L1', serviceLabel: 'Wash & Fold (Bag 1)', token: '14' });
+    expect(chips[1]).toEqual({ serviceKey: 'wash_fold__L2', serviceLabel: 'Wash & Fold (Bag 2)', token: '15' });
+    expect(chips[2]).toEqual({ serviceKey: 'dry_clean', serviceLabel: 'Dry Clean', token: '20' });
+  });
+
+  it('calculates load counts at 8kg machine capacity boundaries', () => {
+    expect(getServiceLoadCount('wash_fold', 5)).toBe(1);
+    expect(getServiceLoadCount('wash_fold', 8)).toBe(1);
+    expect(getServiceLoadCount('wash_fold', 8.5)).toBe(2);
+    expect(getServiceLoadCount('wash_fold', 12)).toBe(2);
+    expect(getServiceLoadCount('wash_iron', 16)).toBe(2);
+    expect(getServiceLoadCount('wash_iron', 16.5)).toBe(3);
+    expect(getServiceLoadCount('wash_fold', 24)).toBe(3);
+    expect(getServiceLoadCount('premium_laundry', 24.5)).toBe(4);
+    expect(getServiceLoadCount('wash_fold', 32)).toBe(4);
+    expect(getServiceLoadCount('wash_fold', 35)).toBe(5);
+    // Non-weight based services always return 1
+    expect(getServiceLoadCount('blanket_wash', 2)).toBe(1);
+    expect(getServiceLoadCount('ironing', 15)).toBe(1);
   });
 });
 

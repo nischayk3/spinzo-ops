@@ -47,6 +47,8 @@ export interface OpsProcess {
   tokenNumber?: string;
   siblingCount?: number;
   isPushedToMe?: boolean;
+  loadIndex?: number;
+  loadCount?: number;
 }
 
 const LABELS: Record<string, string> = {
@@ -101,6 +103,8 @@ export function parseOpsProcess(id: string, snapData: Record<string, any> | null
     serviceType: d.serviceType ?? undefined,
     serviceLabel: d.serviceLabel ?? undefined,
     siblingCount: d.siblingCount ?? undefined,
+    loadIndex: d.loadIndex ?? undefined,
+    loadCount: d.loadCount ?? undefined,
   };
 }
 

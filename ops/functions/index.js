@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -205,7 +205,7 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const order = event.data.data();
 
   const pickupSlot = (order && (order.pickupDetails || order.pickup)) || null;
-  const isDueForDispatch = isSlotDueForDispatch(pickupSlot, 75);
+  const isDueForDispatch = isSlotDueForDispatch(pickupSlot, 15);
   const assignee = isDueForDispatch ? await selectRider() : null;
   const userId = event.params.userId;
   const vendorId = order.vendorId || 'default';
@@ -327,7 +327,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const pending = queue.docs.filter((d) => {
     const entryData = d.data();
     if (entryData.status !== 'pending' && entryData.status !== 'scheduled') return false;
-    return isSlotDueForDispatch(entryData.pickupSlot, 75);
+    return isSlotDueForDispatch(entryData.pickupSlot, 15);
   });
 
   for (const entry of pending) {
@@ -395,8 +395,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
-      // Only assign if the customer HAS picked a slot AND that slot is due NOW (within 75 mins or overdue)
-      if (!delData.assignee && delData.deliveryDate && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 75)) {
+      // Only assign if the customer HAS picked a slot AND that slot is due NOW (within 15 mins or overdue)
+      if (!delData.assignee && delData.deliveryDate && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 15)) {
         await delDoc.ref.update({
           assignee: newRiderUid,
           status: 'assigned',
@@ -700,7 +700,20 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
       const tokenNumber = allTokensString || data.tokenNumber || current.tokenNumber;
       if (tokenNumber) updateData.tokenNumber = tokenNumber;
       if (data.tokens && typeof data.tokens === 'object') {
-        updateData.tokens = data.tokens;
+        const enriched = { ...data.tokens };
+        const byBase = {};
+        for (const [k, v] of Object.entries(data.tokens)) {
+          if (!v || typeof v !== 'string') continue;
+          const base = k.split('__')[0];
+          if (!byBase[base]) byBase[base] = [];
+          byBase[base].push(v.trim());
+        }
+        for (const [base, vals] of Object.entries(byBase)) {
+          if (!enriched[base] && vals.length > 0) {
+            enriched[base] = vals.join(', ');
+          }
+        }
+        updateData.tokens = enriched;
       }
 
       tx.update(db.doc(`users/${userId}/orders/${orderId}`), updateData);
@@ -930,9 +943,11 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
     // Create process docs for all services
     const batch = db.batch();
     for (const group of serviceGroups) {
-      const processId = `${orderId}__${group.serviceType}`;
+      const processKey = group.processKey || group.serviceType;
+      const processId = `${orderId}__${processKey}`;
       const steps = stepsForServiceType(group.serviceType);
       const pRef = db.doc(`ops_process/${processId}`);
+      const tokenKey = group.tokenKey || group.processKey || group.serviceType;
 
       batch.set(pRef, {
         id: processId,
@@ -945,8 +960,10 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         steps,
         currentIndex: 0,
         status: steps[0],
-        tokenNumber: tokens[group.serviceType] || order.tokenNumber || '',
+        tokenNumber: tokens[tokenKey] || tokens[group.serviceType] || order.tokenNumber || '',
         siblingCount: serviceGroups.length,
+        loadIndex: group.loadIndex || 1,
+        loadCount: group.loadCount || 1,
         stages: {
           tagging: {
             assignee: selectedHelper ? selectedHelper.uid : null,
@@ -1212,8 +1229,8 @@ async function drainScheduledRiderTasks() {
         }
       }
 
-      // Check if slot is due (within 75 min or overdue)
-      if (!isSlotDueForDispatch(data.pickupSlot, 75)) {
+      // Check if slot is due (within 15 min or overdue)
+      if (!isSlotDueForDispatch(data.pickupSlot, 15)) {
         continue; // not due yet, keep parked
       }
 
@@ -1284,8 +1301,8 @@ async function drainScheduledRiderTasks() {
       if (delData.assignee) continue; // already assigned
       if (!delData.deliveryDate) continue; // customer hasn't selected a date yet (awaiting_slot)
 
-      // Check if slot has arrived / is within 75 min
-      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 75)) {
+      // Check if slot has arrived / is within 15 min
+      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 15)) {
         continue; // not due yet, keep holding on store shelf
       }
 
@@ -1339,6 +1356,7 @@ async function checkUnstartedMachineNudges() {
         const stageData = p.stages?.[step];
         if (!stageData || !stageData.assignee) continue;
 
+        // 1. Unstarted Machine Nudge (Assigned >= 5m ago, but not started)
         if (isMachineNudgeDue(stageData, step, now)) {
           const assigneeId = stageData.assignee;
 
@@ -1361,7 +1379,7 @@ async function checkUnstartedMachineNudges() {
             : 'It has been 5+ minutes since this drying task was assigned. Are you still transferring/sorting clothes, or ready to start the dryer?';
           const actionLabel = isWash ? 'START WASHER' : 'START DRYER';
 
-          console.log(`[StageNudge] Dispatching FCM machine nudge to ${assigneeId} for order ${p.orderId || doc.id} (${step})`);
+          console.log(`[StageNudge] Dispatching FCM unstarted nudge to helper ${assigneeId} for order ${p.orderId || doc.id} (${step})`);
 
           await sendFCMStageNudge({
             staffId: assigneeId,
@@ -1387,10 +1405,57 @@ async function checkUnstartedMachineNudges() {
             }
           }, { merge: true });
         }
+        // 2. Unloaded Machine Nudge (Wash cycle 35m / Dry cycle 45m elapsed, but not unloaded)
+        else if (isMachineUnloadNudgeDue(stageData, step, now)) {
+          const assigneeId = stageData.assignee;
+
+          const staffDoc = await db.doc(`ops_staff/${assigneeId}`).get();
+          if (staffDoc.exists) {
+            const sd = staffDoc.data();
+            const activeTask = sd.activeHelperTask;
+            if (activeTask && ['tagging', 'getting_ironed', 'packaging'].includes(activeTask.step)) {
+              continue;
+            }
+          }
+
+          const isWash = step === 'getting_washed';
+          const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
+          const title = isWash ? '🧺 Washing Finished - Unload Washer' : '🧺 Drying Finished - Unload Dryer';
+          const message = isWash
+            ? `The 35-minute wash cycle has finished for Order #${shortId}. Please unload the washing machine and transfer load to dryer.`
+            : `The 45-minute dry cycle has finished for Order #${shortId}. Please unload the dryer and transfer load to iron/packaging.`;
+          const actionLabel = isWash ? 'UNLOAD WASHER' : 'UNLOAD DRYER';
+
+          console.log(`[StageNudge] Dispatching FCM unload machine nudge to helper ${assigneeId} for order #${shortId} (${step})`);
+
+          await sendFCMStageNudge({
+            staffId: assigneeId,
+            orderId: p.orderId || doc.id,
+            title,
+            message,
+            step,
+            phase: 'started',
+            actionLabel,
+          });
+
+          // Record lastSentAt in Firestore to suppress repeated FCM alerts for 5 minutes
+          await doc.ref.set({
+            stages: {
+              [step]: {
+                nudge: {
+                  started: {
+                    lastSentAt: admin.firestore.Timestamp.now(),
+                    sendCount: admin.firestore.FieldValue.increment(1),
+                  }
+                }
+              }
+            }
+          }, { merge: true });
+        }
       }
     }
   } catch (err) {
-    console.error('[checkUnstartedMachineNudges] Error checking unstarted machine nudges:', err);
+    console.error('[checkUnstartedMachineNudges] Error checking unstarted/unloaded machine nudges:', err);
   }
 }
 
@@ -1566,7 +1631,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     const deliveryTime = after.deliveryTime || null;
 
     const hasSlot = Boolean(deliveryDate);
-    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime }, 75);
+    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime }, 15);
 
     // 1. If customer has NOT picked a slot yet:
     // Order sits on store rack waiting for customer to select slot.
@@ -1891,7 +1956,8 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         // Check none already claimed
         for (const group of serviceGroups) {
-          const processId = `${orderId}__${group.serviceType}`;
+          const processKey = group.processKey || group.serviceType;
+          const processId = `${orderId}__${processKey}`;
           const snap = await tx.get(db.doc(`ops_process/${processId}`));
           if (snap.exists) return { ok: false, error: 'already_claimed' };
         }
@@ -1902,8 +1968,10 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         // Create N process docs
         for (const group of serviceGroups) {
-          const processId = `${orderId}__${group.serviceType}`;
+          const processKey = group.processKey || group.serviceType;
+          const processId = `${orderId}__${processKey}`;
           const steps = stepsForServiceType(group.serviceType);
+          const tokenKey = group.tokenKey || group.processKey || group.serviceType;
           
           if (!stageRoleGate(steps[0], targetStaff.role || role, targetStaff.phone || phone)) {
              // Rollback/error if helper role is unauthorized for tagging
@@ -1921,8 +1989,10 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             steps,
             currentIndex: 0,
             status: steps[0],
-            tokenNumber: tokens[group.serviceType] || data.tokenNumber || order.tokenNumber || '',
+            tokenNumber: tokens[tokenKey] || tokens[group.serviceType] || data.tokenNumber || order.tokenNumber || '',
             siblingCount: serviceGroups.length,
+            loadIndex: group.loadIndex || 1,
+            loadCount: group.loadCount || 1,
             stages: {
               [steps[0]]: {
                 assignee: targetUid,

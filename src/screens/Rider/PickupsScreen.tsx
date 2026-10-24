@@ -139,32 +139,64 @@ export function PickupsScreen() {
       if (rawKey === 'blanket_wash' && (item as any).blanketType) {
         key = `blanket_wash_${(item as any).blanketType}`;
       }
-      if (!list.some(s => s.key === key)) {
-        let label = item.serviceName || item.name || key.replace(/_/g, ' ');
-        label = label.replace(/\b\w/g, (c: string) => c.toUpperCase());
-        let details = '';
-        const sid = String(key || rawKey || '').toLowerCase();
-        if (sid.includes('wash_fold') || sid.includes('wash & fold') || sid.includes('wash_iron') || sid.includes('wash & iron')) {
-          const weight = item.weight || (item.unit === 'kg' && item.quantity ? item.quantity : 5);
-          details = `${weight} kg`;
-          if (sid.includes('wash_fold') && Boolean(item.ironingEnabled) && (item.ironingCount || 0) > 0) {
-            details += ` (+${item.ironingCount} ironed)`;
-          }
-        } else if (item.weight) {
-          details = `${item.weight} kg`;
-        } else if (item.ironingCount) {
-          details = `${item.ironingCount} pcs`;
-        } else if (item.clothesCount) {
-          details = `${item.clothesCount} pcs`;
-        } else if (item.singleBlanketCount || item.doubleBlanketCount) {
-          details = [
-            item.singleBlanketCount ? `${item.singleBlanketCount} Single` : '',
-            item.doubleBlanketCount ? `${item.doubleBlanketCount} Double` : '',
-          ].filter(Boolean).join(', ');
-        } else if (item.quantity) {
-          details = `${item.quantity} ${item.unit || 'items'}`;
+
+      const sid = String(key || rawKey || '').toLowerCase();
+      const isWeightBased = sid.includes('wash_fold') || sid.includes('wash & fold') ||
+                            sid.includes('wash_iron') || sid.includes('wash & iron') ||
+                            sid.includes('premium_laundry') || sid.includes('premium laundry');
+
+      if (isWeightBased) {
+        const baseKey = sid.includes('wash_fold') || sid.includes('wash & fold') ? 'wash_fold' :
+                        sid.includes('wash_iron') || sid.includes('wash & iron') ? 'wash_iron' :
+                        'premium_laundry';
+
+        if (list.some(s => s.key === baseKey || s.key.startsWith(`${baseKey}__L`))) {
+          continue;
         }
-        list.push({ key, label, details });
+
+        let label = item.serviceName || item.name || baseKey.replace(/_/g, ' ');
+        label = label.replace(/\b\w/g, (c: string) => c.toUpperCase());
+
+        const weight = Number(item.weight || (item.unit === 'kg' && item.quantity ? item.quantity : 5));
+        const loadCount = Math.max(1, Math.ceil(weight / 8));
+
+        if (loadCount === 1) {
+          list.push({
+            key: baseKey,
+            label,
+            details: `${weight} kg (1 bag)`,
+          });
+        } else {
+          const perBag = (weight / loadCount).toFixed(1).replace(/\.0$/, '');
+          for (let i = 1; i <= loadCount; i++) {
+            list.push({
+              key: `${baseKey}__L${i}`,
+              label: `${label} (Bag ${i}/${loadCount})`,
+              details: `~${perBag} kg · Max 8kg`,
+            });
+          }
+        }
+      } else {
+        if (!list.some(s => s.key === key)) {
+          let label = item.serviceName || item.name || key.replace(/_/g, ' ');
+          label = label.replace(/\b\w/g, (c: string) => c.toUpperCase());
+          let details = '';
+          if (item.weight) {
+            details = `${item.weight} kg`;
+          } else if (item.ironingCount) {
+            details = `${item.ironingCount} pcs`;
+          } else if (item.clothesCount) {
+            details = `${item.clothesCount} pcs`;
+          } else if (item.singleBlanketCount || item.doubleBlanketCount) {
+            details = [
+              item.singleBlanketCount ? `${item.singleBlanketCount} Single` : '',
+              item.doubleBlanketCount ? `${item.doubleBlanketCount} Double` : '',
+            ].filter(Boolean).join(', ');
+          } else if (item.quantity) {
+            details = `${item.quantity} ${item.unit || 'items'}`;
+          }
+          list.push({ key, label, details });
+        }
       }
     }
     return list.length > 0 ? list : [{ key: 'general', label: 'Order Bag / Token', details: 'All items' }];
@@ -172,15 +204,21 @@ export function PickupsScreen() {
 
   const isOtpValid = otp.length === 4;
   const areTokensValid = servicesToTag.every(s => Boolean(tokens[s.key]?.trim()));
-  const canVerify = isOtpValid && areTokensValid && !verifying;
+  const tokenValues = servicesToTag.map(s => tokens[s.key]?.trim()).filter(Boolean);
+  const hasDuplicateTokens = new Set(tokenValues).size !== tokenValues.length;
+  const canVerify = isOtpValid && areTokensValid && !hasDuplicateTokens && !verifying;
 
   const handleVerify = async () => {
     if (!activeTask || !canVerify || verifying) return;
 
+    if (hasDuplicateTokens) {
+      Alert.alert('Duplicate Tokens', 'Each bag must have a unique physical token number.');
+      return;
+    }
+
     const orderId = activeTask.orderId || activeTaskId!;
     setVerifying(true);
     try {
-      const tokenValues = servicesToTag.map(s => tokens[s.key]?.trim()).filter(Boolean);
       const allTokensString = tokenValues.join(', ');
       const res = await verifyPickupOTP(orderId, otp, allTokensString || tokenValues[0] || '', tokens);
       if (res.ok) {
@@ -322,7 +360,16 @@ export function PickupsScreen() {
             ? () => { setOtp(''); setActiveStoreTaskId(t.id); }
             : () => {
                 setOtp('');
-                const existingTokens = order?.tokens || (t as any).tokens || (t.tokenNumber ? { general: t.tokenNumber } : {});
+                const raw = order?.tokens || (t as any).tokens;
+                const existingTokens = raw ? { ...raw } : (t.tokenNumber ? { general: t.tokenNumber } : {});
+                for (const [k, v] of Object.entries(existingTokens)) {
+                  if (typeof v === 'string' && v.includes(',')) {
+                    v.split(',').map(p => p.trim()).filter(Boolean).forEach((tk, idx) => {
+                      const lk = `${k}__L${idx + 1}`;
+                      if (!existingTokens[lk]) existingTokens[lk] = tk;
+                    });
+                  }
+                }
                 setTokens(existingTokens);
                 setActiveTaskId(t.id);
               }
@@ -382,8 +429,17 @@ export function PickupsScreen() {
                 setActiveStoreTaskId(task.id);
               } else {
                 setOtp('');
-                const order = getOrder(task);
-                const existingTokens = order?.tokens || (task as any).tokens || (task.tokenNumber ? { general: task.tokenNumber } : {});
+                const targetOrder = getOrder(task);
+                const raw = targetOrder?.tokens || (task as any).tokens;
+                const existingTokens = raw ? { ...raw } : (task.tokenNumber ? { general: task.tokenNumber } : {});
+                for (const [k, v] of Object.entries(existingTokens)) {
+                  if (typeof v === 'string' && v.includes(',')) {
+                    v.split(',').map(p => p.trim()).filter(Boolean).forEach((tk, idx) => {
+                      const lk = `${k}__L${idx + 1}`;
+                      if (!existingTokens[lk]) existingTokens[lk] = tk;
+                    });
+                  }
+                }
                 setTokens(existingTokens);
                 setActiveTaskId(task.id);
               }
@@ -593,7 +649,7 @@ export function PickupsScreen() {
                   className={`flex-1 rounded-2xl h-13 items-center justify-center shadow-md ${canVerify ? 'bg-purple-600 active:bg-purple-700' : 'bg-slate-300'}`}
                 >
                   <Text className={`font-black text-sm uppercase tracking-wide ${canVerify ? 'text-white' : 'text-slate-500'}`}>
-                    {!isOtpValid ? 'Enter 4-Digit OTP' : !areTokensValid ? 'Enter All Tokens' : 'Verify & Pickup'}
+                    {!isOtpValid ? 'Enter 4-Digit OTP' : !areTokensValid ? 'Enter All Tokens' : hasDuplicateTokens ? 'Duplicate Token Used' : 'Verify & Pickup'}
                   </Text>
                 </TouchableOpacity>
               </View>

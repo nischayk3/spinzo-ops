@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
   Search, ChevronRight, Truck, Users, AlertTriangle, IndianRupee, Timer, X, Zap,
   Phone, Clock, ArrowRight, ShieldCheck, Flame, RefreshCw, CheckCircle2, PackageOpen, Tag,
-  WashingMachine, Sparkles, Filter, Layers, ArrowUpRight, Calendar
+  WashingMachine, Sparkles, Filter, Layers, ArrowUpRight, Calendar, KeyRound, Video
 } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useAuthStore } from '../../store/authStore';
@@ -38,6 +38,7 @@ export function SupervisorDashboardScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [inboundFilter, setInboundFilter] = useState<'all' | 'urgent' | 'transit' | 'tagging'>('all');
   const [selectedRosterRider, setSelectedRosterRider] = useState<StaffMember | null>(null);
+  const [benchmarkFilter, setBenchmarkFilter] = useState<'1d' | '7d' | '15d' | '30d'>('1d');
 
   useEffect(() => {
     initialize();
@@ -199,7 +200,7 @@ export function SupervisorDashboardScreen() {
     };
   }, [orders]);
 
-  // Stage timing benchmarks: completed averages + active running tasks & elapsed time
+  // Stage timing benchmarks: completed averages computed over selected time window (1D / 7D / 15D / 30D)
   const stageBenchmarks = useMemo(() => {
     const targetMap: Record<string, { label: string; target: number }> = {
       tagging: { label: 'Tagging', target: 10 },
@@ -209,18 +210,18 @@ export function SupervisorDashboardScreen() {
       packaging: { label: 'Packaging', target: 8 },
     };
 
-    const dataMap: Record<string, {
-      completedTotalMin: number;
-      completedCount: number;
-      runningCount: number;
-      runningTotalMin: number;
-    }> = {
-      tagging: { completedTotalMin: 0, completedCount: 0, runningCount: 0, runningTotalMin: 0 },
-      getting_washed: { completedTotalMin: 0, completedCount: 0, runningCount: 0, runningTotalMin: 0 },
-      getting_dried: { completedTotalMin: 0, completedCount: 0, runningCount: 0, runningTotalMin: 0 },
-      getting_ironed: { completedTotalMin: 0, completedCount: 0, runningCount: 0, runningTotalMin: 0 },
-      packaging: { completedTotalMin: 0, completedCount: 0, runningCount: 0, runningTotalMin: 0 },
+    const dataMap: Record<string, { completedTotalMin: number; completedCount: number }> = {
+      tagging: { completedTotalMin: 0, completedCount: 0 },
+      getting_washed: { completedTotalMin: 0, completedCount: 0 },
+      getting_dried: { completedTotalMin: 0, completedCount: 0 },
+      getting_ironed: { completedTotalMin: 0, completedCount: 0 },
+      packaging: { completedTotalMin: 0, completedCount: 0 },
     };
+
+    const now = Date.now();
+    const daysMap: Record<string, number> = { '1d': 1, '7d': 7, '15d': 15, '30d': 30 };
+    const days = daysMap[benchmarkFilter] || 1;
+    const cutoffMs = now - (days * 24 * 60 * 60 * 1000);
 
     const getMs = (t: any): number => {
       if (!t) return 0;
@@ -233,44 +234,68 @@ export function SupervisorDashboardScreen() {
       return isNaN(p) ? 0 : p;
     };
 
-    processes.forEach(p => {
-      const cur = currentStep(p);
-      const done = isDone(p);
+    // 1. Accumulate from completed orders in feed
+    orders.forEach(o => {
+      const orderMs = getMs(o.createdAt || (o as any).updatedAt);
+      if (orderMs && orderMs < cutoffMs) return;
 
-      Object.entries(p.stages || {}).forEach(([step, s]: [string, any]) => {
-        if (!dataMap[step] || !s) return;
+      const timings = o.stageTimings || (o as any).opsDetails?.stageTimings;
+      if (!timings || typeof timings !== 'object') return;
 
-        // 1. Completed stage tracking
-        if (s.completedAt) {
-          let min: number | null = null;
-          if (typeof s.acceptToCompleteMin === 'number' && s.acceptToCompleteMin > 0) {
-            min = s.acceptToCompleteMin;
-          } else if (typeof s.startToCompleteMin === 'number' && s.startToCompleteMin > 0) {
-            min = s.startToCompleteMin;
-          } else if (typeof s.durationMs === 'number' && s.durationMs > 0) {
-            min = Math.round(s.durationMs / 60000);
-          } else {
-            const compMs = getMs(s.completedAt);
-            const stMs = getMs(s.startedAt || s.acceptedAt || s.assignedAt);
-            if (compMs > stMs && stMs > 0) {
-              min = Math.round((compMs - stMs) / 60000);
-            }
-          }
+      Object.entries(timings).forEach(([rawStep, s]: [string, any]) => {
+        if (!s) return;
+        const step = rawStep === 'drying' ? 'getting_dried' : (rawStep === 'ironing' ? 'getting_ironed' : rawStep);
+        if (!dataMap[step]) return;
 
-          if (min !== null && min > 0 && min < 600) {
-            dataMap[step].completedTotalMin += min;
-            dataMap[step].completedCount += 1;
+        let min: number | null = null;
+        if (typeof s.startToCompleteMin === 'number' && s.startToCompleteMin > 0) {
+          min = s.startToCompleteMin;
+        } else if (typeof s.acceptToCompleteMin === 'number' && s.acceptToCompleteMin > 0) {
+          min = s.acceptToCompleteMin;
+        } else if (typeof s.durationMs === 'number' && s.durationMs > 0) {
+          min = Math.round(s.durationMs / 60000);
+        } else if (s.completedAt && (s.startedAt || s.acceptedAt)) {
+          const compMs = getMs(s.completedAt);
+          const stMs = getMs(s.startedAt || s.acceptedAt);
+          if (compMs > stMs && stMs > 0) {
+            min = Math.round((compMs - stMs) / 60000);
           }
         }
 
-        // 2. Active running stage tracking
-        if (!done && cur === step && !s.completedAt) {
-          dataMap[step].runningCount += 1;
-          const stMs = getMs(s.startedAt || s.acceptedAt || s.assignedAt || p.claimedAt);
-          const elapsed = stMs > 0 ? Math.max(1, Math.round((Date.now() - stMs) / 60000)) : 1;
-          if (elapsed < 600) {
-            dataMap[step].runningTotalMin += elapsed;
+        if (min !== null && min > 0 && min < 600) {
+          dataMap[step].completedTotalMin += min;
+          dataMap[step].completedCount += 1;
+        }
+      });
+    });
+
+    // 2. Also incorporate completed stages from active live processes
+    processes.forEach(p => {
+      Object.entries(p.stages || {}).forEach(([rawStep, s]: [string, any]) => {
+        if (!s || !s.completedAt) return;
+        const step = rawStep === 'drying' ? 'getting_dried' : (rawStep === 'ironing' ? 'getting_ironed' : rawStep);
+        if (!dataMap[step]) return;
+
+        const compMs = getMs(s.completedAt);
+        if (compMs && compMs < cutoffMs) return;
+
+        let min: number | null = null;
+        if (typeof s.startToCompleteMin === 'number' && s.startToCompleteMin > 0) {
+          min = s.startToCompleteMin;
+        } else if (typeof s.acceptToCompleteMin === 'number' && s.acceptToCompleteMin > 0) {
+          min = s.acceptToCompleteMin;
+        } else if (typeof s.durationMs === 'number' && s.durationMs > 0) {
+          min = Math.round(s.durationMs / 60000);
+        } else {
+          const stMs = getMs(s.startedAt || s.acceptedAt || s.assignedAt);
+          if (compMs > stMs && stMs > 0) {
+            min = Math.round((compMs - stMs) / 60000);
           }
+        }
+
+        if (min !== null && min > 0 && min < 600) {
+          dataMap[step].completedTotalMin += min;
+          dataMap[step].completedCount += 1;
         }
       });
     });
@@ -278,19 +303,16 @@ export function SupervisorDashboardScreen() {
     return Object.entries(targetMap).map(([key, config]) => {
       const d = dataMap[key];
       const completedAvg = d.completedCount > 0 ? Math.round(d.completedTotalMin / d.completedCount) : null;
-      const runningAvg = d.runningCount > 0 && d.runningTotalMin > 0 ? Math.round(d.runningTotalMin / d.runningCount) : null;
 
       return {
         key,
         label: config.label,
         target: config.target,
         completedAvg,
-        runningAvg,
-        runningCount: d.runningCount,
         completedCount: d.completedCount,
       };
     });
-  }, [processes]);
+  }, [orders, processes, benchmarkFilter]);
 
   const renderInboundCard = (o: FeedOrder) => {
     const chips = parseOrderTokens(o.tokens, o.tokenNumber, o.items);
@@ -316,10 +338,34 @@ export function SupervisorDashboardScreen() {
                 <Text className="text-amber-900 font-extrabold text-[9px]">T-{c.token}</Text>
               </View>
             ))}
+            {Boolean((o as any).packagingProof?.videoUrl || (o as any).opsDetails?.packagingProof?.videoUrl) && (
+              <View className="bg-purple-50 border border-purple-300 px-1 py-0.2 rounded flex-row items-center">
+                <Video size={8} color="#7e22ce" className="mr-0.5" />
+                <Text className="text-purple-700 font-black text-[8px]">VIDEO</Text>
+              </View>
+            )}
             {isUrgent && (
               <View className="bg-rose-50 border border-rose-300 px-1.5 py-0.2 rounded flex-row items-center">
                 <Zap size={8} color="#e11d48" className="mr-0.5" />
                 <Text className="text-rose-700 font-black text-[8px] uppercase">URGENT</Text>
+              </View>
+            )}
+            {o.status === 'in_transit_to_store' && !!o.storeOTP && (
+              <View className="bg-purple-50 border border-purple-300 px-1.5 py-0.2 rounded flex-row items-center">
+                <KeyRound size={8} color="#7e22ce" className="mr-0.5" />
+                <Text className="text-purple-700 font-black text-[8px]">STORE OTP: {o.storeOTP}</Text>
+              </View>
+            )}
+            {(o.status === 'placed' || o.status === 'confirmed') && !!o.pickupOTP && (
+              <View className="bg-blue-50 border border-blue-300 px-1.5 py-0.2 rounded flex-row items-center">
+                <KeyRound size={8} color="#1d4ed8" className="mr-0.5" />
+                <Text className="text-blue-700 font-black text-[8px]">OTP: {o.pickupOTP}</Text>
+              </View>
+            )}
+            {(o.status === 'ready' || o.status === 'out_for_delivery') && !!o.deliveryOTP && (
+              <View className="bg-emerald-50 border border-emerald-300 px-1.5 py-0.2 rounded flex-row items-center">
+                <KeyRound size={8} color="#047857" className="mr-0.5" />
+                <Text className="text-emerald-700 font-black text-[8px]">DELIVERY OTP: {o.deliveryOTP}</Text>
               </View>
             )}
           </View>
@@ -400,11 +446,13 @@ export function SupervisorDashboardScreen() {
                   </View>
                 );
               }
-              if (o.status === 'placed' || o.status === 'confirmed') {
+              if (o.status === 'placed' || o.status === 'confirmed' || o.status === 'ready') {
                 return (
                   <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.2 rounded flex-row items-center">
                     <AlertTriangle size={8} color="#d97706" className="mr-0.5" />
-                    <Text className="text-amber-800 font-bold text-[9px]">Unassigned</Text>
+                    <Text className="text-amber-800 font-bold text-[9px]">
+                      {o.status === 'ready' ? 'Delivery Unassigned' : 'Unassigned'}
+                    </Text>
                   </View>
                 );
               }
@@ -790,55 +838,52 @@ export function SupervisorDashboardScreen() {
                 </View>
               </View>
 
-              {/* Widget 3: Stage Timing Benchmarks (Compact 5-Stage Metrics) */}
+              {/* Widget 3: Stage Timing Benchmarks with 1D / 7D / 15D / 30D Filter */}
               <View className="bg-white rounded-2xl p-3.5 border border-slate-200/90 mb-3 shadow-2xs">
-                <View className="flex-row items-center justify-between mb-2">
+                <View className="flex-row items-center justify-between mb-2.5">
                   <View className="flex-row items-center">
                     <Timer size={13} color="#994bff" className="mr-1.5" />
                     <Text className="text-slate-900 font-extrabold text-xs">Stage Timing Benchmarks</Text>
                   </View>
-                  <Text className="text-slate-400 text-[10px] font-semibold">Live Avg</Text>
+                  <View className="flex-row items-center gap-1 bg-slate-100 p-0.5 rounded-lg">
+                    {(['1d', '7d', '15d', '30d'] as const).map(f => (
+                      <TouchableOpacity
+                        key={f}
+                        onPress={() => setBenchmarkFilter(f)}
+                        className={`px-1.5 py-0.5 rounded ${benchmarkFilter === f ? 'bg-white shadow-2xs' : ''}`}
+                      >
+                        <Text className={`text-[9px] font-bold uppercase ${benchmarkFilter === f ? 'text-purple-700' : 'text-slate-400'}`}>
+                          {f}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
                 </View>
                 <View className="flex-row gap-1.5">
                   {stageBenchmarks.map(s => {
-                    const displayVal = s.completedAvg !== null 
-                      ? `${s.completedAvg}m` 
-                      : s.runningAvg !== null 
-                      ? `~${s.runningAvg}m` 
-                      : '—';
-                    
-                    const valNumber = s.completedAvg ?? s.runningAvg;
-                    const isAboveTarget = valNumber !== null && valNumber > s.target;
-                    const isRunning = s.runningCount > 0;
+                    const displayVal = s.completedAvg !== null ? `${s.completedAvg}m` : '—';
+                    const isAboveTarget = s.completedAvg !== null && s.completedAvg > s.target;
+                    const isWithinTarget = s.completedAvg !== null && s.completedAvg <= s.target;
 
                     return (
                       <View key={s.key} className={`flex-1 p-1.5 rounded-xl border items-center ${
                         isAboveTarget 
                           ? 'bg-amber-50/70 border-amber-200' 
-                          : isRunning 
-                          ? 'bg-purple-50/50 border-purple-200/80' 
+                          : isWithinTarget
+                          ? 'bg-emerald-50/60 border-emerald-200' 
                           : 'bg-slate-50 border-slate-100'
                       }`}>
-                        <View className="flex-row items-center">
-                          <Text className="text-slate-400 text-[9px] font-bold uppercase">{s.label}</Text>
-                          {isRunning && (
-                            <View className="w-1.5 h-1.5 rounded-full bg-purple-600 ml-0.5" />
-                          )}
-                        </View>
+                        <Text className="text-slate-400 text-[9px] font-bold uppercase">{s.label}</Text>
 
                         <Text className={`font-black text-xs mt-0.5 ${
-                          isAboveTarget ? 'text-amber-800' : isRunning ? 'text-purple-900' : 'text-slate-900'
+                          isAboveTarget ? 'text-amber-800' : isWithinTarget ? 'text-emerald-800' : 'text-slate-400'
                         }`}>
                           {displayVal}
                         </Text>
 
-                        {isRunning ? (
-                          <Text className="text-purple-700 text-[8px] font-bold mt-0.5">
-                            {s.runningCount} act
-                          </Text>
-                        ) : (
-                          <Text className="text-slate-400 text-[8px] mt-0.5">{s.target}m tgt</Text>
-                        )}
+                        <Text className="text-slate-400 text-[8px] mt-0.5">
+                          {s.completedCount > 0 ? `${s.completedCount} ord` : `${s.target}m tgt`}
+                        </Text>
                       </View>
                     );
                   })}

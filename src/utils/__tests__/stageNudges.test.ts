@@ -19,7 +19,7 @@ function makeTestProcess(cur: 'getting_washed' | 'getting_dried', stageData: any
 describe('stageNudges', () => {
   const UID = 'helper_1';
 
-  it('triggers wash accepted nudge after 5 minutes', () => {
+  it('triggers wash accepted or assigned nudge after 5 minutes', () => {
     const baseTime = 1000000;
     const process = makeTestProcess('getting_washed', {
       assignee: UID,
@@ -35,6 +35,13 @@ describe('stageNudges', () => {
     expect(nudge?.phase).toBe('accepted');
     expect(nudge?.snoozeLabel).toBe('Still Pre-staining (+5m)');
     expect(nudge?.actionLabel).toBe('Start Washing');
+
+    // Also works when assignedAt is set without acceptedAt (unstarted task)
+    const assignedProcess = makeTestProcess('getting_washed', {
+      assignee: UID,
+      assignedAt: baseTime,
+    });
+    expect(getProcessNudge(assignedProcess, UID, baseTime + 5 * 60 * 1000)).not.toBeNull();
   });
 
   it('respects 5-minute snooze loop after wash accepted', () => {
@@ -60,7 +67,7 @@ describe('stageNudges', () => {
     expect(nudge?.snoozeLabel).toBe('Still Pre-staining (+5m)');
   });
 
-  it('triggers wash started nudge after 37 minutes and allows 5-min snooze', () => {
+  it('triggers wash started nudge after 35 minutes and allows 5-min snooze', () => {
     const baseTime = 1000000;
     const process = makeTestProcess('getting_washed', {
       assignee: UID,
@@ -68,18 +75,18 @@ describe('stageNudges', () => {
       startedAt: baseTime,
     });
 
-    // 36 minutes: suppressed
-    expect(getProcessNudge(process, UID, baseTime + 36 * 60 * 1000)).toBeNull();
+    // 34 minutes: suppressed
+    expect(getProcessNudge(process, UID, baseTime + 34 * 60 * 1000)).toBeNull();
 
-    // 37 minutes: fires!
-    const nudge = getProcessNudge(process, UID, baseTime + 37 * 60 * 1000);
+    // 35 minutes: fires!
+    const nudge = getProcessNudge(process, UID, baseTime + 35 * 60 * 1000);
     expect(nudge).not.toBeNull();
     expect(nudge?.phase).toBe('started');
-    expect(nudge?.snoozeLabel).toBe('Still running');
-    expect(nudge?.actionLabel).toBe('Complete Washing');
+    expect(nudge?.snoozeLabel).toBe('Still running (+5m)');
+    expect(nudge?.actionLabel).toBe('Complete & Unload');
   });
 
-  it('triggers dry accepted after 5 mins (5 min snooze) and dry started after 46 mins (3 min snooze)', () => {
+  it('triggers dry accepted after 5 mins (5 min snooze) and dry started after 45 mins (5 min snooze)', () => {
     const baseTime = 2000000;
     const dryProcess = makeTestProcess('getting_dried', {
       assignee: UID,
@@ -92,15 +99,15 @@ describe('stageNudges', () => {
     expect(dryAcceptNudge?.snoozeLabel).toBe('Still transferring (+5m)');
     expect(dryAcceptNudge?.actionLabel).toBe('Start Drying');
 
-    // Dry start: fires after 46m
+    // Dry start: fires after 45m
     const dryStartedProcess = makeTestProcess('getting_dried', {
       assignee: UID,
       startedAt: baseTime,
     });
-    expect(getProcessNudge(dryStartedProcess, UID, baseTime + 45 * 60 * 1000)).toBeNull();
-    const dryStartedNudge = getProcessNudge(dryStartedProcess, UID, baseTime + 46 * 60 * 1000);
-    expect(dryStartedNudge?.snoozeLabel).toBe('Still running');
-    expect(dryStartedNudge?.actionLabel).toBe('Complete Drying');
+    expect(getProcessNudge(dryStartedProcess, UID, baseTime + 44 * 60 * 1000)).toBeNull();
+    const dryStartedNudge = getProcessNudge(dryStartedProcess, UID, baseTime + 45 * 60 * 1000);
+    expect(dryStartedNudge?.snoozeLabel).toBe('Still running (+5m)');
+    expect(dryStartedNudge?.actionLabel).toBe('Complete & Unload');
   });
 
   it('suppresses nudges instantly when recordLocalSnooze is called', () => {

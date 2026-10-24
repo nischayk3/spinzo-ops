@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { taskTransition, isAwaitingPickup, checkPaymentGate, isIroningEligible, IRONING_PRIORITY_PHONES, isOrderEditable, isMachineNudgeDue } = require('./dispatch');
+const { taskTransition, isAwaitingPickup, checkPaymentGate, isIroningEligible, IRONING_PRIORITY_PHONES, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue } = require('./dispatch');
 
 test('isIroningEligible: allows Samsul and Abdur', () => {
   assert.strictEqual(isIroningEligible('+916369768237'), true); // Samsul
@@ -269,7 +269,7 @@ test('parseSlotStartMinutes: time format parsing', () => {
 
 test('isSlotDueForDispatch: instant and scheduled window validation', () => {
   const today = '2026-10-20';
-  const leadTime = 75; // 75 mins buffer
+  const leadTime = 15; // 15 mins buffer
 
   // 1. Instant pickup: ALWAYS due immediately regardless of time
   assert.strictEqual(isSlotDueForDispatch({ isInstant: true }), true);
@@ -290,32 +290,39 @@ test('isSlotDueForDispatch: instant and scheduled window validation', () => {
     { todayStr: today, currentMinutesIST: 660 }
   ), false);
 
-  // At 2:00 PM (840 mins): 360 mins away -> NOT due!
+  // At 7:30 PM (1170 mins): 30 mins away -> NOT due (lead time is 15)!
   assert.strictEqual(isSlotDueForDispatch(
     { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
     leadTime,
-    { todayStr: today, currentMinutesIST: 840 }
+    { todayStr: today, currentMinutesIST: 1170 }
   ), false);
 
-  // At 6:40 PM (1120 mins): 80 mins away -> NOT due yet (lead time is 75)
+  // At 7:40 PM (1180 mins): 20 mins away -> NOT due yet (lead time is 15)
   assert.strictEqual(isSlotDueForDispatch(
     { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
     leadTime,
-    { todayStr: today, currentMinutesIST: 1120 }
+    { todayStr: today, currentMinutesIST: 1180 }
   ), false);
 
-  // At 6:45 PM (1125 mins): exactly 75 mins away -> DUE FOR DISPATCH!
+  // At 7:45 PM (1185 mins): exactly 15 mins away -> DUE FOR DISPATCH!
   assert.strictEqual(isSlotDueForDispatch(
     { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
     leadTime,
-    { todayStr: today, currentMinutesIST: 1125 }
+    { todayStr: today, currentMinutesIST: 1185 }
   ), true);
 
-  // At 7:00 PM (1140 mins): 60 mins away -> DUE FOR DISPATCH!
+  // Default leadTime (no parameter passed): exactly 15 mins away -> DUE!
+  assert.strictEqual(isSlotDueForDispatch(
+    { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
+    undefined,
+    { todayStr: today, currentMinutesIST: 1185 }
+  ), true);
+
+  // At 7:50 PM (1190 mins): 10 mins away -> DUE FOR DISPATCH!
   assert.strictEqual(isSlotDueForDispatch(
     { scheduledDate: today, scheduledTime: '8:00 PM - 9:00 PM' },
     leadTime,
-    { todayStr: today, currentMinutesIST: 1140 }
+    { todayStr: today, currentMinutesIST: 1190 }
   ), true);
 
   // At 8:15 PM (1215 mins): currently happening / running -> DUE!
@@ -532,6 +539,10 @@ test('isMachineNudgeDue: unstarted wash/dry tasks after 5m grace window', () => 
   assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: fiveMinAgo }, 'getting_washed', now), true);
   assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo }, 'getting_dried', now), true);
 
+  // Assigned 5+ minutes ago (not yet accepted), not started -> DUE
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', assignedAt: fiveMinAgo }, 'getting_washed', now), true);
+  assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', assignedAt: sixMinAgo }, 'getting_dried', now), true);
+
   // Machine already started or completed -> NOT due
   assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo, startedAt: now - 1000 }, 'getting_washed', now), false);
   assert.strictEqual(isMachineNudgeDue({ assignee: 'u1', acceptedAt: sixMinAgo, completedAt: now - 1000 }, 'getting_washed', now), false);
@@ -563,6 +574,143 @@ test('isMachineNudgeDue: unstarted wash/dry tasks after 5m grace window', () => 
     acceptedAt: sixMinAgo,
     nudge: { accepted: { lastSentAt: now - 5 * 60 * 1000 } }
   }, 'getting_washed', now), true);
+});
+
+test('isMachineUnloadNudgeDue: wash cycle (35m) and dry cycle (45m) finished but not unloaded', () => {
+  const now = 2000000000;
+  const wash34MinAgo = now - 34 * 60 * 1000;
+  const wash35MinAgo = now - 35 * 60 * 1000;
+  const dry44MinAgo = now - 44 * 60 * 1000;
+  const dry45MinAgo = now - 45 * 60 * 1000;
+
+  // Not washing or drying
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo }, 'tagging', now), false);
+
+  // Not started yet
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1' }, 'getting_washed', now), false);
+
+  // Already completed (unloaded)
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo, completedAt: now - 1000 }, 'getting_washed', now), false);
+
+  // Washing: started 34m ago (cycle still running) -> false
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash34MinAgo }, 'getting_washed', now), false);
+
+  // Washing: started 35m ago (cycle finished, waiting to be unloaded) -> true
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo }, 'getting_washed', now), true);
+
+  // Drying: started 44m ago (cycle still running) -> false
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: dry44MinAgo }, 'getting_dried', now), false);
+
+  // Drying: started 45m ago (cycle finished, waiting to be unloaded) -> true
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: dry45MinAgo }, 'getting_dried', now), true);
+
+  // Snooze suppression: snoozed 2m ago -> false
+  assert.strictEqual(isMachineUnloadNudgeDue({
+    assignee: 'u1',
+    startedAt: wash35MinAgo,
+    nudge: { started: { lastSnoozedAt: now - 2 * 60 * 1000 } }
+  }, 'getting_washed', now), false);
+
+  // Snooze expired: snoozed 5m ago -> true
+  assert.strictEqual(isMachineUnloadNudgeDue({
+    assignee: 'u1',
+    startedAt: wash35MinAgo,
+    nudge: { started: { lastSnoozedAt: now - 5 * 60 * 1000 } }
+  }, 'getting_washed', now), true);
+
+  // Sent push suppression: push sent 2m ago -> false
+  assert.strictEqual(isMachineUnloadNudgeDue({
+    assignee: 'u1',
+    startedAt: wash35MinAgo,
+    nudge: { started: { lastSentAt: now - 2 * 60 * 1000 } }
+  }, 'getting_washed', now), false);
+
+  // Push expired: push sent 5m ago -> true
+  assert.strictEqual(isMachineUnloadNudgeDue({
+    assignee: 'u1',
+    startedAt: wash35MinAgo,
+    nudge: { started: { lastSentAt: now - 5 * 60 * 1000 } }
+  }, 'getting_washed', now), true);
+});
+
+test('splitOrderIntoServices: single load for <= 8kg wash_fold, wash_iron, premium_laundry', () => {
+  const { splitOrderIntoServices } = require('./dispatch');
+  
+  const orderWF5 = { items: [{ serviceType: 'wash_fold', weight: 5 }] };
+  const resWF5 = splitOrderIntoServices(orderWF5);
+  assert.strictEqual(resWF5.length, 1);
+  assert.strictEqual(resWF5[0].processKey, 'wash_fold');
+  assert.strictEqual(resWF5[0].loadCount, 1);
+  assert.strictEqual(resWF5[0].label, 'Wash & Fold');
+
+  const orderWI8 = { items: [{ serviceType: 'wash_iron', weight: 8 }] };
+  const resWI8 = splitOrderIntoServices(orderWI8);
+  assert.strictEqual(resWI8.length, 1);
+  assert.strictEqual(resWI8[0].processKey, 'wash_iron');
+  assert.strictEqual(resWI8[0].loadCount, 1);
+});
+
+test('splitOrderIntoServices: breaks into multiple loads at 8kg machine capacity boundaries', () => {
+  const { splitOrderIntoServices } = require('./dispatch');
+
+  // 12kg Wash & Fold -> 2 loads
+  const order12 = { items: [{ serviceType: 'wash_fold', weight: 12 }] };
+  const res12 = splitOrderIntoServices(order12);
+  assert.strictEqual(res12.length, 2);
+  assert.strictEqual(res12[0].processKey, 'wash_fold__L1');
+  assert.strictEqual(res12[0].tokenKey, 'wash_fold__L1');
+  assert.strictEqual(res12[0].loadIndex, 1);
+  assert.strictEqual(res12[0].loadCount, 2);
+  assert.strictEqual(res12[0].label, 'Wash & Fold (Load 1/2)');
+  assert.strictEqual(res12[1].processKey, 'wash_fold__L2');
+  assert.strictEqual(res12[1].loadIndex, 2);
+
+  // 16kg Wash & Iron -> 2 loads
+  const order16 = { items: [{ serviceType: 'wash_iron', weight: 16 }] };
+  const res16 = splitOrderIntoServices(order16);
+  assert.strictEqual(res16.length, 2);
+  assert.strictEqual(res16[0].processKey, 'wash_iron__L1');
+  assert.strictEqual(res16[1].processKey, 'wash_iron__L2');
+
+  // 20kg Wash & Fold -> 3 loads
+  const order20 = { items: [{ serviceType: 'wash_fold', weight: 20 }] };
+  const res20 = splitOrderIntoServices(order20);
+  assert.strictEqual(res20.length, 3);
+  assert.strictEqual(res20[0].processKey, 'wash_fold__L1');
+  assert.strictEqual(res20[1].processKey, 'wash_fold__L2');
+  assert.strictEqual(res20[2].processKey, 'wash_fold__L3');
+
+  // 32kg Wash & Fold -> 4 loads
+  const order32 = { items: [{ serviceType: 'wash_fold', weight: 32 }] };
+  const res32 = splitOrderIntoServices(order32);
+  assert.strictEqual(res32.length, 4);
+
+  // Respects explicit rider load tokens
+  const orderWithTokens = {
+    items: [{ serviceType: 'premium_laundry', weight: 14 }],
+    tokens: { premium_laundry__L1: '51', premium_laundry__L2: '52' }
+  };
+  const resTokens = splitOrderIntoServices(orderWithTokens);
+  assert.strictEqual(resTokens.length, 2);
+  assert.strictEqual(resTokens[0].tokenKey, 'premium_laundry__L1');
+  assert.strictEqual(resTokens[1].tokenKey, 'premium_laundry__L2');
+});
+
+test('splitOrderIntoServices: preserves non-weight-based services as single groups', () => {
+  const { splitOrderIntoServices } = require('./dispatch');
+  const orderMulti = {
+    items: [
+      { serviceType: 'wash_fold', weight: 12 },
+      { serviceType: 'blanket_wash', blanketType: 'single' },
+      { serviceType: 'ironing', ironingCount: 10 }
+    ]
+  };
+  const resMulti = splitOrderIntoServices(orderMulti);
+  assert.strictEqual(resMulti.length, 4); // 2 WF loads + 1 blanket + 1 ironing
+  assert.strictEqual(resMulti[0].processKey, 'wash_fold__L1');
+  assert.strictEqual(resMulti[1].processKey, 'wash_fold__L2');
+  assert.strictEqual(resMulti[2].processKey, 'blanket_wash_single');
+  assert.strictEqual(resMulti[3].processKey, 'ironing');
 });
 
 

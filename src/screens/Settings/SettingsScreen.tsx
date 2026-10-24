@@ -11,6 +11,7 @@ import { useStoreResourcesStore } from '../../store/storeResourcesStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useResponsive } from '../../utils/useResponsive';
+import { StaffAttendanceTable } from './StaffAttendanceTable';
 
 export function SettingsScreen() {
   const { user, activeRole, logout } = useAuthStore();
@@ -157,6 +158,9 @@ export function SettingsScreen() {
               </View>
             </View>
           )}
+
+          {/* Staff Attendance & Shift Ledger */}
+          {isSupervisor && <StaffAttendanceTable />}
 
           {/* Live Staff Deployment Roster */}
           {isSupervisor && (

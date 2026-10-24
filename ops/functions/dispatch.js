@@ -207,13 +207,29 @@ function stepsForServiceType(serviceType) {
  * - blanket_wash with blanketType: 'single' and 'double' → separate groups
  * - Credit items (isCreditItem) are grouped by their serviceType like normal
  */
+const LOAD_BASED_SERVICES = new Set(['wash_fold', 'wash_iron', 'premium_laundry']);
+const MACHINE_CAPACITY_KG = 8;
+
+/**
+ * Split an order's items into service groups for internal order splitting.
+ * Each group becomes its own ops_process doc.
+ * 
+ * For weight-based services (Wash & Fold, Wash & Iron, Premium Laundry):
+ * If the order has multiple loads (either via token keys like wash_fold__L1,
+ * or based on weight > 8kg), each load becomes its own independent ops_process doc!
+ * 
+ * Special handling:
+ * - blanket_wash with blanketType: 'single' and 'double' → separate groups
+ * - Credit items (isCreditItem) are grouped by their serviceType like normal
+ */
 function splitOrderIntoServices(order) {
   const items = (order && order.items) || [];
   if (items.length === 0) {
-    return [{ serviceType: 'wash_fold', label: 'Wash & Fold', items: [] }];
+    return [{ processKey: 'wash_fold', serviceType: 'wash_fold', label: 'Wash & Fold', tokenKey: 'wash_fold', loadIndex: 1, loadCount: 1, items: [] }];
   }
 
-  const groups = {};
+  const tokens = (order && order.tokens) || {};
+  const serviceGroups = {};
 
   for (const item of items) {
     const type = item.serviceType || 'wash_fold';
@@ -221,15 +237,69 @@ function splitOrderIntoServices(order) {
     // Special: blanket_wash with specific blanketType → split into single/double
     if (type === 'blanket_wash' && item.blanketType) {
       const key = `blanket_wash_${item.blanketType}`;
-      if (!groups[key]) groups[key] = { serviceType: key, label: SERVICE_LABELS[key] || `Blanket Wash (${item.blanketType})`, items: [] };
-      groups[key].items.push(item);
+      if (!serviceGroups[key]) serviceGroups[key] = { serviceType: key, label: SERVICE_LABELS[key] || `Blanket Wash (${item.blanketType})`, items: [] };
+      serviceGroups[key].items.push(item);
     } else {
-      if (!groups[type]) groups[type] = { serviceType: type, label: SERVICE_LABELS[type] || type, items: [] };
-      groups[type].items.push(item);
+      if (!serviceGroups[type]) serviceGroups[type] = { serviceType: type, label: SERVICE_LABELS[type] || type, items: [] };
+      serviceGroups[type].items.push(item);
     }
   }
 
-  return Object.values(groups);
+  const result = [];
+
+  for (const group of Object.values(serviceGroups)) {
+    const type = group.serviceType;
+    if (LOAD_BASED_SERVICES.has(type)) {
+      // 1. Check if rider tagged loads directly (e.g. wash_fold__L1, wash_fold__L2)
+      const tokenKeys = Object.keys(tokens).filter(k => k.toLowerCase().startsWith(`${type.toLowerCase()}__l`));
+
+      let loadCount = 1;
+      if (tokenKeys.length > 0) {
+        loadCount = tokenKeys.length;
+      } else {
+        const totalWeight = group.items.reduce((sum, it) => sum + Number(it.weight || (it.unit === 'kg' && it.quantity ? it.quantity : 0)), 0);
+        if (totalWeight > MACHINE_CAPACITY_KG) {
+          loadCount = Math.max(1, Math.ceil(totalWeight / MACHINE_CAPACITY_KG));
+        }
+      }
+
+      if (loadCount > 1) {
+        for (let l = 1; l <= loadCount; l++) {
+          result.push({
+            processKey: `${type}__L${l}`,
+            serviceType: type,
+            label: `${SERVICE_LABELS[type] || type} (Load ${l}/${loadCount})`,
+            tokenKey: `${type}__L${l}`,
+            loadIndex: l,
+            loadCount: loadCount,
+            items: group.items,
+          });
+        }
+      } else {
+        result.push({
+          processKey: type,
+          serviceType: type,
+          label: SERVICE_LABELS[type] || type,
+          tokenKey: type,
+          loadIndex: 1,
+          loadCount: 1,
+          items: group.items,
+        });
+      }
+    } else {
+      result.push({
+        processKey: type,
+        serviceType: type,
+        label: group.label,
+        tokenKey: type,
+        loadIndex: 1,
+        loadCount: 1,
+        items: group.items,
+      });
+    }
+  }
+
+  return result;
 }
 
 
@@ -697,7 +767,7 @@ function parseSlotStartMinutes(slotText) {
  * @param {number} [options.currentMinutesIST]
  * @returns {boolean}
  */
-function isSlotDueForDispatch(slotObj, leadTimeMinutes = 75, options = {}) {
+function isSlotDueForDispatch(slotObj, leadTimeMinutes = 15, options = {}) {
   if (!slotObj) return true; // fallback: unslotted orders dispatch immediately
 
   // 1. Instant pickups always due
@@ -780,10 +850,11 @@ function isMachineNudgeDue(stageData, step, nowMs = Date.now()) {
   // If machine was already started or completed, no nudge
   if (stageData.startedAt || stageData.completedAt) return false;
 
-  const acceptedMs = stageData.acceptedAt
-    ? (typeof stageData.acceptedAt.toMillis === 'function'
-      ? stageData.acceptedAt.toMillis()
-      : (typeof stageData.acceptedAt === 'number' ? stageData.acceptedAt : new Date(stageData.acceptedAt).getTime()))
+  const relevantTime = stageData.acceptedAt || stageData.assignedAt;
+  const acceptedMs = relevantTime
+    ? (typeof relevantTime.toMillis === 'function'
+      ? relevantTime.toMillis()
+      : (typeof relevantTime === 'number' ? relevantTime : new Date(relevantTime).getTime()))
     : 0;
   if (!acceptedMs) return false;
 
@@ -813,8 +884,61 @@ function isMachineNudgeDue(stageData, step, nowMs = Date.now()) {
   return nowMs >= acceptedMs + DELAY_MS;
 }
 
+/**
+ * Checks if a started wash or dry machine stage has finished running
+ * and is waiting to be unloaded (not yet completed).
+ * - Washing nominal cycle: 35 minutes
+ * - Drying nominal cycle: 45 minutes
+ * - Repeat/snooze suppression: 5 minutes
+ * 
+ * @param {object} stageData
+ * @param {string} step
+ * @param {number} nowMs
+ * @returns {boolean}
+ */
+function isMachineUnloadNudgeDue(stageData, step, nowMs = Date.now()) {
+  if (!stageData || !stageData.assignee) return false;
+  if (step !== 'getting_washed' && step !== 'getting_dried') return false;
+  // Must be started and not yet completed
+  if (!stageData.startedAt || stageData.completedAt) return false;
+
+  const startedMs = stageData.startedAt
+    ? (typeof stageData.startedAt.toMillis === 'function'
+      ? stageData.startedAt.toMillis()
+      : (typeof stageData.startedAt === 'number' ? stageData.startedAt : new Date(stageData.startedAt).getTime()))
+    : 0;
+  if (!startedMs) return false;
+
+  // Cycle durations: 35m for washing, 45m for drying
+  const CYCLE_MS = step === 'getting_washed' ? 35 * 60 * 1000 : 45 * 60 * 1000;
+  const REPEAT_MS = 5 * 60 * 1000; // 5m repeat interval
+
+  // Check last snooze timestamp
+  const lastSnoozeMs = stageData.nudge?.started?.lastSnoozedAt
+    ? (typeof stageData.nudge.started.lastSnoozedAt.toMillis === 'function'
+      ? stageData.nudge.started.lastSnoozedAt.toMillis()
+      : (typeof stageData.nudge.started.lastSnoozedAt === 'number' ? stageData.nudge.started.lastSnoozedAt : new Date(stageData.nudge.started.lastSnoozedAt).getTime()))
+    : 0;
+
+  // Check last sent timestamp
+  const lastSentMs = stageData.nudge?.started?.lastSentAt
+    ? (typeof stageData.nudge.started.lastSentAt.toMillis === 'function'
+      ? stageData.nudge.started.lastSentAt.toMillis()
+      : (typeof stageData.nudge.started.lastSentAt === 'number' ? stageData.nudge.started.lastSentAt : new Date(stageData.nudge.started.lastSentAt).getTime()))
+    : 0;
+
+  const effectiveWindowMs = Math.max(lastSnoozeMs, lastSentMs);
+
+  if (effectiveWindowMs > 0) {
+    return nowMs >= effectiveWindowMs + REPEAT_MS;
+  }
+
+  return nowMs >= startedMs + CYCLE_MS;
+}
+
 module.exports = {
   isMachineNudgeDue,
+  isMachineUnloadNudgeDue,
   getTodayDateString,
   isDeliveryDueToday,
   parseSlotStartMinutes,
@@ -846,6 +970,8 @@ module.exports = {
   getOccupiedMachines,
   allocateMachineName,
   selectHelperForStage,
+  LOAD_BASED_SERVICES,
+  MACHINE_CAPACITY_KG,
 };
 
 

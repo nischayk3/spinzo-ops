@@ -25,12 +25,12 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_washed_started: {
     step: 'getting_washed',
     phase: 'started',
-    initialDelayMs: 37 * 60 * 1000, // 37 minutes
+    initialDelayMs: 35 * 60 * 1000, // 35 minutes wash cycle
     repeatIntervalMs: 5 * 60 * 1000,  // 5 minutes snooze
-    title: 'Washing Cycle Check',
-    message: 'The 37-minute wash cycle has elapsed. Has the washing machine finished?',
-    snoozeLabel: 'Still running',
-    actionLabel: 'Complete Washing',
+    title: 'Washing Cycle Complete',
+    message: 'The 35-minute wash cycle has elapsed. Has the washing machine finished and been unloaded?',
+    snoozeLabel: 'Still running (+5m)',
+    actionLabel: 'Complete & Unload',
   },
   getting_dried_accepted: {
     step: 'getting_dried',
@@ -45,12 +45,12 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_dried_started: {
     step: 'getting_dried',
     phase: 'started',
-    initialDelayMs: 46 * 60 * 1000, // 46 minutes
+    initialDelayMs: 45 * 60 * 1000, // 45 minutes dry cycle
     repeatIntervalMs: 5 * 60 * 1000,  // 5 minutes snooze
-    title: 'Drying Cycle Check',
-    message: 'The 46-minute dry cycle has elapsed. Has the dryer finished?',
-    snoozeLabel: 'Still running',
-    actionLabel: 'Complete Drying',
+    title: 'Drying Cycle Complete',
+    message: 'The 45-minute dry cycle has elapsed. Has the dryer finished and been unloaded?',
+    snoozeLabel: 'Still running (+5m)',
+    actionLabel: 'Complete & Unload',
   },
 };
 
@@ -142,12 +142,13 @@ export function getProcessNudge(
     return null;
   }
 
-  if (stage.acceptedAt) {
+  const assignOrAcceptTs = stage.acceptedAt || stage.assignedAt;
+  if (assignOrAcceptTs) {
     const ruleKey = `${cur}_accepted`;
     const rule = STAGE_NUDGE_RULES[ruleKey];
     if (!rule) return null;
 
-    const acceptMs = toMillis(stage.acceptedAt);
+    const acceptMs = toMillis(assignOrAcceptTs);
     if (!acceptMs) return null;
 
     const nudgeKey = `${process.id || process.orderId}_${cur}_accepted`;
