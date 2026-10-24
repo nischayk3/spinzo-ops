@@ -542,4 +542,126 @@ describe('getTopEligibleTask', () => {
       expect(result?.orderId).toBe('pkg1');
     });
   });
+
+  describe('Drum-Buffer-Feed (Washer Starvation & Machine Feeding)', () => {
+    it('prioritizes wash-dependent tagging over packaging for Abdul when washers are starving', () => {
+      // 0 washers running, 0 orders in getting_washed
+      // 1 packaging task waiting
+      const pkg = makeProcess({
+        id: 'pkg1',
+        orderId: 'pkg1',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: {},
+      });
+
+      // 1 incoming pickup_completed order for Wash & Fold
+      const orders = [
+        { id: 'pkg1', status: 'processing', userId: 'u1' },
+        { id: 'wash_order', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_fold' },
+      ];
+
+      // Abdul (+916900311761) is free
+      const result = getTopEligibleTask(
+        [pkg],
+        orders,
+        'abdul_uid',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        '+916900311761' // Abdul
+      );
+
+      expect(result).not.toBeNull();
+      // Must be assigned the tagging task to feed the empty washer!
+      expect(result?.orderId).toBe('wash_order');
+      expect(result?.status).toBe('tagging');
+    });
+
+    it('assigns tagging to Abdur when Abdul is busy and washers are starving', () => {
+      const orders = [
+        { id: 'pkg1', status: 'processing', userId: 'u1' },
+        { id: 'wash_order', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_iron' },
+      ];
+
+      // Abdur (+917559105832) is free
+      const result = getTopEligibleTask(
+        [],
+        orders,
+        'abdur_uid',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        '+917559105832' // Abdur
+      );
+
+      expect(result).not.toBeNull();
+      expect(result?.orderId).toBe('wash_order');
+    });
+
+    it('allows Samsul to take tagging as fallback when washers are starving and no floor helpers free', () => {
+      const orders = [
+        { id: 'wash_order', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_fold' },
+      ];
+
+      // Samsul (+916369768237) is free, no iron orders exist
+      const result = getTopEligibleTask(
+        [],
+        orders,
+        'samsul_uid',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        '+916369768237' // Samsul
+      );
+
+      expect(result).not.toBeNull();
+      expect(result?.orderId).toBe('wash_order');
+    });
+
+    it('does NOT let packaging overflow starve an empty washer', () => {
+      // 4 packaging orders pending
+      const pkg1 = makeProcess({ id: 'pkg1', orderId: 'pkg1', steps: ['packaging'], status: 'packaging', stages: { packaging: { queuedAt: 1000 } as any } });
+      const pkg2 = makeProcess({ id: 'pkg2', orderId: 'pkg2', steps: ['packaging'], status: 'packaging', stages: { packaging: { queuedAt: 2000 } as any } });
+      const pkg3 = makeProcess({ id: 'pkg3', orderId: 'pkg3', steps: ['packaging'], status: 'packaging', stages: { packaging: { queuedAt: 3000 } as any } });
+      const pkg4 = makeProcess({ id: 'pkg4', orderId: 'pkg4', steps: ['packaging'], status: 'packaging', stages: { packaging: { queuedAt: 4000 } as any } });
+
+      // 1 wash order in tagging
+      const tagProcess = makeProcess({
+        id: 'wash_proc',
+        orderId: 'wash_order',
+        steps: ['tagging', 'getting_washed', 'getting_dried', 'packaging'],
+        status: 'tagging',
+        stages: {},
+      });
+
+      const orders = [
+        { id: 'pkg1', status: 'processing', userId: 'u1' },
+        { id: 'pkg2', status: 'processing', userId: 'u2' },
+        { id: 'pkg3', status: 'processing', userId: 'u3' },
+        { id: 'pkg4', status: 'processing', userId: 'u4' },
+        { id: 'wash_order', status: 'processing', userId: 'u5', serviceType: 'wash_fold' },
+      ];
+
+      // Abdul is free. Washers: 2, running: 0, waiting: 0 -> Washer is starving!
+      const result = getTopEligibleTask(
+        [pkg1, pkg2, pkg3, pkg4, tagProcess],
+        orders,
+        'abdul_uid',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        '+916900311761' // Abdul
+      );
+
+      expect(result).not.toBeNull();
+      // Packaging overflow must NOT starve the empty washer! Tagging is assigned!
+      expect(result?.orderId).toBe('wash_order');
+    });
+  });
 });

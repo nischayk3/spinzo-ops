@@ -1165,7 +1165,37 @@ async function autoAssignStage(processId, targetStage, options = {}) {
  */
 async function drainWaitingOpsQueues(stageList = null, options = {}) {
   try {
-    const stagesToCheck = stageList || ['getting_washed', 'getting_dried', 'getting_ironed', 'packaging', 'tagging'];
+    let stagesToCheck = stageList;
+    if (!stagesToCheck) {
+      // Determine if washers are starving or wash queue buffer is low (< 2 orders)
+      try {
+        const resSnap = await db.doc('config/storeResources').get();
+        const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
+        const maxWashers = resources.washers || 2;
+
+        const washSnap = await db.collection('ops_process')
+          .where('status', '==', 'getting_washed')
+          .get();
+        let runningWashers = 0;
+        let pendingWash = 0;
+        washSnap.forEach(d => {
+          const p = d.data();
+          const stg = p.stages?.getting_washed;
+          if (stg && !stg.completedAt) {
+            pendingWash += 1;
+            if (stg.startedAt) runningWashers += 1;
+          }
+        });
+        const waitingToWash = Math.max(0, pendingWash - runningWashers);
+        const washerNeedsFeeding = runningWashers < maxWashers || waitingToWash < 2;
+
+        stagesToCheck = washerNeedsFeeding
+          ? ['getting_washed', 'getting_dried', 'tagging', 'packaging', 'getting_ironed']
+          : ['getting_washed', 'getting_dried', 'packaging', 'getting_ironed', 'tagging'];
+      } catch (checkErr) {
+        stagesToCheck = ['getting_washed', 'getting_dried', 'tagging', 'packaging', 'getting_ironed'];
+      }
+    }
 
     for (const stg of stagesToCheck) {
       const queuedSnap = await db.collection('ops_process')
@@ -1470,7 +1500,7 @@ exports.scheduleDrainWaitingQueues = onSchedule({
   timeZone: 'Asia/Kolkata',
 }, async (event) => {
   await Promise.allSettled([
-    drainWaitingOpsQueues(['getting_washed', 'getting_dried', 'getting_ironed', 'packaging']),
+    drainWaitingOpsQueues(),
     drainScheduledRiderTasks(),
     checkUnstartedMachineNudges(),
   ]);

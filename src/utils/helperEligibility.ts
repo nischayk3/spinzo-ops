@@ -104,6 +104,27 @@ function isOrderTerminal(status?: string): boolean {
   return status === 'cancelled' || status === 'ready' || status === 'out_for_delivery' || status === 'delivered';
 }
 
+/** Check if an order or ops_process requires a washing machine cycle. */
+export function isWashDependent(task: OpsProcess | null, orders: any[] = []): boolean {
+  if (!task) return false;
+  if (Array.isArray(task.steps) && task.steps.length > 0) {
+    return task.steps.includes('getting_washed');
+  }
+  const st = String((task as any).serviceType || '').toLowerCase();
+  if (st) {
+    if (st.includes('ironing') && !st.includes('wash')) return false;
+    if (st === 'shoe_clean' || st === 'dry_clean') return false;
+    return true; // wash_fold, wash_iron, premium_laundry, blanket_wash
+  }
+  const o = orders.find(x => x.id === task.orderId || x.id === task.id);
+  if (o) {
+    const ost = String(o.serviceType || '').toLowerCase();
+    if (ost === 'ironing' || ost === 'shoe_clean' || ost === 'dry_clean') return false;
+    return true;
+  }
+  return true;
+}
+
 function getProcessTimestamp(p: OpsProcess): number {
   const cur = currentStep(p);
   const stage = cur ? p.stages?.[cur] : null;
@@ -212,21 +233,28 @@ export function getTopEligibleTask(
   // ✅ SHIFT GATE: an off-shift helper (not clocked in via QR) must NOT be auto-offered
   if (!onShift) return null;
 
-  // ── RULE: Packaging Overflow Rule ──
-  // If > 3 packaging orders pending (i.e. 4 or more), 4th arrival triggers instant
-  // assignment of the 1st (oldest) packaging order to next available helper, looping continuously.
-  const pendingPackaging = live.filter(
-    p => currentStep(p) === 'packaging' && !p.stages.packaging?.assignee && !p.stages.packaging?.completedAt
-  );
+  // ── Washer Capacity & Machine Buffer Metrics ──
+  const maxWashers = resources.washers || 2;
+  const runningWashers = countRunningMachines(live, 'getting_washed');
+  const pendingWash = countPendingStageOrders(live, 'getting_washed');
+  const waitingToWash = Math.max(0, pendingWash - runningWashers);
+  const isWasherStarving = runningWashers < maxWashers && waitingToWash === 0;
+  const isWashBufferLow = waitingToWash < 2;
 
-  if (pendingPackaging.length > 3) {
-    // Sort oldest first
-    pendingPackaging.sort((a, b) => getProcessTimestamp(a) - getProcessTimestamp(b));
-    const oldestPackaging = pendingPackaging[0];
-    if (!isHelperBusy(live, uid) && !isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
-      return oldestPackaging;
-    }
-  }
+  // Check for unclaimed orders that need tagging
+  const claimedOrderIds = new Set(processes.map(p => p.orderId));
+  const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
+  const unclaimedTaggingProcess: OpsProcess | null = o ? {
+    id: o.id,
+    orderId: o.id,
+    userId: o.userId,
+    vendorId: o.vendorId,
+    steps: ['tagging'],
+    currentIndex: 0,
+    status: 'tagging',
+    stages: {},
+    garments: { labels: [], registered: [] },
+  } : null;
 
   // ── 1. Filter eligible processes (with global machine capacity and buffer checks) ──
   const eligible = live.filter(p => {
@@ -235,10 +263,34 @@ export function getTopEligibleTask(
     return isHelperEligible(p, role, atCapacity, phone);
   });
 
+  const unassignedTaggingProcess = eligible.find(p => currentStep(p) === 'tagging') || null;
+  const candidateTaggingTask: OpsProcess | null = unassignedTaggingProcess || unclaimedTaggingProcess;
+  const taggingFeedsWasher = candidateTaggingTask ? isWashDependent(candidateTaggingTask, orders) : false;
+
+  // ── RULE: Packaging Overflow Rule ──
+  // If > 3 packaging orders pending (i.e. 4 or more), 4th arrival triggers instant
+  // assignment of the 1st (oldest) packaging order to next available helper, looping continuously.
+  // CRITICAL: Must NOT trigger if washers are starving for wash-feeding tagging orders!
+  const pendingPackaging = live.filter(
+    p => currentStep(p) === 'packaging' && !p.stages.packaging?.assignee && !p.stages.packaging?.completedAt
+  );
+
+  if (pendingPackaging.length > 3 && !(isWasherStarving && candidateTaggingTask && taggingFeedsWasher)) {
+    // Sort oldest first
+    pendingPackaging.sort((a, b) => getProcessTimestamp(a) - getProcessTimestamp(b));
+    const oldestPackaging = pendingPackaging[0];
+    if (!isHelperBusy(live, uid) && !isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
+      return oldestPackaging;
+    }
+  }
+
   // Sort by priority: getting_dried (1) -> getting_washed (2) -> packaging (3) -> getting_ironed (4)...
+  // If washers are starving, wash-dependent tagging is promoted ahead of packaging and ironing!
   eligible.sort((a, b) => {
-    const pA = getStepPriority(currentStep(a));
-    const pB = getStepPriority(currentStep(b));
+    const isTaggingA = currentStep(a) === 'tagging';
+    const isTaggingB = currentStep(b) === 'tagging';
+    const pA = (isTaggingA && isWasherStarving && isWashDependent(a, orders)) ? 2.5 : getStepPriority(currentStep(a));
+    const pB = (isTaggingB && isWasherStarving && isWashDependent(b, orders)) ? 2.5 : getStepPriority(currentStep(b));
     if (pA !== pB) return pA - pB;
     // Tie-break: oldest first
     return getProcessTimestamp(a) - getProcessTimestamp(b);
@@ -253,21 +305,6 @@ export function getTopEligibleTask(
   const isSamsul = normPhone === normalizePhone(SAMSUL_PHONE);
   const isAbdur = normPhone === normalizePhone(ABDUR_PHONE);
 
-  // Check for unclaimed orders that need tagging
-  const claimedOrderIds = new Set(processes.map(p => p.orderId));
-  const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
-  const taggingProcess: OpsProcess | null = o ? {
-    id: o.id,
-    orderId: o.id,
-    userId: o.userId,
-    vendorId: o.vendorId,
-    steps: ['tagging'],
-    currentIndex: 0,
-    status: 'tagging',
-    stages: {},
-    garments: { labels: [], registered: [] },
-  } : null;
-
   // ── 2. Machine Priority: Washer & Dryer should NEVER remain empty! ──
   // Surfaced to free helpers via full modal, or to hands-on helpers via non-intrusive floating banner.
   const machineProcess = eligible.find(p => isMachineStep(currentStep(p)));
@@ -280,16 +317,43 @@ export function getTopEligibleTask(
   // ── 3. Busy gate: hands-on work in progress for non-machine tasks ──
   if (isHelperBusy(live, uid) || isAcceptInFlight(live, orders, activeTask)) return null;
 
-  // ── 4. Equal Three-Helper Task Routing (Abdul, Abdur, Samsool) ──
+  // ── 4. Task Routing & Drum-Buffer-Feed Rule ──
   const ironProcess = eligible.find(p => currentStep(p) === 'getting_ironed');
+  const packagingProcess = eligible.find(p => currentStep(p) === 'packaging');
+
+  // WASHER FEEDING BUFFER RULE:
+  // If washers are starving (idle washer with no queued wash orders) OR wash buffer is low (< 2 ready),
+  // and there is an incoming wash-dependent tagging task, prioritize feeding the machines!
+  // Hierarchy: 1. Abdul (Primary) -> 2. Abdur (Secondary) -> 3. Samsul (Fallback)
+  if (candidateTaggingTask && taggingFeedsWasher && (isWasherStarving || isWashBufferLow)) {
+    if (isAbdul) {
+      return candidateTaggingTask;
+    }
+    if (isAbdur) {
+      return candidateTaggingTask;
+    }
+    // Samsul: if no iron orders pending, OR if washer is completely starving (running < maxWashers & waiting == 0)
+    if (isSamsul && (!ironProcess || isWasherStarving)) {
+      return candidateTaggingTask;
+    }
+    // Any other free helper
+    if (!isSamsul) {
+      return candidateTaggingTask;
+    }
+  }
+
   // If ironing is available and helper is Samsul, he takes it as primary specialist
   if (isSamsul && ironProcess) {
     return ironProcess;
   }
 
+  // Abdul: Primary for Tagging and Packaging
+  if (isAbdul && candidateTaggingTask) {
+    return candidateTaggingTask;
+  }
+
   // All three helpers (Abdul, Abdur, Samsool) are equally eligible for Tagging and Packaging!
-  if (taggingProcess) return taggingProcess;
-  const packagingProcess = eligible.find(p => currentStep(p) === 'packaging');
+  if (candidateTaggingTask) return candidateTaggingTask;
   if (packagingProcess) return packagingProcess;
 
   // With 2 iron stations, Abdur or Abdul can also operate Station 2 on pipeline overflow:

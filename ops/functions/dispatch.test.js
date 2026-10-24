@@ -713,6 +713,16 @@ test('splitOrderIntoServices: preserves non-weight-based services as single grou
   assert.strictEqual(resMulti[3].processKey, 'ironing');
 });
 
+test('stepsForServiceType: shoe_clean routes directly from tagging to packaging (no washer or dryer)', () => {
+  const { stepsForServiceType, getProcessingSteps } = require('./dispatch');
+  const steps = stepsForServiceType('shoe_clean');
+  assert.deepStrictEqual(steps, ['tagging', 'packaging']);
+
+  // Pure shoe cleaning orders have 0 machine production steps
+  const prodSteps = getProcessingSteps({ items: [{ serviceType: 'shoe_clean' }] });
+  assert.deepStrictEqual(prodSteps, []);
+});
+
 
 
 

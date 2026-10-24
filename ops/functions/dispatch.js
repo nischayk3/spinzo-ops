@@ -94,11 +94,13 @@ function getProcessingSteps(order) {
   const serviceTypes = order.items.map((item) => item.serviceType);
   const onlyIroning = serviceTypes.every((type) => type === 'ironing');
   if (onlyIroning) return ['getting_ironed'];
+  const onlyShoeClean = serviceTypes.every((type) => type === 'shoe_clean');
+  if (onlyShoeClean) return [];
 
   const steps = [];
   const needsWash = serviceTypes.some((type) =>
     type === 'wash_fold' || type === 'wash_iron' || type === 'blanket_wash' ||
-    type === 'premium_laundry' || type === 'dry_clean' || type === 'shoe_clean');
+    type === 'premium_laundry' || type === 'dry_clean');
   if (needsWash) steps.push('getting_washed');
   
   // Anything that is washed must be dried.
@@ -108,7 +110,7 @@ function getProcessingSteps(order) {
   if (needsDry) steps.push('getting_dried');
   if (needsIron) steps.push('getting_ironed');
   
-  if (steps.length === 0) return ['getting_washed', 'getting_dried'];
+  if (steps.length === 0) return [];
   return steps;
 }
 
@@ -190,8 +192,9 @@ function stepsForServiceType(serviceType) {
     case 'blanket_wash':
     case 'blanket_wash_single':
     case 'blanket_wash_double':
-    case 'shoe_clean':
       return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
+    case 'shoe_clean':
+      return ['tagging', 'packaging'];
     case 'dry_clean':
       return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
     default:
@@ -544,7 +547,14 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     }
 
     // Priority:
-    // 1. Completely free helper (least loaded among Abdul, Abdur, Samsul)
+    // 1. Helper who just finished tagging this order (holding the wet/tagged basket right now!)
+    const prev = options.previousAssignee ? canLoadHelpers.find(h => h.uid === options.previousAssignee) : null;
+    if (prev) {
+      const isHandsOn = (workloads[prev.uid]?.handsOn || 0) > 0;
+      return { ok: true, helper: prev, machineName, isMicroTask: isHandsOn };
+    }
+
+    // 2. Completely free helper (least loaded among Abdul, Abdur, Samsul)
     const freeAvailable = sortByLeastLoaded(canLoadHelpers.filter(h => {
       const wl = workloads[h.uid] || { handsOn: 0 };
       return wl.handsOn === 0;
