@@ -210,16 +210,32 @@ function stepsForServiceType(serviceType) {
  * - blanket_wash with blanketType: 'single' and 'double' → separate groups
  * - Credit items (isCreditItem) are grouped by their serviceType like normal
  */
-const LOAD_BASED_SERVICES = new Set(['wash_fold', 'wash_iron', 'premium_laundry']);
+const LOAD_BASED_SERVICES = new Set(['wash_fold', 'wash_iron', 'premium_laundry', 'blanket_wash']);
 const MACHINE_CAPACITY_KG = 8;
+
+/**
+ * Case-insensitively resolve a token value from an order's tokens map.
+ * Handles both lowercase ('wash_fold__l1') and uppercase ('wash_fold__L1') keys seamlessly.
+ */
+function resolveToken(tokens, key) {
+  if (!tokens || typeof tokens !== 'object' || !key) return '';
+  if (tokens[key]) return String(tokens[key]).trim();
+  const lowerKey = key.toLowerCase();
+  for (const [k, v] of Object.entries(tokens)) {
+    if (k.toLowerCase() === lowerKey && v) {
+      return String(v).trim();
+    }
+  }
+  return '';
+}
 
 /**
  * Split an order's items into service groups for internal order splitting.
  * Each group becomes its own ops_process doc.
  * 
- * For weight-based services (Wash & Fold, Wash & Iron, Premium Laundry):
+ * For weight-based services (Wash & Fold, Wash & Iron, Premium Laundry, Blanket Wash):
  * If the order has multiple loads (either via token keys like wash_fold__L1,
- * or based on weight > 8kg), each load becomes its own independent ops_process doc!
+ * or based on weight > 8kg, or multiple blankets), each load becomes its own independent ops_process doc!
  * 
  * Special handling:
  * - blanket_wash with blanketType: 'single' and 'double' → separate groups
@@ -235,7 +251,12 @@ function splitOrderIntoServices(order) {
   const serviceGroups = {};
 
   for (const item of items) {
-    const type = item.serviceType || 'wash_fold';
+    const rawType = item.serviceType || item.serviceId || 'wash_fold';
+    const type = rawType.toLowerCase().includes('wash_fold') || rawType.toLowerCase().includes('wash & fold') ? 'wash_fold' :
+                 rawType.toLowerCase().includes('wash_iron') || rawType.toLowerCase().includes('wash & iron') ? 'wash_iron' :
+                 rawType.toLowerCase().includes('premium_laundry') || rawType.toLowerCase().includes('premium laundry') ? 'premium_laundry' :
+                 rawType.toLowerCase().includes('blanket') ? 'blanket_wash' :
+                 rawType;
 
     // Special: blanket_wash with specific blanketType → split into single/double
     if (type === 'blanket_wash' && item.blanketType) {
@@ -263,6 +284,11 @@ function splitOrderIntoServices(order) {
         const totalWeight = group.items.reduce((sum, it) => sum + Number(it.weight || (it.unit === 'kg' && it.quantity ? it.quantity : 0)), 0);
         if (totalWeight > MACHINE_CAPACITY_KG) {
           loadCount = Math.max(1, Math.ceil(totalWeight / MACHINE_CAPACITY_KG));
+        } else if (type === 'blanket_wash') {
+          const totalBlankets = group.items.reduce((sum, it) => sum + ((it.singleBlanketCount || 0) + (it.doubleBlanketCount || 0) || it.blanketQuantity || it.quantity || 0), 0);
+          if (totalBlankets > 1) {
+            loadCount = Math.max(1, Math.ceil((totalBlankets * 5) / MACHINE_CAPACITY_KG));
+          }
         }
       }
 
@@ -1007,6 +1033,7 @@ module.exports = {
   selectHelperForStage,
   LOAD_BASED_SERVICES,
   MACHINE_CAPACITY_KG,
+  resolveToken,
 };
 
 

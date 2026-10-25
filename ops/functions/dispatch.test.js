@@ -723,6 +723,23 @@ test('stepsForServiceType: shoe_clean routes directly from tagging to packaging 
   assert.deepStrictEqual(prodSteps, []);
 });
 
+test('resolveToken: case-insensitively resolves tokens with __L1 and __l1', () => {
+  const { resolveToken } = require('./dispatch');
+  const tokens = { wash_fold__L1: '03', wash_fold__l2: '115' };
+  assert.strictEqual(resolveToken(tokens, 'wash_fold__l1'), '03');
+  assert.strictEqual(resolveToken(tokens, 'wash_fold__L1'), '03');
+  assert.strictEqual(resolveToken(tokens, 'wash_fold__L2'), '115');
+  assert.strictEqual(resolveToken(tokens, 'wash_fold__l2'), '115');
+  assert.strictEqual(resolveToken(tokens, 'non_existent'), '');
+});
 
-
-
+test('splitOrderIntoServices: splits blanket_wash with multiple blankets or >8kg into multiple loads', () => {
+  const { splitOrderIntoServices } = require('./dispatch');
+  const orderBlankets = {
+    items: [{ serviceType: 'blanket_wash', singleBlanketCount: 2, doubleBlanketCount: 1 }]
+  };
+  const res = splitOrderIntoServices(orderBlankets);
+  assert.strictEqual(res.length, 2); // 3 blankets * 5kg = 15kg -> 2 loads
+  assert.strictEqual(res[0].processKey, 'blanket_wash__L1');
+  assert.strictEqual(res[1].processKey, 'blanket_wash__L2');
+});

@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -960,7 +960,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         steps,
         currentIndex: 0,
         status: steps[0],
-        tokenNumber: tokens[tokenKey] || tokens[group.serviceType] || order.tokenNumber || '',
+        tokenNumber: resolveToken(tokens, tokenKey) || resolveToken(tokens, group.serviceType) || order.tokenNumber || '',
         siblingCount: serviceGroups.length,
         loadIndex: group.loadIndex || 1,
         loadCount: group.loadCount || 1,
@@ -2047,7 +2047,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             steps,
             currentIndex: 0,
             status: steps[0],
-            tokenNumber: tokens[tokenKey] || tokens[group.serviceType] || data.tokenNumber || order.tokenNumber || '',
+            tokenNumber: resolveToken(tokens, tokenKey) || resolveToken(tokens, group.serviceType) || data.tokenNumber || order.tokenNumber || '',
             siblingCount: serviceGroups.length,
             loadIndex: group.loadIndex || 1,
             loadCount: group.loadCount || 1,

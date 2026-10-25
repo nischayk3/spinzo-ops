@@ -157,7 +157,8 @@ export function getServiceLoadCount(serviceKey?: string, weightKg?: number): num
   const sid = String(serviceKey || '').toLowerCase();
   const isWeightBased = sid.includes('wash_fold') || sid.includes('wash & fold') ||
                         sid.includes('wash_iron') || sid.includes('wash & iron') ||
-                        sid.includes('premium_laundry') || sid.includes('premium laundry');
+                        sid.includes('premium_laundry') || sid.includes('premium laundry') ||
+                        sid.includes('blanket_wash') || sid.includes('blanket');
   if (!isWeightBased) return 1;
   const w = Number(weightKg) || 0;
   if (w <= 0) return 1;

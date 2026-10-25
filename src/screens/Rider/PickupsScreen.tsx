@@ -143,11 +143,13 @@ export function PickupsScreen() {
       const sid = String(key || rawKey || '').toLowerCase();
       const isWeightBased = sid.includes('wash_fold') || sid.includes('wash & fold') ||
                             sid.includes('wash_iron') || sid.includes('wash & iron') ||
-                            sid.includes('premium_laundry') || sid.includes('premium laundry');
+                            sid.includes('premium_laundry') || sid.includes('premium laundry') ||
+                            sid.includes('blanket_wash') || sid.includes('blanket');
 
       if (isWeightBased) {
         const baseKey = sid.includes('wash_fold') || sid.includes('wash & fold') ? 'wash_fold' :
                         sid.includes('wash_iron') || sid.includes('wash & iron') ? 'wash_iron' :
+                        sid.includes('blanket') ? 'blanket_wash' :
                         'premium_laundry';
 
         if (list.some(s => s.key === baseKey || s.key.startsWith(`${baseKey}__L`))) {
@@ -157,22 +159,28 @@ export function PickupsScreen() {
         let label = item.serviceName || item.name || baseKey.replace(/_/g, ' ');
         label = label.replace(/\b\w/g, (c: string) => c.toUpperCase());
 
-        const weight = Number(item.weight || (item.unit === 'kg' && item.quantity ? item.quantity : 5));
-        const loadCount = Math.max(1, Math.ceil(weight / 8));
+        const weight = Number(item.weight || (item.unit === 'kg' && item.quantity ? item.quantity : 0));
+        const blanketCount = (item.singleBlanketCount || 0) + (item.doubleBlanketCount || 0) || item.blanketQuantity || (sid.includes('blanket') && item.quantity ? item.quantity : 0);
+        const loadCount = weight > 0
+          ? Math.max(1, Math.ceil(weight / 8))
+          : blanketCount > 1
+            ? Math.max(1, Math.ceil((blanketCount * 5) / 8))
+            : 1;
 
         if (loadCount === 1) {
+          const detailStr = weight > 0 ? `${weight} kg (1 bag)` : blanketCount > 0 ? `${blanketCount} blanket (1 bag)` : '1 bag';
           list.push({
             key: baseKey,
             label,
-            details: `${weight} kg (1 bag)`,
+            details: detailStr,
           });
         } else {
-          const perBag = (weight / loadCount).toFixed(1).replace(/\.0$/, '');
+          const perBag = weight > 0 ? `~${(weight / loadCount).toFixed(1).replace(/\.0$/, '')} kg · Max 8kg` : `Bag of blankets`;
           for (let i = 1; i <= loadCount; i++) {
             list.push({
               key: `${baseKey}__L${i}`,
               label: `${label} (Bag ${i}/${loadCount})`,
-              details: `~${perBag} kg · Max 8kg`,
+              details: perBag,
             });
           }
         }

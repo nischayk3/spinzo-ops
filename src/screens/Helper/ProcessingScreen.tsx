@@ -343,7 +343,7 @@ function SupervisorFeed() {
           <View className="flex-1 mr-2">
             <View className="flex-row items-center flex-wrap gap-y-1 gap-x-1.5 mb-1">
               <Text className="text-gray-900 font-extrabold text-base shrink-1" numberOfLines={1}>
-                #{order?.shortId?.toUpperCase() || item.orderId.substring(0,6).toUpperCase()}{p && p.siblingCount && p.siblingCount > 1 ? `-${p.serviceType?.toUpperCase().substring(0,2)}` : ''}
+                #{order?.shortId?.toUpperCase() || item.orderId.substring(0,6).toUpperCase()}{p && p.siblingCount && p.siblingCount > 1 ? `-${p.serviceType?.toUpperCase().substring(0,2)}${p.loadCount && p.loadCount > 1 ? `-L${p.loadIndex || 1}` : ''}` : ''}
               </Text>
               {isUrgent && (
                 <View className="bg-red-500/15 border border-red-500/40 px-2 py-0.5 rounded-full flex-row items-center">
