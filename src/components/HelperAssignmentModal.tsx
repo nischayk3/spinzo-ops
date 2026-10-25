@@ -39,9 +39,9 @@ export function HelperAssignmentModal() {
 
   useEffect(() => {
     if (activeTask && !acceptingId) {
-      // Only play sound if helper is free (never ring loud alarm if helper is busy with hands-on garments)
+      // Loop alarm sound until helper accepts (continuous siren)
       if (!showAsBanner) {
-        dramaticChime(false);
+        dramaticChime(true);
       }
       const addr = order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '';
       triggerAssignmentNotification({

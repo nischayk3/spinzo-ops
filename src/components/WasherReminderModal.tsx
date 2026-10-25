@@ -46,7 +46,7 @@ export function WasherReminderModal() {
 
   useEffect(() => {
     if (activeReminder) {
-      dramaticChime(false);
+      dramaticChime(true);
       triggerStageNudgeNotification({
         orderId: activeReminder.orderId,
         orderShortId,

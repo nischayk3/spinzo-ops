@@ -946,9 +946,34 @@ function isMachineUnloadNudgeDue(stageData, step, nowMs = Date.now()) {
   return nowMs >= startedMs + CYCLE_MS;
 }
 
+/**
+ * Returns which washer chemical milestone is due for a running wash stage, or null.
+ * Mirrors client lifecycleNotifications: detergent @13m, softener @21m (softener wins if both due).
+ * Re-sends every 2 minutes (via nudge.<chemical>.lastSentAt) until the chemical is marked added.
+ */
+function washerChemicalNudgeDue(stageData, nowMs = Date.now()) {
+  if (!stageData || !stageData.assignee || !stageData.startedAt || stageData.completedAt) return null;
+  const toMs = (t) => (!t ? 0 : typeof t.toMillis === 'function' ? t.toMillis() : typeof t === 'number' ? t : new Date(t).getTime());
+  const startedMs = toMs(stageData.startedAt);
+  if (!startedMs) return null;
+
+  const REPEAT_MS = 2 * 60 * 1000;
+  const milestones = [
+    { chemical: 'softener', atMs: 21 * 60 * 1000, addedAt: stageData.softenerAddedAt },
+    { chemical: 'detergent', atMs: 13 * 60 * 1000, addedAt: stageData.detergentAddedAt },
+  ];
+  for (const m of milestones) {
+    if (m.addedAt || nowMs < startedMs + m.atMs) continue;
+    const lastSentMs = toMs(stageData.nudge?.[m.chemical]?.lastSentAt);
+    return !lastSentMs || nowMs >= lastSentMs + REPEAT_MS ? m.chemical : null;
+  }
+  return null;
+}
+
 module.exports = {
   isMachineNudgeDue,
   isMachineUnloadNudgeDue,
+  washerChemicalNudgeDue,
   getTodayDateString,
   isDeliveryDueToday,
   parseSlotStartMinutes,

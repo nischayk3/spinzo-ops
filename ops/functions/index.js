@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -92,7 +92,7 @@ async function sendFCMOrderAssignment({
 async function sendFCMStageNudge({
   staffId,
   orderId,
-  title = '⏰ Washing Status Check',
+  title = 'Washing Status Check',
   message = 'Are you still doing pre-stain treatment, or ready to load and start the washer?',
   step = 'getting_washed',
   phase = 'accepted',
@@ -1403,11 +1403,11 @@ async function checkUnstartedMachineNudges() {
           }
 
           const isWash = step === 'getting_washed';
-          const title = isWash ? '⏰ Washing Status Check' : '⏰ Drying Status Check';
+          const title = isWash ? 'Washing Status Check' : 'Drying Status Check';
           const message = isWash
             ? 'It has been 5+ minutes since this wash task was assigned. Are you still doing pre-stain treatment, or ready to load and start the washer?'
             : 'It has been 5+ minutes since this drying task was assigned. Are you still transferring/sorting clothes, or ready to start the dryer?';
-          const actionLabel = isWash ? 'START WASHER' : 'START DRYER';
+          const actionLabel = isWash ? 'START WASHING' : 'START DRYING';
 
           console.log(`[StageNudge] Dispatching FCM unstarted nudge to helper ${assigneeId} for order ${p.orderId || doc.id} (${step})`);
 
@@ -1450,11 +1450,11 @@ async function checkUnstartedMachineNudges() {
 
           const isWash = step === 'getting_washed';
           const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
-          const title = isWash ? '🧺 Washing Finished - Unload Washer' : '🧺 Drying Finished - Unload Dryer';
+          const title = isWash ? 'Washing Cycle Complete' : 'Drying Cycle Complete';
           const message = isWash
             ? `The 35-minute wash cycle has finished for Order #${shortId}. Please unload the washing machine and transfer load to dryer.`
             : `The 45-minute dry cycle has finished for Order #${shortId}. Please unload the dryer and transfer load to iron/packaging.`;
-          const actionLabel = isWash ? 'UNLOAD WASHER' : 'UNLOAD DRYER';
+          const actionLabel = 'COMPLETE & UNLOAD';
 
           console.log(`[StageNudge] Dispatching FCM unload machine nudge to helper ${assigneeId} for order #${shortId} (${step})`);
 
@@ -1480,6 +1480,34 @@ async function checkUnstartedMachineNudges() {
                 }
               }
             }
+          }, { merge: true });
+        }
+        // 3. Washer chemical milestones (13m detergent / 21m softener) — mirrors in-app WasherReminderModal
+        else if (step === 'getting_washed' && washerChemicalNudgeDue(stageData, now)) {
+          const chemical = washerChemicalNudgeDue(stageData, now);
+          const assigneeId = stageData.assignee;
+          const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
+          const isDetergent = chemical === 'detergent';
+
+          console.log(`[StageNudge] Dispatching FCM ${chemical} nudge to helper ${assigneeId} for order #${shortId}`);
+
+          await sendFCMStageNudge({
+            staffId: assigneeId,
+            orderId: p.orderId || doc.id,
+            title: isDetergent ? 'Add Detergent (13 Min)' : 'Add Softener (21 Min)',
+            message: isDetergent
+              ? `Order #${shortId} has reached 13 minutes in the wash cycle. Please add detergent to Washer now.`
+              : `Order #${shortId} has reached 21 minutes (rinse cycle started). Please add fabric softener now.`,
+            step,
+            phase: chemical,
+            actionLabel: isDetergent ? 'ADD DETERGENT NOW' : 'ADD SOFTENER NOW',
+          });
+
+          await doc.ref.set({
+            stages: { [step]: { nudge: { [chemical]: {
+              lastSentAt: admin.firestore.Timestamp.now(),
+              sendCount: admin.firestore.FieldValue.increment(1),
+            } } } },
           }, { merge: true });
         }
       }

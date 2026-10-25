@@ -36,7 +36,7 @@ export function StageNudgeModal() {
   // Alert triggers: Single non-looping chime + system heads-up notification + Android over-the-app overlay
   useEffect(() => {
     if (activeNudge && !busy) {
-      dramaticChime(false);
+      dramaticChime(true);
       triggerStageNudgeNotification({
         orderId: activeNudge.orderId,
         orderShortId: activeNudge.orderId.slice(-6).toUpperCase(),
