@@ -336,8 +336,8 @@ export function RootNavigator() {
       </Stack.Navigator>
       {isLoggedIn && effectiveRole === 'rider' && <GlobalAssignmentModal />}
       {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron') && <HelperAssignmentModal />}
-      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron' || effectiveRole === 'supervisor' || effectiveRole === 'admin') && <StageNudgeModal />}
-      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron' || effectiveRole === 'supervisor' || effectiveRole === 'admin') && <WasherReminderModal />}
+      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron') && <StageNudgeModal />}
+      {isLoggedIn && (effectiveRole === 'helper' || effectiveRole === 'iron') && <WasherReminderModal />}
     </>
   );
 }

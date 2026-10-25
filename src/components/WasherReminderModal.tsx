@@ -7,11 +7,17 @@ import { dramaticChime, stopAlarm } from '../utils/alerts';
 import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
 
+import { useAuthStore } from '../store/authStore';
+
 export function WasherReminderModal() {
+  const activeRole = useAuthStore(s => s.activeRole);
   const { activeReminder, dismissReminder, snoozeReminder } = useWasherReminderStore();
   const { markChemicalAdded, completeStep } = useOpsProcessStore();
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Supervisors and admins must never receive, see, or dismiss washer chemical reminders
+  if (activeRole === 'supervisor' || activeRole === 'admin') return null;
 
   const isDetergent = activeReminder?.milestone === 'detergent';
   const isSoftener = activeReminder?.milestone === 'softener';

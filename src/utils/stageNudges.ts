@@ -101,9 +101,9 @@ export function getProcessNudge(
   if (!stage) return null;
 
   const isSupervisor = role === 'supervisor' || role === 'admin';
-
-  // Must be assigned to this specific user (unassigned tasks in queue must NEVER nudge helpers!)
-  if (!stage.assignee || (stage.assignee !== uid && !isSupervisor)) return null;
+  // Stage nudges are strictly for the assigned helper doing the operations.
+  // Supervisors and admins must never receive or interfere with these reminder modals.
+  if (isSupervisor || !stage.assignee || stage.assignee !== uid) return null;
 
   // If already completed, no nudge
   if (stage.completedAt) return null;
@@ -161,18 +161,13 @@ export function getProcessNudge(
       : now >= acceptMs + rule.initialDelayMs;
 
     if (isDue) {
-      const helperTag = (isSupervisor && stage.assignee !== uid && stage.assigneeName) ? ` (${stage.assigneeName})` : '';
-      const customMsg = (isSupervisor && stage.assignee !== uid && stage.assigneeName)
-        ? `It has been 5+ minutes since ${stage.assigneeName} was assigned this ${cur === 'getting_washed' ? 'washing' : 'drying'} task. Are they still doing pre-stain / sorting, or ready to start the machine?`
-        : rule.message;
-
       return {
         processId: process.id,
         orderId: process.orderId,
         step: cur,
         phase: 'accepted',
-        title: `${rule.title}${helperTag}`,
-        message: customMsg,
+        title: rule.title,
+        message: rule.message,
         snoozeLabel: rule.snoozeLabel,
         actionLabel: rule.actionLabel,
         elapsedMinutes: Math.max(1, Math.round((now - acceptMs) / 60000)),
@@ -194,8 +189,13 @@ export function getActiveStageNudge(
   now: number = Date.now(),
   role?: string
 ): ActiveStageNudge | null {
+  // Supervisors and admins must never receive or operate on helper stage nudges
+  if (role === 'supervisor' || role === 'admin') {
+    return null;
+  }
+
   // If helper is actively busy with hands-on work, NEVER disturb them with reminder alarms
-  if (role !== 'supervisor' && role !== 'admin' && isHelperDoingHandsOn(processes, uid)) {
+  if (isHelperDoingHandsOn(processes, uid)) {
     return null;
   }
 

@@ -62,9 +62,10 @@ export function useLifecycleNotifications() {
     });
   }, [orders, isOrdersLoading, isSupervisorOrAdmin]);
 
-  // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete)
+  // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete) - Helper ONLY
   useEffect(() => {
-    const isSupervisorOrAdmin = activeRole === 'supervisor' || activeRole === 'admin';
+    // Supervisors and admins must never receive or interfere with machine chemical reminders
+    if (isSupervisorOrAdmin) return;
 
     const checkWasherMilestones = () => {
       const now = Date.now();
@@ -74,9 +75,9 @@ export function useLifecycleNotifications() {
         const stage = p.stages?.getting_washed;
         if (!stage || !stage.startedAt || stage.completedAt) return;
 
-        // Only alert the assigned helper or supervisors/admins
+        // Only alert the assigned helper
         const isMyTask = myUid && stage.assignee === myUid;
-        if (!isMyTask && !isSupervisorOrAdmin) return;
+        if (!isMyTask) return;
 
         const startMs = typeof (stage.startedAt as any).toMillis === 'function'
           ? (stage.startedAt as any).toMillis()

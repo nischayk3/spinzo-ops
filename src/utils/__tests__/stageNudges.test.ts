@@ -134,7 +134,7 @@ describe('stageNudges', () => {
     clearLocalSnooze('proc_1_getting_washed_accepted');
   });
 
-  it('allows supervisors to receive unstarted machine nudges even if assigned to someone else', () => {
+  it('ensures supervisors and admins never receive helper machine stage nudges', () => {
     const baseTime = 4000000;
     const process = makeTestProcess('getting_washed', {
       assignee: 'other_helper',
@@ -145,10 +145,9 @@ describe('stageNudges', () => {
     // Another helper does not see it
     expect(getProcessNudge(process, 'helper_different', now, 'helper')).toBeNull();
 
-    // Supervisor sees it
-    const supervisorNudge = getProcessNudge(process, 'supervisor_1', now, 'supervisor');
-    expect(supervisorNudge).not.toBeNull();
-    expect(supervisorNudge?.actionLabel).toBe('Start Washing');
+    // Supervisor also does not see it (supervisors must never receive or interfere with helper operations check modals)
+    expect(getProcessNudge(process, 'supervisor_1', now, 'supervisor')).toBeNull();
+    expect(getProcessNudge(process, 'admin_1', now, 'admin')).toBeNull();
   });
 });
 

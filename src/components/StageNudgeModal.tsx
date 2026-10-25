@@ -16,9 +16,9 @@ export function StageNudgeModal() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // Poll for nudges every 10 seconds
+  // Poll for nudges every 10 seconds - Helper and Iron specialist ONLY
   useEffect(() => {
-    if (!user?.id) {
+    if (!user?.id || activeRole === 'supervisor' || activeRole === 'admin') {
       setActiveNudge(null);
       return;
     }
