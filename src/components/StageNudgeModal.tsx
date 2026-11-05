@@ -3,6 +3,8 @@ import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform } from
 import { Clock, Play, CheckCircle, X } from 'lucide-react-native';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useAuthStore } from '../store/authStore';
+import { useOpsStaffStore } from '../store/opsStaffStore';
+import { useStaffRosterStore } from '../store/staffRosterStore';
 import { getActiveStageNudge, ActiveStageNudge, recordLocalSnooze } from '../utils/stageNudges';
 import { dramaticChime, stopAlarm } from '../utils/alerts';
 import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
@@ -11,27 +13,57 @@ import { SpinzoOverlay } from 'spinzo-overlay';
 export function StageNudgeModal() {
   const user = useAuthStore(s => s.user);
   const activeRole = useAuthStore(s => s.activeRole);
+  const staffDoc = useOpsStaffStore(s => s.staffDoc);
+  const rosterHelpers = useStaffRosterStore(s => s.roster.helpers);
   const { processes, snoozeNudge, startStep, completeStep } = useOpsProcessStore();
   const [activeNudge, setActiveNudge] = useState<ActiveStageNudge | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // Poll for nudges every 10 seconds - Helper and Iron specialist ONLY
+  const isOnShift = staffDoc?.onShift === true;
+  const isOnBreak = Boolean(
+    staffDoc?.onBreak ||
+    staffDoc?.attendanceStatus === 'lunch' ||
+    staffDoc?.attendanceStatus === 'short_break'
+  );
+
+  // Poll for nudges every 10 seconds - Active working Helper and Iron specialist ONLY
   useEffect(() => {
-    if (!user?.id || activeRole === 'supervisor' || activeRole === 'admin') {
+    if (!user?.id || activeRole === 'supervisor' || activeRole === 'admin' || !isOnShift || isOnBreak) {
       setActiveNudge(null);
       return;
     }
 
     const check = () => {
-      const nudge = getActiveStageNudge(processes, user.id, Date.now(), activeRole || undefined);
+      const workingHelperIds = new Set(
+        rosterHelpers
+          .filter(
+            h =>
+              (h.role === 'helper' || h.role === 'iron') &&
+              h.onShift === true &&
+              !h.onBreak &&
+              h.attendanceStatus !== 'lunch' &&
+              h.attendanceStatus !== 'short_break' &&
+              h.attendanceStatus !== 'off'
+          )
+          .map(h => h.uid)
+      );
+      if (isOnShift && !isOnBreak && user.id) {
+        workingHelperIds.add(user.id);
+      }
+
+      const nudge = getActiveStageNudge(processes, user.id, Date.now(), activeRole || undefined, {
+        onShift: isOnShift,
+        onBreak: isOnBreak,
+        workingHelperIds,
+      });
       setActiveNudge(nudge);
     };
 
     check();
     const interval = setInterval(check, 10000);
     return () => clearInterval(interval);
-  }, [processes, user?.id, activeRole]);
+  }, [processes, user?.id, activeRole, isOnShift, isOnBreak, rosterHelpers]);
 
   // Alert triggers: Single non-looping chime + system heads-up notification + Android over-the-app overlay
   useEffect(() => {

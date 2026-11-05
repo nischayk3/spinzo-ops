@@ -8,20 +8,31 @@ import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../
 import { SpinzoOverlay } from 'spinzo-overlay';
 
 import { useAuthStore } from '../store/authStore';
+import { useOpsStaffStore } from '../store/opsStaffStore';
 
 export function WasherReminderModal() {
   const activeRole = useAuthStore(s => s.activeRole);
+  const staffDoc = useOpsStaffStore(s => s.staffDoc);
   const { activeReminder, dismissReminder, snoozeReminder } = useWasherReminderStore();
   const { markChemicalAdded, completeStep } = useOpsProcessStore();
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Supervisors and admins must never receive, see, or dismiss washer chemical reminders
-  if (activeRole === 'supervisor' || activeRole === 'admin') return null;
+  const isAvailableForReminders =
+    staffDoc?.onShift === true &&
+    !staffDoc?.onBreak &&
+    staffDoc?.attendanceStatus !== 'lunch' &&
+    staffDoc?.attendanceStatus !== 'short_break';
 
-  const isDetergent = activeReminder?.milestone === 'detergent';
-  const isSoftener = activeReminder?.milestone === 'softener';
-  const isComplete = activeReminder?.milestone === 'complete';
+  // Supervisors, admins, off-shift staff, and on-break staff must never receive washer chemical reminders
+  const effectiveReminder =
+    activeRole === 'supervisor' || activeRole === 'admin' || !isAvailableForReminders
+      ? null
+      : activeReminder;
+
+  const isDetergent = effectiveReminder?.milestone === 'detergent';
+  const isSoftener = effectiveReminder?.milestone === 'softener';
+  const isComplete = effectiveReminder?.milestone === 'complete';
 
   const title = isDetergent
     ? 'Add Detergent (13 Min)'
@@ -29,10 +40,10 @@ export function WasherReminderModal() {
     ? 'Add Softener (21 Min)'
     : 'Washing Cycle Complete (35 Min)';
 
-  const orderShortId = activeReminder
-    ? (activeReminder.orderId.includes('__')
-      ? activeReminder.orderId.split('__')[0].slice(-6).toUpperCase()
-      : activeReminder.orderId.slice(-6).toUpperCase())
+  const orderShortId = effectiveReminder
+    ? (effectiveReminder.orderId.includes('__')
+      ? effectiveReminder.orderId.split('__')[0].slice(-6).toUpperCase()
+      : effectiveReminder.orderId.slice(-6).toUpperCase())
     : '';
 
   const description = isDetergent
@@ -51,10 +62,10 @@ export function WasherReminderModal() {
   const snoozeMins = isComplete ? 3 : 2;
 
   useEffect(() => {
-    if (activeReminder) {
+    if (effectiveReminder) {
       dramaticChime(true);
       triggerStageNudgeNotification({
-        orderId: activeReminder.orderId,
+        orderId: effectiveReminder.orderId,
         orderShortId,
         title,
         message: description,
@@ -63,7 +74,7 @@ export function WasherReminderModal() {
       });
       if (Platform.OS === 'android') {
         SpinzoOverlay.showOverlay({
-          orderId: activeReminder.orderId,
+          orderId: effectiveReminder.orderId,
           taskType: 'stage_nudge',
           customerName: title,
           address: description,
@@ -71,20 +82,22 @@ export function WasherReminderModal() {
         });
       }
     } else {
+      stopAlarm();
       clearAssignmentNotifications();
       if (Platform.OS === 'android') {
         SpinzoOverlay.dismissOverlay();
       }
     }
     return () => {
+      stopAlarm();
       clearAssignmentNotifications();
       if (Platform.OS === 'android') {
         SpinzoOverlay.dismissOverlay();
       }
     };
-  }, [activeReminder?.orderId, activeReminder?.milestone, title, description, actionLabel, orderShortId, isComplete]);
+  }, [effectiveReminder?.orderId, effectiveReminder?.milestone, title, description, actionLabel, orderShortId, isComplete]);
 
-  if (!activeReminder) return null;
+  if (!effectiveReminder) return null;
 
   const handleAction = async () => {
     stopAlarm();
@@ -92,19 +105,19 @@ export function WasherReminderModal() {
     setErrorMsg(null);
     try {
       if (isDetergent) {
-        const res = await markChemicalAdded(activeReminder.orderId, activeReminder.processId, 'detergent');
+        const res = await markChemicalAdded(effectiveReminder.orderId, effectiveReminder.processId, 'detergent');
         if (!res?.ok && res?.error && res.error !== 'already_added') {
           setErrorMsg(res.error || 'Failed to record detergent addition');
           return;
         }
       } else if (isSoftener) {
-        const res = await markChemicalAdded(activeReminder.orderId, activeReminder.processId, 'softener');
+        const res = await markChemicalAdded(effectiveReminder.orderId, effectiveReminder.processId, 'softener');
         if (!res?.ok && res?.error && res.error !== 'already_added') {
           setErrorMsg(res.error || 'Failed to record softener addition');
           return;
         }
       } else if (isComplete) {
-        const res = await completeStep(activeReminder.orderId, activeReminder.processId);
+        const res = await completeStep(effectiveReminder.orderId, effectiveReminder.processId);
         if (!res?.ok && res?.error && !['already_completed', 'invalid_state'].includes(res.error)) {
           setErrorMsg(res.error || 'Failed to complete wash cycle');
           return;
@@ -168,7 +181,7 @@ export function WasherReminderModal() {
             <View className="flex-1">
               <Text className="text-textPrimary font-black text-base">{title}</Text>
               <Text className="text-textMuted text-xs font-semibold">
-                Order #{orderShortId} • {activeReminder.elapsedMinutes}m elapsed
+                Order #{orderShortId} • {effectiveReminder.elapsedMinutes}m elapsed
               </Text>
             </View>
 

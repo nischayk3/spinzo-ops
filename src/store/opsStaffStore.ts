@@ -2,8 +2,10 @@ import { create } from 'zustand';
 import { Platform } from 'react-native';
 import { db } from '../config/firebase';
 import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from '../config/firebase';
-import { parseOpsTask, shouldAnnounce, OpsTask } from '../utils/opsTasks';
+import { parseOpsTask, shouldAnnounce, taskAlertKey, OpsTask } from '../utils/opsTasks';
 import { primeAlerts, announceAssignedPickup, announceAssignedDelivery, stopAlarm } from '../utils/alerts';
+import { cancelAllStageNudgeTimers } from '../utils/systemNotifications';
+import { useWasherReminderStore } from './washerReminderStore';
 import * as Notifications from 'expo-notifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
 
@@ -34,6 +36,8 @@ export interface StaffDoc {
   phone: string;
   name?: string;
   onShift?: boolean;
+  onBreak?: boolean;
+  attendanceStatus?: 'working' | 'lunch' | 'short_break' | 'off';
   shiftStartAt?: unknown;
   storeId?: string;
   storeName?: string;
@@ -62,6 +66,7 @@ export interface DeliveryTask {
   vendorId: string;
   status: string;
   assignee: string | null;
+  assignedBy?: string | null;
   deliveryAddress: string;
   deliveryDate: string | null;
   deliveryTime: string | null;
@@ -90,6 +95,7 @@ interface OpsStaffState {
   error: string | null;
   initialize: (uid: string) => void;
   goOnShift: (uid: string, role: string, phone: string, name?: string, extra?: Record<string, unknown>) => Promise<void>;
+  setBreakState: (uid: string, status: 'working' | 'lunch' | 'short_break') => Promise<void>;
   goOffShift: (uid: string) => Promise<void>;
   fetchStore: (storeId: string) => Promise<StoreInfo | null>;
   clearActiveHelperTask: () => Promise<void>;
@@ -99,6 +105,7 @@ interface OpsStaffState {
 let unsubStaff: (() => void) | null = null;
 let unsubTasks: (() => void) | null = null;
 let unsubDeliveries: (() => void) | null = null;
+let activeInitializedUid: string | null = null;
 // Tracks ids we've already alerted on so a refresh/re-subscribe doesn't re-announce.
 const announcedTaskIds = loadAnnounced();
 
@@ -145,9 +152,13 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   error: null,
 
   initialize: (uid) => {
+    if (activeInitializedUid === uid && unsubStaff && unsubTasks && unsubDeliveries) {
+      return;
+    }
     unsubStaff?.();
     unsubTasks?.();
     unsubDeliveries?.();
+    activeInitializedUid = uid;
 
     set({ isLoading: true });
     syncFCMToken(uid);
@@ -163,6 +174,12 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         set({ staffDoc: { ...d, uid }, isLoading: false });
         if (Platform.OS === 'android') {
           SpinzoOverlay.setOnShift(d.onShift === true);
+          if (d.onShift !== true) {
+            SpinzoOverlay.dismissOverlay();
+          }
+        }
+        if (d.onShift !== true || d.onBreak === true || d.attendanceStatus === 'lunch' || d.attendanceStatus === 'short_break') {
+          useWasherReminderStore.getState().dismissReminder();
         }
         if (!d.fcmToken) {
           syncFCMToken(uid);
@@ -179,12 +196,18 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         snap.forEach((docSnap) => {
           const t = parseOpsTask(docSnap.id, docSnap.data());
           tasks.push(t);
-          if (!isInitialTasks && shouldAnnounce(t, announcedTaskIds) && docSnap.id) {
-            announcedTaskIds.add(docSnap.id);
+          const alertKey = taskAlertKey(t, 'pickup');
+          if (!isInitialTasks && shouldAnnounce(t, announcedTaskIds, 'pickup') && docSnap.id) {
+            announcedTaskIds.add(alertKey);
             saveAnnounced(announcedTaskIds);
-            announceAssignedPickup(t);
-          } else if (docSnap.id) {
-            announcedTaskIds.add(docSnap.id);
+            const sd = get().staffDoc;
+            const isSupervisorOverride = Boolean(t.assignedBy && t.assignedBy !== 'system_auto');
+            const isOnBreak = sd?.onBreak === true || sd?.attendanceStatus === 'lunch' || sd?.attendanceStatus === 'short_break';
+            if ((!sd || sd.onShift !== false) && (!isOnBreak || isSupervisorOverride)) {
+              announceAssignedPickup(t);
+            }
+          } else if (docSnap.id && t.acceptedAt) {
+            announcedTaskIds.add(alertKey);
           }
         });
         isInitialTasks = false;
@@ -201,13 +224,14 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         const deliveries: DeliveryTask[] = [];
         snap.forEach((docSnap) => {
           const d = docSnap.data();
-          const task = {
+          const task: DeliveryTask = {
             id: docSnap.id,
             orderId: d.orderId || docSnap.id,
             userId: d.userId || '',
             vendorId: d.vendorId || 'vendor_1',
             status: d.status || 'pending',
             assignee: d.assignee || null,
+            assignedBy: d.assignedBy || null,
             deliveryAddress: d.deliveryAddress || '',
             deliveryDate: d.deliveryDate || null,
             deliveryTime: d.deliveryTime || null,
@@ -228,12 +252,18 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             proofUrl: d.proofUrl || null,
           };
           deliveries.push(task);
-          if (!isInitialDeliveries && shouldAnnounce(task, announcedTaskIds) && docSnap.id) {
-            announcedTaskIds.add(docSnap.id);
+          const alertKey = taskAlertKey(task, 'delivery');
+          if (!isInitialDeliveries && shouldAnnounce(task, announcedTaskIds, 'delivery') && docSnap.id) {
+            announcedTaskIds.add(alertKey);
             saveAnnounced(announcedTaskIds);
-            announceAssignedDelivery(task.orderId, task.deliveryAddress);
-          } else if (docSnap.id) {
-            announcedTaskIds.add(docSnap.id);
+            const sd = get().staffDoc;
+            const isSupervisorOverride = Boolean(task.assignedBy && task.assignedBy !== 'system_auto');
+            const isOnBreak = sd?.onBreak === true || sd?.attendanceStatus === 'lunch' || sd?.attendanceStatus === 'short_break';
+            if ((!sd || sd.onShift !== false) && (!isOnBreak || isSupervisorOverride)) {
+              announceAssignedDelivery(task.orderId, task.deliveryAddress);
+            }
+          } else if (docSnap.id && task.acceptedAt) {
+            announcedTaskIds.add(alertKey);
           }
         });
         isInitialDeliveries = false;
@@ -265,6 +295,8 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
           phone,
           name: name || '',
           onShift: true,
+          onBreak: false,
+          attendanceStatus: 'working',
           shiftStartAt: new Date(),
           ...(fcmToken ? { fcmToken } : {}),
           ...(extra || {}),
@@ -274,6 +306,30 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     } catch (err) {
       set({ error: String(err) });
       throw err;
+    }
+  },
+
+  setBreakState: async (uid, status) => {
+    const isBreak = status === 'lunch' || status === 'short_break';
+    if (isBreak) {
+      stopAlarm();
+      cancelAllStageNudgeTimers();
+      useWasherReminderStore.getState().dismissReminder();
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.dismissOverlay();
+      }
+    }
+    try {
+      await setDoc(
+        doc(db, 'ops_staff', uid),
+        {
+          onBreak: isBreak,
+          attendanceStatus: status,
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn('[opsStaff] setBreakState failed:', err);
     }
   },
 
@@ -313,12 +369,24 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   },
 
   goOffShift: async (uid) => {
+    stopAlarm();
+    cancelAllStageNudgeTimers();
+    useWasherReminderStore.getState().dismissReminder();
     if (Platform.OS === 'android') {
       SpinzoOverlay.setOnShift(false);
       SpinzoOverlay.dismissOverlay();
     }
     try {
-      await setDoc(doc(db, 'ops_staff', uid), { onShift: false, shiftEndAt: new Date() }, { merge: true });
+      await setDoc(
+        doc(db, 'ops_staff', uid),
+        {
+          onShift: false,
+          onBreak: false,
+          attendanceStatus: 'off',
+          shiftEndAt: new Date(),
+        },
+        { merge: true }
+      );
     } catch (err) {
       set({ error: String(err) });
       throw err;
@@ -326,10 +394,14 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
   },
 
   reset: () => {
+    stopAlarm();
+    cancelAllStageNudgeTimers();
+    useWasherReminderStore.getState().dismissReminder();
     if (Platform.OS === 'android') {
       SpinzoOverlay.setOnShift(false);
       SpinzoOverlay.dismissOverlay();
     }
+    activeInitializedUid = null;
     unsubStaff?.();
     unsubTasks?.();
     unsubDeliveries?.();

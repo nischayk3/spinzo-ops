@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { slotLabel } from '../orderFeed';
-import { parseOpsTask, isPending, shouldAnnounce, pickupLabel } from '../opsTasks';
+import { parseOpsTask, isPending, shouldAnnounce, taskAlertKey, pickupLabel } from '../opsTasks';
 
 describe('parseOpsTask', () => {
   it('maps id + fields onto an OpsTask', () => {
@@ -51,6 +51,25 @@ describe('shouldAnnounce', () => {
   });
   it('does not announce tasks that are already accepted', () => {
     expect(shouldAnnounce({ id: 'A', status: 'pending', acceptedAt: new Date() } as any, new Set())).toBe(false);
+  });
+  it('announces a scheduled delivery even when the same orderId was already seen as a pickup', () => {
+    const seen = new Set<string>();
+    const pickup = { id: 'ORD99', orderId: 'ORD99', status: 'pending', assignedAt: 1000 };
+    expect(shouldAnnounce(pickup, seen, 'pickup')).toBe(true);
+    seen.add(taskAlertKey(pickup, 'pickup'));
+
+    // Later, same order enters delivery queue for same rider: MUST announce!
+    const delivery = { id: 'ORD99', orderId: 'ORD99', status: 'assigned', assignedAt: 5000 };
+    expect(shouldAnnounce(delivery, seen, 'delivery')).toBe(true);
+  });
+  it('re-announces when a task is reassigned with a new assignedAt timestamp', () => {
+    const seen = new Set<string>();
+    const first = { id: 'ORD55', orderId: 'ORD55', status: 'assigned', assignedAt: 1000 };
+    seen.add(taskAlertKey(first, 'pickup'));
+    expect(shouldAnnounce(first, seen, 'pickup')).toBe(false);
+
+    const reassigned = { id: 'ORD55', orderId: 'ORD55', status: 'assigned', assignedAt: 2000 };
+    expect(shouldAnnounce(reassigned, seen, 'pickup')).toBe(true);
   });
 });
 

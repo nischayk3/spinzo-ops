@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -46,6 +46,7 @@ async function sendFCMOrderAssignment({
   slot = '',
   isInstant = false,
   stepName = '',
+  assignedBySupervisor = false,
 }) {
   if (!staffId) return;
   try {
@@ -55,6 +56,15 @@ async function sendFCMOrderAssignment({
       return;
     }
     const staffData = staffDoc.data();
+    // Never push order alerts to clocked-out staff; only supervisor overrides may alert on-break staff.
+    if (staffData.onShift !== true) {
+      console.log(`[FCM] Skipping assignment push to off-shift staff ${staffId}`);
+      return;
+    }
+    if (!assignedBySupervisor && !isStaffAvailableForAutoAssign(staffData)) {
+      console.log(`[FCM] Skipping auto-assignment push to on-break staff ${staffId}`);
+      return;
+    }
     const fcmToken = staffData.fcmToken;
     if (!fcmToken) {
       console.log(`[FCM] Staff ${staffId} has no fcmToken registered`);
@@ -72,6 +82,7 @@ async function sendFCMOrderAssignment({
         slot: String(slot || ''),
         isInstant: String(isInstant ? 'true' : 'false'),
         stepName: String(stepName || ''),
+        assignedBySupervisor: assignedBySupervisor ? 'true' : 'false',
       },
       android: {
         priority: 'high',
@@ -107,6 +118,10 @@ async function sendFCMStageNudge({
       return;
     }
     const staffData = staffDoc.data();
+    if (!isStaffAvailableForAutoAssign(staffData)) {
+      console.log(`[FCM] Skipping stage nudge to off-shift/on-break staff ${staffId}`);
+      return;
+    }
     const fcmToken = staffData.fcmToken;
     if (!fcmToken) {
       console.log(`[FCM] Staff ${staffId} has no fcmToken registered`);
@@ -150,10 +165,13 @@ async function selectRider() {
   const candidates = [];
   for (const doc of riders.docs) {
     const d = doc.data();
-    if (d.onShift !== true) continue;
+    if (!isStaffAvailableForAutoAssign(d)) continue;
     candidates.push({
       uid: doc.id,
       phone: d.phone || '',
+      onShift: d.onShift === true,
+      onBreak: d.onBreak === true,
+      attendanceStatus: d.attendanceStatus || 'working',
       shiftStartAt: d.shiftStartAt && typeof d.shiftStartAt.toMillis === 'function' ? d.shiftStartAt.toMillis() : 0,
     });
   }
@@ -206,7 +224,7 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const order = event.data.data();
 
   const pickupSlot = (order && (order.pickupDetails || order.pickup)) || null;
-  const isDueForDispatch = isSlotDueForDispatch(pickupSlot, 15);
+  const isDueForDispatch = isSlotDueForDispatch(pickupSlot, 20);
   const assignee = isDueForDispatch ? await selectRider() : null;
   const userId = event.params.userId;
   const vendorId = order.vendorId || 'default';
@@ -271,7 +289,14 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const after = event.data.after.data();
   if (!after) return;
   const wentOnShift = before && before.onShift !== true && after.onShift === true;
-  if (!wentOnShift) return;
+  const returnedFromBreak =
+    before &&
+    after.onShift === true &&
+    (before.onBreak === true || before.attendanceStatus === 'lunch' || before.attendanceStatus === 'short_break') &&
+    after.onBreak !== true &&
+    after.attendanceStatus !== 'lunch' &&
+    after.attendanceStatus !== 'short_break';
+  if ((!wentOnShift && !returnedFromBreak) || !isStaffAvailableForAutoAssign(after)) return;
 
   // Helper or Iron specialist went on shift: drain all waiting stage queues
   if (after.role === 'helper' || after.role === 'iron') {
@@ -317,6 +342,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
       await db.doc(`ops_tasks/${taskDoc.id}`).update({
         assignee: newRiderUid,
         assignedAt: TS(),
+        acceptedAt: admin.firestore.FieldValue.delete(),
       });
     } catch (err) {
       console.error(`onShiftCatchUp: reassign ${taskDoc.id} failed`, err);
@@ -328,7 +354,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const pending = queue.docs.filter((d) => {
     const entryData = d.data();
     if (entryData.status !== 'pending' && entryData.status !== 'scheduled') return false;
-    return isSlotDueForDispatch(entryData.pickupSlot, 15);
+    return isSlotDueForDispatch(entryData.pickupSlot, 20);
   });
 
   for (const entry of pending) {
@@ -396,12 +422,13 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
-      // Only assign if the customer HAS picked a slot AND that slot is due NOW (within 15 mins or overdue)
-      if (!delData.assignee && delData.deliveryDate && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 15)) {
+      // Only assign if the customer HAS picked a slot AND that slot is due NOW (within 20 mins or overdue)
+      if (!delData.assignee && delData.deliveryDate && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 20)) {
         await delDoc.ref.update({
           assignee: newRiderUid,
           status: 'assigned',
           assignedAt: TS(),
+          acceptedAt: admin.firestore.FieldValue.delete(),
         });
         await sendFCMOrderAssignment({
           staffId: newRiderUid,
@@ -428,7 +455,17 @@ exports.scheduleForceLogout = onSchedule('30 18 * * *', async () => {
   const snap = await db.collection('ops_staff').where('onShift', '==', true).get();
   let count = 0;
   snap.forEach((doc) => {
-    batch.set(doc.ref, { onShift: false, shiftEndAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+    batch.set(
+      doc.ref,
+      {
+        onShift: false,
+        onBreak: false,
+        attendanceStatus: 'off',
+        activeHelperTask: admin.firestore.FieldValue.delete(),
+        shiftEndAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
     count++;
   });
   if (count > 0) {
@@ -896,7 +933,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
     const onShiftHelpers = [];
     staffSnap.forEach(d => {
       const data = d.data();
-      if (data.role === 'helper' || data.role === 'iron') {
+      if ((data.role === 'helper' || data.role === 'iron') && isStaffAvailableForAutoAssign(data)) {
         onShiftHelpers.push({ uid: d.id, ...data });
       }
     });
@@ -1062,7 +1099,7 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     const onShiftHelpers = [];
     staffSnap.forEach(d => {
       const data = d.data();
-      if (data.role === 'helper' || data.role === 'iron') {
+      if ((data.role === 'helper' || data.role === 'iron') && isStaffAvailableForAutoAssign(data)) {
         onShiftHelpers.push({ uid: d.id, ...data });
       }
     });
@@ -1260,8 +1297,8 @@ async function drainScheduledRiderTasks() {
         }
       }
 
-      // Check if slot is due (within 15 min or overdue)
-      if (!isSlotDueForDispatch(data.pickupSlot, 15)) {
+      // Check if slot is due (within 20 min or overdue)
+      if (!isSlotDueForDispatch(data.pickupSlot, 20)) {
         continue; // not due yet, keep parked
       }
 
@@ -1332,8 +1369,8 @@ async function drainScheduledRiderTasks() {
       if (delData.assignee) continue; // already assigned
       if (!delData.deliveryDate) continue; // customer hasn't selected a date yet (awaiting_slot)
 
-      // Check if slot has arrived / is within 15 min
-      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 15)) {
+      // Check if slot has arrived / is within 20 min
+      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 20)) {
         continue; // not due yet, keep holding on store shelf
       }
 
@@ -1344,6 +1381,7 @@ async function drainScheduledRiderTasks() {
         assignee: riderUid,
         status: 'assigned',
         assignedAt: TS(),
+        acceptedAt: admin.firestore.FieldValue.delete(),
         updatedAt: TS(),
       });
 
@@ -1371,6 +1409,39 @@ async function drainScheduledRiderTasks() {
  */
 async function checkUnstartedMachineNudges() {
   try {
+    // Load all currently on-shift staff once.
+    // At night (after clock-out / 11:30 PM force logout), onShiftSnap is empty so ZERO nudges fire.
+    const onShiftSnap = await db.collection('ops_staff').where('onShift', '==', true).get();
+    if (onShiftSnap.empty) return;
+
+    const staffMap = new Map();
+    const workingFloorHelpers = [];
+    onShiftSnap.forEach((sDoc) => {
+      const sd = sDoc.data();
+      staffMap.set(sDoc.id, sd);
+      if ((sd.role === 'helper' || sd.role === 'iron') && isStaffAvailableForAutoAssign(sd)) {
+        workingFloorHelpers.push({ uid: sDoc.id, ...sd });
+      }
+    });
+
+    // If no floor helpers are actively working (e.g. everyone is on lunch/short break or off-shift), send nothing.
+    if (workingFloorHelpers.length === 0) return;
+
+    const isDoingHandsOn = (sd) =>
+      Boolean(sd?.activeHelperTask && ['tagging', 'getting_ironed', 'packaging'].includes(sd.activeHelperTask.step));
+
+    // Resolve recipient:
+    // - If original assignee is actively working -> alert them (unless hands-on busy -> defer).
+    // - If original assignee is on break or clocked out while floor helpers are working -> route to a free working floor helper!
+    const resolveRecipient = (assigneeId) => {
+      const sd = staffMap.get(assigneeId);
+      if (sd && isStaffAvailableForAutoAssign(sd)) {
+        return isDoingHandsOn(sd) ? null : assigneeId;
+      }
+      const fallback = workingFloorHelpers.find((h) => !isDoingHandsOn(h));
+      return fallback ? fallback.uid : null;
+    };
+
     const stages = ['getting_washed', 'getting_dried'];
     const now = Date.now();
 
@@ -1389,19 +1460,8 @@ async function checkUnstartedMachineNudges() {
 
         // 1. Unstarted Machine Nudge (Assigned >= 5m ago, but not started)
         if (isMachineNudgeDue(stageData, step, now)) {
-          const assigneeId = stageData.assignee;
-
-          // Check if helper is actively doing hands-on work (tagging, ironing, packaging)
-          // If so, do not interrupt them while they handle clothes/ironing
-          const staffDoc = await db.doc(`ops_staff/${assigneeId}`).get();
-          if (staffDoc.exists) {
-            const sd = staffDoc.data();
-            const activeTask = sd.activeHelperTask;
-            if (activeTask && ['tagging', 'getting_ironed', 'packaging'].includes(activeTask.step)) {
-              // Defer nudge while actively handling clothes
-              continue;
-            }
-          }
+          const targetStaffId = resolveRecipient(stageData.assignee);
+          if (!targetStaffId) continue;
 
           const isWash = step === 'getting_washed';
           const title = isWash ? 'Washing Status Check' : 'Drying Status Check';
@@ -1410,10 +1470,10 @@ async function checkUnstartedMachineNudges() {
             : 'It has been 5+ minutes since this drying task was assigned. Are you still transferring/sorting clothes, or ready to start the dryer?';
           const actionLabel = isWash ? 'START WASHING' : 'START DRYING';
 
-          console.log(`[StageNudge] Dispatching FCM unstarted nudge to helper ${assigneeId} for order ${p.orderId || doc.id} (${step})`);
+          console.log(`[StageNudge] Dispatching FCM unstarted nudge to helper ${targetStaffId} for order ${p.orderId || doc.id} (${step})`);
 
           await sendFCMStageNudge({
-            staffId: assigneeId,
+            staffId: targetStaffId,
             orderId: p.orderId || doc.id,
             title,
             message,
@@ -1438,16 +1498,8 @@ async function checkUnstartedMachineNudges() {
         }
         // 2. Unloaded Machine Nudge (Wash cycle 35m / Dry cycle 45m elapsed, but not unloaded)
         else if (isMachineUnloadNudgeDue(stageData, step, now)) {
-          const assigneeId = stageData.assignee;
-
-          const staffDoc = await db.doc(`ops_staff/${assigneeId}`).get();
-          if (staffDoc.exists) {
-            const sd = staffDoc.data();
-            const activeTask = sd.activeHelperTask;
-            if (activeTask && ['tagging', 'getting_ironed', 'packaging'].includes(activeTask.step)) {
-              continue;
-            }
-          }
+          const targetStaffId = resolveRecipient(stageData.assignee);
+          if (!targetStaffId) continue;
 
           const isWash = step === 'getting_washed';
           const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
@@ -1457,10 +1509,10 @@ async function checkUnstartedMachineNudges() {
             : `The 45-minute dry cycle has finished for Order #${shortId}. Please unload the dryer and transfer load to iron/packaging.`;
           const actionLabel = 'COMPLETE & UNLOAD';
 
-          console.log(`[StageNudge] Dispatching FCM unload machine nudge to helper ${assigneeId} for order #${shortId} (${step})`);
+          console.log(`[StageNudge] Dispatching FCM unload machine nudge to helper ${targetStaffId} for order #${shortId} (${step})`);
 
           await sendFCMStageNudge({
-            staffId: assigneeId,
+            staffId: targetStaffId,
             orderId: p.orderId || doc.id,
             title,
             message,
@@ -1486,14 +1538,16 @@ async function checkUnstartedMachineNudges() {
         // 3. Washer chemical milestones (13m detergent / 21m softener) — mirrors in-app WasherReminderModal
         else if (step === 'getting_washed' && washerChemicalNudgeDue(stageData, now)) {
           const chemical = washerChemicalNudgeDue(stageData, now);
-          const assigneeId = stageData.assignee;
+          const targetStaffId = resolveRecipient(stageData.assignee);
+          if (!targetStaffId) continue;
+
           const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
           const isDetergent = chemical === 'detergent';
 
-          console.log(`[StageNudge] Dispatching FCM ${chemical} nudge to helper ${assigneeId} for order #${shortId}`);
+          console.log(`[StageNudge] Dispatching FCM ${chemical} nudge to helper ${targetStaffId} for order #${shortId}`);
 
           await sendFCMStageNudge({
-            staffId: assigneeId,
+            staffId: targetStaffId,
             orderId: p.orderId || doc.id,
             title: isDetergent ? 'Add Detergent (13 Min)' : 'Add Softener (21 Min)',
             message: isDetergent
@@ -1690,7 +1744,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     const deliveryTime = after.deliveryTime || null;
 
     const hasSlot = Boolean(deliveryDate);
-    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime }, 15);
+    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime }, 20);
 
     // 1. If customer has NOT picked a slot yet:
     // Order sits on store rack waiting for customer to select slot.
@@ -1704,6 +1758,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         status: 'awaiting_slot',
         assignee: null,
         assignedAt: null,
+        acceptedAt: admin.firestore.FieldValue.delete(),
         deliveryAddress,
         deliveryDate: null,
         deliveryTime: null,
@@ -1723,7 +1778,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     }
 
     // 2. Customer picked a slot, but it is NOT DUE YET (future date or later today):
-    // Keep in store holding, do not dispatch to rider until dispatch window opens (75 mins before slot).
+    // Keep in store holding, do not dispatch to rider until dispatch window opens (20 mins before slot).
     if (!isDueForDispatch) {
       const payload = {
         orderId,
@@ -1733,6 +1788,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         status: 'scheduled',
         assignee: null,
         assignedAt: null,
+        acceptedAt: admin.firestore.FieldValue.delete(),
         deliveryAddress,
         deliveryDate,
         deliveryTime,
@@ -1751,12 +1807,12 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       return;
     }
 
-    // 3. Customer scheduled slot is DUE NOW (within 75 mins or overdue):
+    // 3. Customer scheduled slot is DUE NOW (within 20 mins or overdue):
     // Auto-dispatch to on-shift rider now!
     let riderUid = existingTask?.assignee || null;
     if (riderUid) {
       const riderSnap = await db.doc(`ops_staff/${riderUid}`).get();
-      if (!riderSnap.exists || riderSnap.data().onShift !== true) {
+      if (!riderSnap.exists || !isStaffAvailableForAutoAssign(riderSnap.data())) {
         riderUid = null;
       }
     }
@@ -1764,6 +1820,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       riderUid = await selectRider();
     }
 
+    const isNewlyAssignedRider = Boolean(riderUid && (!existingTask || existingTask.assignee !== riderUid));
     const payload = {
       orderId,
       userId,
@@ -1771,7 +1828,8 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       type: 'delivery',
       status: riderUid ? 'assigned' : 'pending',
       assignee: riderUid || null,
-      assignedAt: riderUid ? TS() : null,
+      assignedAt: riderUid ? (isNewlyAssignedRider ? TS() : (existingTask.assignedAt || TS())) : null,
+      ...(isNewlyAssignedRider || !riderUid ? { acceptedAt: admin.firestore.FieldValue.delete() } : {}),
       deliveryAddress,
       deliveryDate,
       deliveryTime,
@@ -2189,8 +2247,17 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (freshStep !== step) return { ok: false, error: 'invalid_state' };
         const s = fresh.stages && fresh.stages[step];
         if (s && s.startedAt) return { ok: true, status: 'already_started', step };
-        // A stage owned by another helper (e.g. supervisor reassigned it) can't be started by me.
-        if (s && s.assignee && s.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') return { ok: false, error: 'already_claimed' };
+        // A stage owned by another helper can't be started by me UNLESS it's a machine step and the assignee is on break / off-shift.
+        if (s && s.assignee && s.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') {
+          let canCoverBreak = false;
+          if (step === 'getting_washed' || step === 'getting_dried') {
+            const ownerSnap = await tx.get(db.doc(`ops_staff/${s.assignee}`));
+            if (!ownerSnap.exists || !isStaffAvailableForAutoAssign(ownerSnap.data())) {
+              canCoverBreak = true;
+            }
+          }
+          if (!canCoverBreak) return { ok: false, error: 'already_claimed' };
+        }
 
         // Validate the order status BEFORE issuing any write for production steps
         if (isProductionStep(step)) {
@@ -2296,7 +2363,11 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const processSnap = await tx.get(processRef);
         if (!processSnap.exists) return { ok: false, error: 'not_found' };
         const process = processSnap.data();
-        const steps = Array.isArray(process.steps) ? process.steps : [];
+        const rawSteps = Array.isArray(process.steps) ? process.steps : [];
+        const steps =
+          process.serviceType === 'premium_laundry' && !rawSteps.includes('getting_ironed')
+            ? ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging']
+            : rawSteps;
         const step = steps[process.currentIndex];
         
         // Tagging completion goes only through submitTagging (enforces the garment
@@ -2307,15 +2378,25 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         if (step === 'packaging') return { ok: false, error: 'use_complete_packaging' };
         
         const stage = process.stages && process.stages[step];
-        // Allow the assigned helper OR any supervisor/admin to complete the step
-        if (!stage || (stage.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin')) {
+        const isMachine = step === 'getting_washed' || step === 'getting_dried';
+        // Allow the assigned helper, any supervisor/admin, OR a working floor helper covering an on-break/off-shift helper's machine
+        if (!stage) {
           return { ok: false, error: 'unauthorized' };
+        }
+        if (stage.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') {
+          let canCoverBreak = false;
+          if (isMachine && stage.assignee) {
+            const ownerSnap = await tx.get(db.doc(`ops_staff/${stage.assignee}`));
+            if (!ownerSnap.exists || !isStaffAvailableForAutoAssign(ownerSnap.data())) {
+              canCoverBreak = true;
+            }
+          }
+          if (!canCoverBreak) return { ok: false, error: 'unauthorized' };
         }
         if (!stage.startedAt) return { ok: false, error: 'invalid_state' };
         if (stage.completedAt) return { ok: true, status: 'already_completed', step };
 
-        const isMachine = step === 'getting_washed' || step === 'getting_dried';
-        const startedAtMs = stage.startedAt ? (typeof stage.startedAt.toMillis === 'function' ? stage.startedAt.toMillis() : new Date(stage.startedAt).getTime()) : completedAt.toMillis();
+        const startedAtMs = stage.startedAt ? (typeof stage.startedAt.toMillis === 'function' ? stage.startedAt.toMillis() : new Date(stage.startedAt).getTime()) : now.toMillis();
         const durationSec = Math.max(0, (now.toMillis() - startedAtMs) / 1000);
 
         // Accidental completion guard: minimum 30 minutes (1800s) for wash/dry cycles
@@ -2347,6 +2428,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
         // --- BEGIN WRITES ---
         tx.update(processRef, {
+          steps,
           stages: { 
             ...(process.stages || {}), 
             [step]: { 
@@ -2636,10 +2718,16 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const acceptToCompleteMin = Math.round(acceptToCompleteMs / 60000);
         const startToCompleteMin = Math.round(durationMs / 60000);
 
+        const rawSteps = Array.isArray(p.steps) ? p.steps : [];
+        const healedSteps =
+          p.serviceType === 'premium_laundry' && !rawSteps.includes('getting_ironed')
+            ? ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging']
+            : rawSteps;
         const nextIndex = p.currentIndex + 1;
-        const nextStatus = nextIndex < p.steps.length ? p.steps[nextIndex] : 'done';
+        const nextStatus = nextIndex < healedSteps.length ? healedSteps[nextIndex] : 'done';
 
         tx.update(processRef, {
+          steps: healedSteps,
           garments: { ...garments, submittedAt: now },
           stages: { 
             ...(p.stages || {}), 
@@ -2958,7 +3046,14 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
 
     const stageData = (p.stages && p.stages[step]) || {};
     if (stageData.assignee && stageData.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') {
-      return { ok: false, error: 'unauthorized' };
+      let canCoverBreak = false;
+      if (step === 'getting_washed' || step === 'getting_dried') {
+        const ownerSnap = await db.doc(`ops_staff/${stageData.assignee}`).get();
+        if (!ownerSnap.exists || !isStaffAvailableForAutoAssign(ownerSnap.data())) {
+          canCoverBreak = true;
+        }
+      }
+      if (!canCoverBreak) return { ok: false, error: 'unauthorized' };
     }
 
     if (phase === 'accepted' && stageData.startedAt) {
@@ -3339,6 +3434,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           if (delTaskSnap.exists) {
             tx.update(delTaskRef, {
               assignee: riderId,
+              assignedBy: auth.uid,
               status: 'out_for_delivery',
               assignedAt: now,
               deliveryDate,
@@ -3355,7 +3451,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
-              assignee: riderId, deliveryAddress: pickupAddressFromOrder(order),
+              assignee: riderId, assignedBy: auth.uid, deliveryAddress: pickupAddressFromOrder(order),
               deliveryDate, deliveryTime,
               deliveryOTP: order.deliveryOTP || null,
               customerName: order.customerName || order.userName || '',
@@ -3377,23 +3473,38 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           tx.update(orderRef, { riderId: riderId, updatedAt: now });
           tx.set(vendorRef, { riderId: riderId, updatedAt: now }, { merge: true });
 
+          const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
           if (taskSnap.exists) {
             tx.update(db.doc(`ops_tasks/${orderId}`), {
               assignee: riderId,
+              assignedBy: auth.uid,
               assignedAt: now,
               status: 'assigned',
               acceptedAt: admin.firestore.FieldValue.delete(),
             });
           } else if (queueSnap.exists) {
+            const qData = queueSnap.data();
             tx.set(db.doc(`ops_tasks/${orderId}`), {
-              ...queueSnap.data(), assignee: riderId, assignedAt: now, status: 'assigned'
+              ...qData,
+              orderId,
+              userId,
+              vendorId,
+              assignee: riderId,
+              assignedBy: auth.uid,
+              assignedAt: now,
+              status: 'assigned',
+              customerName: qData.customerName || (order && (order.customerName || order.userName)) || '',
+              customerPhone: qData.customerPhone || (order && (order.customerPhone || order.userPhone)) || '',
+              pickupAddress: qData.pickupAddress || pickupAddressFromOrder(order),
+              pickupSlot: qData.pickupSlot || order.pickupDetails || null,
+              items: qData.items || (order && order.items) || [],
+              totalAmount: typeof qData.totalAmount === 'number' ? qData.totalAmount : total,
             });
             tx.delete(db.doc(`ops_queue/${orderId}`));
           } else {
             // Manual pickup assignment with no existing task/queue — create one.
-            const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
             tx.set(db.doc(`ops_tasks/${orderId}`), {
-              orderId, userId, vendorId, assignee: riderId, status: 'assigned',
+              orderId, userId, vendorId, assignee: riderId, assignedBy: auth.uid, status: 'assigned',
               customerName: (order && (order.customerName || order.userName)) || '',
               customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: pickupAddressFromOrder(order),
@@ -3571,10 +3682,39 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             taskType: 'step',
             customerName: p.customerName || '',
             stepName: p.steps[p.currentIndex] || '',
+            assignedBySupervisor: true,
           });
         }
       } catch (err) {
         console.error('assignStepToHelper FCM push error', err);
+      }
+    }
+
+    if (result.ok && action === 'assignTaskToRider') {
+      try {
+        const { riderId, isDelivery } = data;
+        const oSnap = userId ? await db.doc(`users/${userId}/orders/${orderId}`).get() : null;
+        const oData = oSnap && oSnap.exists ? oSnap.data() : {};
+        const addr = pickupAddressFromOrder(oData);
+        const custName = oData.customerName || oData.userName || '';
+        const isInstant = !isDelivery && Boolean(oData.pickupDetails && oData.pickupDetails.isInstant);
+        const slot = isDelivery
+          ? `${oData.deliveryDate || ''} ${oData.deliveryTime || ''}`.trim()
+          : (oData.pickupDetails && oData.pickupDetails.type === 'instant')
+            ? 'Instant Pickup'
+            : (oData.pickupDetails && oData.pickupDetails.scheduledTime) || '';
+        await sendFCMOrderAssignment({
+          staffId: riderId,
+          orderId,
+          taskType: isDelivery ? 'delivery' : (isInstant ? 'Instant Pickup' : 'Pickup'),
+          customerName: custName,
+          address: addr,
+          slot,
+          isInstant,
+          assignedBySupervisor: true,
+        });
+      } catch (err) {
+        console.error('assignTaskToRider FCM push error', err);
       }
     }
 
@@ -3602,7 +3742,9 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
   const after = event.data.after ? event.data.after.data() : null;
   if (!after) return; // deleted
 
-  // Auto-heal missing customer details directly onto ops_tasks:
+  let enrichedAfter = after;
+
+  // Auto-heal missing customer details directly onto ops_tasks WITHOUT suppressing FCM:
   if (!after.customerName || !after.customerPhone || !after.pickupAddress || !after.items) {
     try {
       const orderId = event.params.orderId;
@@ -3640,9 +3782,8 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
         if (userId && !after.userId) patch.userId = userId;
 
         if (Object.keys(patch).length > 0) {
+          enrichedAfter = { ...after, ...patch };
           await db.doc(`ops_tasks/${orderId}`).set(patch, { merge: true });
-          // Merge write will trigger onOpsTaskWritten again with fully enriched data
-          return;
         }
       }
     } catch (e) {
@@ -3650,21 +3791,23 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
     }
   }
 
-  const newAssignee = after.assignee;
+  const newAssignee = enrichedAfter.assignee;
   const oldAssignee = before ? before.assignee : null;
+  const isSupervisorManual = Boolean(enrichedAfter.assignedBy && enrichedAfter.assignedBy !== 'system_auto');
 
   // Only trigger if assignee was newly set or changed, and task is pending/assigned
-  if (newAssignee && newAssignee !== oldAssignee && (after.status === 'pending' || after.status === 'assigned')) {
-    const isInstant = Boolean(after.pickupSlot && after.pickupSlot.isInstant);
-    const slot = (after.pickupSlot && after.pickupSlot.type === 'instant')
+  // (Supervisor manual assignments already send FCM directly in assignTaskToRider)
+  if (newAssignee && newAssignee !== oldAssignee && !isSupervisorManual && (enrichedAfter.status === 'pending' || enrichedAfter.status === 'assigned')) {
+    const isInstant = Boolean(enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.isInstant);
+    const slot = (enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.type === 'instant')
       ? 'Instant Pickup'
-      : (after.pickupSlot && after.pickupSlot.scheduledTime) || '';
+      : (enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.scheduledTime) || '';
     await sendFCMOrderAssignment({
       staffId: newAssignee,
       orderId: event.params.orderId,
       taskType: isInstant ? 'Instant Pickup' : 'Pickup',
-      customerName: after.customerName || '',
-      address: after.pickupAddress || '',
+      customerName: enrichedAfter.customerName || '',
+      address: enrichedAfter.pickupAddress || '',
       slot,
       isInstant,
     });

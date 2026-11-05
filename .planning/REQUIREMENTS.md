@@ -72,3 +72,23 @@
 - Don't break existing functionality
 - Don't add new packages
 - Keep it simple and maintainable
+
+---
+
+## R8: Scheduled Pickup & Delivery Rider Alerting
+
+- Hold scheduled pickups and deliveries until **15–20 minutes before** the scheduled slot (20m lead window), then dispatch to the rider with full popup (`GlobalAssignmentModal`), Android overlay/FCM, looping siren (`dramaticChime`), and voice announcement.
+- Supervisor manual assignment (`assignTaskToRider`) always alerts immediately.
+- Eliminate pickup ↔ delivery ID collision (`ops_tasks/{orderId}` vs `ops_delivery_tasks/{orderId}`), duplicate listener re-init on screen mount, and `onOpsTaskWritten` auto-heal FCM suppression.
+
+## R9: Break, Lunch & Night Auto-Logout Silencing + Floor-Helper Reminder Fallback
+
+- Sync QR break states (`attendanceStatus: 'working' | 'lunch' | 'short_break' | 'off'`, `onBreak: boolean`) onto `ops_staff/{uid}`.
+- Never auto-assign pickups, deliveries, or processing stages to staff on `lunch`, `short_break`, or clocked out / logged out (`!onShift`). Drain waiting queues automatically when staff return from break.
+- **Supervisor Override**: Manual assignments by a supervisor (`assignTaskToRider`, `assignStepToHelper`) still assign and ring even if the staff member is on break.
+- **Zero Off-Shift / Night Reminders**: Once clocked out or auto-logged out at 11:30 PM IST, staff must receive zero washing/drying/chemical reminders or order alerts (cancel local timers, gate Android `SpinzoMessagingService`, gate client modals, gate backend `checkUnstartedMachineNudges` & `sendFCMStageNudge`).
+- **Mid-Cycle Break Fallback**: During store hours, if a helper assigned to a running/accepted `getting_washed` or `getting_dried` order goes on lunch or short break, silence reminders for that helper and route due washer/dryer nudges to an available working floor helper (allowing any working floor helper to start/unload/snooze that machine).
+
+## R10: Premium Laundry 5-Step Pipeline
+
+- `premium_laundry` must follow `tagging → getting_washed → getting_dried → getting_ironed → packaging` (include `getting_ironed` in `stepsForServiceType` and `getProcessingSteps`, and auto-heal in-flight `premium_laundry` `ops_process` docs created before this fix).

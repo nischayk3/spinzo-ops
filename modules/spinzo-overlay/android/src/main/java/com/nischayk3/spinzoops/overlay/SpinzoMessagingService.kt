@@ -29,6 +29,10 @@ class SpinzoMessagingService : FirebaseMessagingService() {
             val prefs = getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
             val onShift = prefs.getBoolean("on_shift", false)
             Log.d("SpinzoOverlay", "2. Helper on-shift: $onShift")
+            if (!onShift) {
+                Log.d("SpinzoOverlay", "Dropping FCM $type because staff is off-shift")
+                return
+            }
 
             val canDraw = Settings.canDrawOverlays(this)
             Log.d("SpinzoOverlay", "3. Overlay permission (canDrawOverlays): $canDraw")

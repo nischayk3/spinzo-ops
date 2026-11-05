@@ -8,6 +8,7 @@ import * as Speech from 'expo-speech';
 import { stepLabel, currentStep } from './opsProcess';
 import { triggerAssignmentNotification } from './systemNotifications';
 import { useWasherReminderStore } from '../store/washerReminderStore';
+import { useStaffRosterStore } from '../store/staffRosterStore';
 
 const seenStates: Record<string, number> = {};
 const seenOrders = new Set<string>();
@@ -62,22 +63,53 @@ export function useLifecycleNotifications() {
     });
   }, [orders, isOrdersLoading, isSupervisorOrAdmin]);
 
-  // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete) - Helper ONLY
+  // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete) - Active Working Helper ONLY
+  const rosterHelpers = useStaffRosterStore(s => s.roster.helpers);
+  const isOnShift = staffDoc?.onShift === true;
+  const isOnBreak = Boolean(
+    staffDoc?.onBreak ||
+    staffDoc?.attendanceStatus === 'lunch' ||
+    staffDoc?.attendanceStatus === 'short_break'
+  );
+
   useEffect(() => {
-    // Supervisors and admins must never receive or interfere with machine chemical reminders
-    if (isSupervisorOrAdmin) return;
+    // Supervisors, admins, clocked-out staff, and on-break staff must NEVER receive machine reminders
+    if (isSupervisorOrAdmin || !myUid || !isOnShift || isOnBreak) {
+      useWasherReminderStore.getState().dismissReminder();
+      return;
+    }
 
     const checkWasherMilestones = () => {
       const now = Date.now();
+      const workingHelperIds = new Set(
+        rosterHelpers
+          .filter(
+            h =>
+              (h.role === 'helper' || h.role === 'iron') &&
+              h.onShift === true &&
+              !h.onBreak &&
+              h.attendanceStatus !== 'lunch' &&
+              h.attendanceStatus !== 'short_break' &&
+              h.attendanceStatus !== 'off'
+          )
+          .map(h => h.uid)
+      );
+      workingHelperIds.add(myUid);
+
       processes.forEach(p => {
         const cur = currentStep(p);
         if (cur !== 'getting_washed') return;
         const stage = p.stages?.getting_washed;
         if (!stage || !stage.startedAt || stage.completedAt) return;
 
-        // Only alert the assigned helper
-        const isMyTask = myUid && stage.assignee === myUid;
-        if (!isMyTask) return;
+        // Alert the assigned helper, OR a working floor helper if the original assignee went on break / clocked out
+        const isMyTask = stage.assignee === myUid;
+        const isCoveringBreak =
+          typeof stage.assignee === 'string' &&
+          stage.assignee.length > 0 &&
+          stage.assignee !== myUid &&
+          !workingHelperIds.has(stage.assignee);
+        if (!isMyTask && !isCoveringBreak) return;
 
         const startMs = typeof (stage.startedAt as any).toMillis === 'function'
           ? (stage.startedAt as any).toMillis()
@@ -139,17 +171,19 @@ export function useLifecycleNotifications() {
     checkWasherMilestones();
     const interval = setInterval(checkWasherMilestones, 5000);
     return () => clearInterval(interval);
-  }, [processes, activeRole, myUid]);
+  }, [processes, activeRole, myUid, isSupervisorOrAdmin, isOnShift, isOnBreak, rosterHelpers]);
 
   // 4. Helper Task Assignment Audio & Voice Announcement
   useEffect(() => {
-    if (!myUid) return;
+    if (!myUid || !isOnShift) return;
     processes.forEach(p => {
       const cur = currentStep(p);
       if (!cur) return;
       const stage = p.stages?.[cur];
-      // If assigned to me by supervisor and not yet accepted
-      if (stage && stage.assignee === myUid && stage.assignedBy && !stage.acceptedAt && !stage.completedAt) {
+      const isSupervisorPush = Boolean(stage?.assignedBy && stage.assignedBy !== 'system_auto' && stage.assignedBy !== 'self_claim');
+      if (isOnBreak && !isSupervisorPush) return;
+      // If assigned to me and not yet accepted
+      if (stage && stage.assignee === myUid && stage.assignedBy && stage.assignedBy !== 'self_claim' && !stage.acceptedAt && !stage.completedAt) {
         const key = `${p.id}_${cur}_assigned`;
         if (!announcedHelperTasks.has(key)) {
           announcedHelperTasks.add(key);

@@ -25,10 +25,32 @@ export function HelperAssignmentModal() {
   const [localSnoozeMap, setLocalSnoozeMap] = useState<Record<string, number>>({});
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
-  const candidateTask = staffDoc ? getTopEligibleTask(processes, orders, staffDoc.uid, effectiveRole, staffDoc.activeHelperTask || null, resources, staffDoc.onShift === true, staffDoc.phone) : null;
+  const isOnBreak = Boolean(
+    staffDoc?.onBreak ||
+    staffDoc?.attendanceStatus === 'lunch' ||
+    staffDoc?.attendanceStatus === 'short_break'
+  );
+  const candidateTask = staffDoc
+    ? getTopEligibleTask(
+        processes,
+        orders,
+        staffDoc.uid,
+        effectiveRole,
+        staffDoc.activeHelperTask || null,
+        resources,
+        staffDoc.onShift === true,
+        staffDoc.phone,
+        isOnBreak
+      )
+    : null;
 
+  const candidateSnoozeKey = candidateTask
+    ? `${candidateTask.steps[candidateTask.currentIndex] || candidateTask.status}:${candidateTask.id}`
+    : '';
   // Check if this task was recently dismissed/snoozed by the user
-  const isSnoozed = candidateTask ? Boolean(localSnoozeMap[candidateTask.orderId || candidateTask.id] && Date.now() < (localSnoozeMap[candidateTask.orderId || candidateTask.id] + 5 * 60 * 1000)) : false;
+  const isSnoozed = candidateSnoozeKey
+    ? Boolean(localSnoozeMap[candidateSnoozeKey] && Date.now() < (localSnoozeMap[candidateSnoozeKey] + 5 * 60 * 1000))
+    : false;
   const activeTask = isSnoozed ? null : candidateTask;
 
   const order = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
@@ -107,7 +129,7 @@ export function HelperAssignmentModal() {
       SpinzoOverlay.dismissOverlay();
     }
     if (activeTask) {
-      const key = activeTask.orderId || activeTask.id;
+      const key = `${curStep}:${activeTask.id}`;
       setLocalSnoozeMap(prev => ({ ...prev, [key]: Date.now() }));
     }
   };

@@ -210,6 +210,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         status: 'lunch',
         lunch: { startAt: Date.now(), endAt: null },
       });
+      await useOpsStaffStore.getState().setBreakState(user.id, 'lunch');
     } catch (err) {
       console.error('Failed to start lunch:', err);
     } finally {
@@ -238,6 +239,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         totalLunchMs: (currentShift.totalLunchMs || 0) + duration,
         lunchOvertimeFine,
       });
+      await useOpsStaffStore.getState().setBreakState(user.id, 'working');
 
       if (lunchOvertimeFine > 0) {
         Alert.alert('Lunch Overtime', `Your lunch exceeded the time limit. A fine of ₹${lunchOvertimeFine} has been applied.`);
@@ -268,6 +270,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         status: 'short_break',
         shortBreaks: [...existingBreaks, newBreak],
       });
+      await useOpsStaffStore.getState().setBreakState(user.id, 'short_break');
     } catch (err) {
       console.error('Failed to start short break:', err);
     } finally {
@@ -299,6 +302,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         status: 'working',
         shortBreaks: updatedBreaks,
       });
+      await useOpsStaffStore.getState().setBreakState(user.id, 'working');
     } catch (err) {
       console.error('Failed to end short break:', err);
     } finally {

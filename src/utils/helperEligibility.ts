@@ -143,11 +143,26 @@ function getProcessTimestamp(p: OpsProcess): number {
 
 // ─── Busy / Push Helpers ───────────────────────────────────────────────────────
 
-/** A supervisor pushed this stage to me and I haven't acknowledged it yet. */
+/** Stage was assigned to me (either by supervisor or system_auto) and I haven't acknowledged it yet. */
 export function isPushedToMe(p: OpsProcess, uid: string): boolean {
   const cur = currentStep(p);
   const s = cur ? p.stages[cur] : undefined;
-  return !!s && s.assignee === uid && !!s.assignedBy && !s.acceptedAt && !s.completedAt;
+  return !!s && s.assignee === uid && !!s.assignedBy && s.assignedBy !== 'self_claim' && !s.acceptedAt && !s.completedAt;
+}
+
+/** Explicitly pushed by a human supervisor (overrides break state while helper is clocked in). */
+export function isSupervisorPushedToMe(p: OpsProcess, uid: string): boolean {
+  const cur = currentStep(p);
+  const s = cur ? p.stages[cur] : undefined;
+  return (
+    !!s &&
+    s.assignee === uid &&
+    !!s.assignedBy &&
+    s.assignedBy !== 'system_auto' &&
+    s.assignedBy !== 'self_claim' &&
+    !s.acceptedAt &&
+    !s.completedAt
+  );
 }
 
 /**
@@ -221,17 +236,22 @@ export function getTopEligibleTask(
   activeTask: ActiveHelperTask | null,
   resources: StoreResources = { washers: 1, dryers: 1, ironingStations: 1 },
   onShift = true,
-  phone?: string | null
+  phone?: string | null,
+  onBreak = false
 ): OpsProcess | null {
   // Ignore processes whose order is already finished/cancelled.
   const live = processes.filter(p => !isOrderTerminal(orders.find(o => o.id === p.orderId)?.status));
 
-  // ── 0. Supervisor-assigned tasks ALWAYS surface so the helper acknowledges them ──
+  // ── 0a. Human supervisor-assigned tasks ALWAYS surface (even on break) ──
+  const supPushed = live.find(p => isSupervisorPushedToMe(p, uid));
+  if (supPushed) return { ...supPushed, isPushedToMe: true };
+
+  // ✅ SHIFT & BREAK GATE: off-shift or on-break helpers must NOT receive system_auto or pool offers
+  if (!onShift || onBreak) return null;
+
+  // ── 0b. System-auto assigned tasks surface when helper is on shift and not on break ──
   const pushed = live.find(p => isPushedToMe(p, uid));
   if (pushed) return { ...pushed, isPushedToMe: true };
-
-  // ✅ SHIFT GATE: an off-shift helper (not clocked in via QR) must NOT be auto-offered
-  if (!onShift) return null;
 
   // ── Washer Capacity & Machine Buffer Metrics ──
   const maxWashers = resources.washers || 2;

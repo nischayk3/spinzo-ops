@@ -311,11 +311,38 @@ test('isSlotDueForDispatch: instant and scheduled window validation', () => {
     { todayStr: today, currentMinutesIST: 1185 }
   ), true);
 
-  // Default leadTime (no parameter passed): exactly 15 mins away -> DUE!
+  // Default leadTime (20 mins): 21 mins away -> NOT due, 20 mins away -> DUE!
   assert.strictEqual(isSlotDueForDispatch(
     { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
     undefined,
-    { todayStr: today, currentMinutesIST: 1185 }
+    { todayStr: today, currentMinutesIST: 1179 }
+  ), false);
+  assert.strictEqual(isSlotDueForDispatch(
+    { deliveryDate: today, deliveryTime: '20:00 - 21:00' },
+    undefined,
+    { todayStr: today, currentMinutesIST: 1180 }
+  ), true);
+
+  // Supports DD/MM/YYYY, Today, Tomorrow, and Firestore Timestamps
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: '20/10/2026', scheduledTime: '20:00 - 21:00' },
+    20,
+    { todayStr: today, currentMinutesIST: 1180 }
+  ), true);
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: '21/10/2026', scheduledTime: '10:00 - 11:00' },
+    20,
+    { todayStr: today, currentMinutesIST: 1180 }
+  ), false);
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: 'Tomorrow', scheduledTime: '10:00 - 11:00' },
+    20,
+    { todayStr: today, currentMinutesIST: 600 }
+  ), false);
+  assert.strictEqual(isSlotDueForDispatch(
+    { scheduledDate: 'Today', scheduledTime: '10:00 - 11:00' },
+    20,
+    { todayStr: today, currentMinutesIST: 585 }
   ), true);
 
   // At 7:50 PM (1190 mins): 10 mins away -> DUE FOR DISPATCH!
@@ -743,3 +770,47 @@ test('splitOrderIntoServices: splits blanket_wash with multiple blankets or >8kg
   assert.strictEqual(res[0].processKey, 'blanket_wash__L1');
   assert.strictEqual(res[1].processKey, 'blanket_wash__L2');
 });
+
+test('premium_laundry: routes through tagging -> getting_washed -> getting_dried -> getting_ironed -> packaging', () => {
+  const { stepsForServiceType, getProcessingSteps, opsStepsForOrder } = require('./dispatch');
+  assert.deepStrictEqual(
+    stepsForServiceType('premium_laundry'),
+    ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging']
+  );
+  assert.deepStrictEqual(
+    getProcessingSteps({ items: [{ serviceType: 'premium_laundry', weight: 5 }] }),
+    ['getting_washed', 'getting_dried', 'getting_ironed']
+  );
+  assert.deepStrictEqual(
+    opsStepsForOrder({ items: [{ serviceType: 'premium_laundry', weight: 5 }] }),
+    ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging']
+  );
+});
+
+test('break & lunch gating: skips helpers and riders on lunch, short_break, or off', () => {
+  const { isStaffAvailableForAutoAssign, pickRider } = require('./dispatch');
+  assert.strictEqual(isStaffAvailableForAutoAssign({ onShift: true, onBreak: false, attendanceStatus: 'working' }), true);
+  assert.strictEqual(isStaffAvailableForAutoAssign({ onShift: true, onBreak: true, attendanceStatus: 'lunch' }), false);
+  assert.strictEqual(isStaffAvailableForAutoAssign({ onShift: true, attendanceStatus: 'short_break' }), false);
+  assert.strictEqual(isStaffAvailableForAutoAssign({ onShift: false, attendanceStatus: 'working' }), false);
+
+  const roster = { '+919000000001': 'rider', '+919000000002': 'rider' };
+  const selected = pickRider(
+    [
+      { uid: 'r1', phone: '+919000000001', onShift: true, onBreak: true, attendanceStatus: 'lunch' },
+      { uid: 'r2', phone: '+919000000002', onShift: true, onBreak: false, attendanceStatus: 'working' },
+    ],
+    { r1: 0, r2: 2 },
+    roster
+  );
+  assert.strictEqual(selected, 'r2');
+
+  const helpersWithBreak = [
+    { uid: 'h_abdul', name: 'Abdul', phone: '+916900311761', onShift: true, onBreak: true, attendanceStatus: 'lunch' },
+    { uid: 'h_abdur', name: 'Abdur', phone: '+917559105832', onShift: true, onBreak: false, attendanceStatus: 'working' },
+  ];
+  const stageDecision = selectHelperForStage('tagging', helpersWithBreak, []);
+  assert.strictEqual(stageDecision.ok, true);
+  assert.strictEqual(stageDecision.helper.uid, 'h_abdur');
+});
+

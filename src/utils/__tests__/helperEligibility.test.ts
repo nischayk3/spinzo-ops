@@ -664,4 +664,58 @@ describe('getTopEligibleTask', () => {
       expect(result?.orderId).toBe('wash_order');
     });
   });
+
+  describe('Break, Lunch & Off-Shift Gating', () => {
+    it('blocks system_auto and open pool tasks when helper is off-shift or on break, while allowing supervisor override', () => {
+      const systemAutoProcess = makeProcess({
+        id: 'p_auto',
+        orderId: 'o_auto',
+        steps: ['getting_washed'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {
+          getting_washed: {
+            assignee: 'h1',
+            assignedBy: 'system_auto',
+            assignedAt: Date.now(),
+          },
+        },
+      });
+      const orders = [
+        { id: 'o_auto', status: 'processing', userId: 'u1' },
+        { id: 'o_pool', status: 'pickup_completed', userId: 'u2' },
+      ];
+
+      // Off-shift (e.g. clocked out / night auto-logout) -> null even for system_auto!
+      expect(getTopEligibleTask([systemAutoProcess], orders, 'h1', 'helper', null, resources, false, null, false)).toBeNull();
+
+      // On lunch/short break -> null for system_auto and pool tasks!
+      expect(getTopEligibleTask([systemAutoProcess], orders, 'h1', 'helper', null, resources, true, null, true)).toBeNull();
+
+      // Active working (onShift: true, onBreak: false) -> surfaces system_auto!
+      const workingRes = getTopEligibleTask([systemAutoProcess], orders, 'h1', 'helper', null, resources, true, null, false);
+      expect(workingRes).not.toBeNull();
+      expect(workingRes?.orderId).toBe('o_auto');
+
+      // Supervisor manual push while on break -> MUST still surface!
+      const supPush = makeProcess({
+        id: 'p_sup',
+        orderId: 'o_sup',
+        steps: ['getting_washed'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {
+          getting_washed: {
+            assignee: 'h1',
+            assignedBy: 'sup_uid_123',
+            assignedAt: Date.now(),
+          },
+        },
+      });
+      const supOrders = [{ id: 'o_sup', status: 'processing', userId: 'u3' }];
+      const breakOverride = getTopEligibleTask([supPush], supOrders, 'h1', 'helper', null, resources, true, null, true);
+      expect(breakOverride).not.toBeNull();
+      expect(breakOverride?.orderId).toBe('o_sup');
+    });
+  });
 });

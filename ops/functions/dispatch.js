@@ -12,9 +12,22 @@ function normalizePhone(phone) {
   return '';
 }
 
+function isStaffAvailableForAutoAssign(staff) {
+  if (!staff || staff.onShift !== true) return false;
+  if (staff.onBreak === true) return false;
+  if (
+    staff.attendanceStatus === 'lunch' ||
+    staff.attendanceStatus === 'short_break' ||
+    staff.attendanceStatus === 'off'
+  ) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Pick the least-busy on-shift rider from eligible candidates.
- * @param {Array<{uid: string, phone?: string, shiftStartAt?: number}>} candidates
+ * @param {Array<{uid: string, phone?: string, shiftStartAt?: number, onShift?: boolean, onBreak?: boolean, attendanceStatus?: string}>} candidates
  * @param {Record<string, number>} taskCounts - pending task count keyed by uid
  * @param {Record<string, string>} rosterPhones - config/opsStaff.phones map (full E.164 -> role)
  * @returns {string|null} selected uid, or null if none eligible
@@ -22,6 +35,14 @@ function normalizePhone(phone) {
 function pickRider(candidates, taskCounts, rosterPhones) {
   const roster = rosterPhones || {};
   const eligible = candidates.filter((c) => {
+    if (!c || c.onShift === false || c.onBreak === true) return false;
+    if (
+      c.attendanceStatus === 'lunch' ||
+      c.attendanceStatus === 'short_break' ||
+      c.attendanceStatus === 'off'
+    ) {
+      return false;
+    }
     const phone = normalizePhone(c.phone || '');
     return phone !== '' && roster[phone] === 'rider';
   });
@@ -105,7 +126,8 @@ function getProcessingSteps(order) {
   
   // Anything that is washed must be dried.
   const needsDry = needsWash;
-  const needsIron = serviceTypes.some((type) => type === 'wash_iron' || type === 'ironing' || type === 'dry_clean');
+  const needsIron = serviceTypes.some((type) =>
+    type === 'wash_iron' || type === 'premium_laundry' || type === 'ironing' || type === 'dry_clean');
   
   if (needsDry) steps.push('getting_dried');
   if (needsIron) steps.push('getting_ironed');
@@ -183,9 +205,9 @@ const SERVICE_LABELS = {
 function stepsForServiceType(serviceType) {
   switch (serviceType) {
     case 'wash_fold':
-    case 'premium_laundry':
       return ['tagging', 'getting_washed', 'getting_dried', 'packaging'];
     case 'wash_iron':
+    case 'premium_laundry':
       return ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'];
     case 'ironing':
       return ['tagging', 'getting_ironed', 'packaging'];
@@ -497,7 +519,7 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
  */
 function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}) {
   const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
-  const helpers = (onShiftHelpers || []).filter(h => h && h.onShift === true);
+  const helpers = (onShiftHelpers || []).filter(h => isStaffAvailableForAutoAssign(h));
   if (helpers.length === 0) {
     return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
   }
@@ -720,19 +742,80 @@ function getTodayDateString(offsetHours = 5.5) {
 }
 
 /**
+ * Normalize a scheduled/delivery date value into YYYY-MM-DD (IST) so string comparisons
+ * against todayStr work reliably across ISO strings, DD/MM/YYYY, Today/Tomorrow, and Timestamps.
+ * @param {any} rawDate
+ * @param {string} [todayStr]
+ * @returns {string|null}
+ */
+function normalizeSlotDateString(rawDate, todayStr = getTodayDateString()) {
+  if (!rawDate) return null;
+
+  // Firestore Timestamp / Date object
+  if (typeof rawDate === 'object') {
+    const ms = typeof rawDate.toMillis === 'function'
+      ? rawDate.toMillis()
+      : typeof rawDate.seconds === 'number'
+        ? rawDate.seconds * 1000
+        : typeof rawDate._seconds === 'number'
+          ? rawDate._seconds * 1000
+          : rawDate instanceof Date
+            ? rawDate.getTime()
+            : NaN;
+    if (!Number.isNaN(ms)) {
+      return new Date(ms + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
+    }
+    return null;
+  }
+
+  if (typeof rawDate !== 'string') return null;
+  const clean = rawDate.trim();
+  if (!clean) return null;
+
+  const lower = clean.toLowerCase();
+  if (lower === 'today') return todayStr;
+  if (lower === 'tomorrow') {
+    const base = new Date(`${todayStr}T00:00:00Z`);
+    if (!Number.isNaN(base.getTime())) {
+      base.setUTCDate(base.getUTCDate() + 1);
+      return base.toISOString().split('T')[0];
+    }
+  }
+
+  // Exact YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) return clean;
+
+  // DD/MM/YYYY or DD-MM-YYYY
+  const dmyMatch = clean.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    const dd = dmyMatch[1].padStart(2, '0');
+    const mm = dmyMatch[2].padStart(2, '0');
+    const yyyy = dmyMatch[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // ISO datetime string (e.g. 2026-10-20T14:30:00.000Z) or human date string
+  const parsedMs = Date.parse(clean);
+  if (!Number.isNaN(parsedMs)) {
+    return new Date(parsedMs + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
+  }
+
+  return clean;
+}
+
+/**
  * Determine if a delivery is due for rider dispatch today.
  * Deliveries are only due if the customer has scheduled a date, and that date
  * is on or before today's date (due today or overdue from a previous day).
  * Future dates (e.g. tomorrow) or unselected slots (null/undefined) are NOT due.
- * @param {string|null|undefined} deliveryDate - YYYY-MM-DD
+ * @param {any} deliveryDate - YYYY-MM-DD (or Timestamp / DD/MM/YYYY / Today / Tomorrow)
  * @param {string} [todayStr] - optional reference date (YYYY-MM-DD)
  * @returns {boolean}
  */
 function isDeliveryDueToday(deliveryDate, todayStr = getTodayDateString()) {
-  if (!deliveryDate || typeof deliveryDate !== 'string') return false;
-  const clean = deliveryDate.trim();
-  if (!clean) return false;
-  return clean <= todayStr;
+  const normalized = normalizeSlotDateString(deliveryDate, todayStr);
+  if (!normalized) return false;
+  return normalized <= todayStr;
 }
 
 /**
@@ -803,7 +886,7 @@ function parseSlotStartMinutes(slotText) {
  * @param {number} [options.currentMinutesIST]
  * @returns {boolean}
  */
-function isSlotDueForDispatch(slotObj, leadTimeMinutes = 15, options = {}) {
+function isSlotDueForDispatch(slotObj, leadTimeMinutes = 20, options = {}) {
   if (!slotObj) return true; // fallback: unslotted orders dispatch immediately
 
   // 1. Instant pickups always due
@@ -811,12 +894,13 @@ function isSlotDueForDispatch(slotObj, leadTimeMinutes = 15, options = {}) {
     return true;
   }
 
-  // Extract scheduled date
-  const dateStr = (slotObj.scheduledDate || slotObj.deliveryDate || '').trim();
-  if (!dateStr) return true; // no date specified -> dispatch immediately
-
   // IST Reference Date
   const todayStr = options.todayStr || getTodayDateString();
+
+  // Extract and normalize scheduled date
+  const rawDate = slotObj.scheduledDate || slotObj.deliveryDate || '';
+  const dateStr = normalizeSlotDateString(rawDate, todayStr);
+  if (!dateStr) return true; // no date specified -> dispatch immediately
 
   // 2. Overdue from a previous day
   if (dateStr < todayStr) return true;
@@ -1001,9 +1085,11 @@ module.exports = {
   isMachineUnloadNudgeDue,
   washerChemicalNudgeDue,
   getTodayDateString,
+  normalizeSlotDateString,
   isDeliveryDueToday,
   parseSlotStartMinutes,
   isSlotDueForDispatch,
+  isStaffAvailableForAutoAssign,
   isOrderEditable,
   checkPaymentGate,
   pickRider,

@@ -244,4 +244,18 @@ export async function cancelStageNudgeTimer(processId: string, step?: string): P
   }
 }
 
+/**
+ * Cancel ALL pending scheduled local notifications and dismiss displayed ones
+ * (used when going on break, clocking out, or logging out).
+ */
+export async function cancelAllStageNudgeTimers(): Promise<void> {
+  try {
+    await Notifications.cancelAllScheduledNotificationsAsync().catch(() => {});
+    await Notifications.dismissAllNotificationsAsync().catch(() => {});
+  } catch {
+    // non-fatal
+  }
+}
+
+
 

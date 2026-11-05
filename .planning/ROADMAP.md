@@ -8,3 +8,4 @@
 | 4 | Attendance rules & fines | None |
 | 5 | Operations Record Sheet | Phase 4 (reuses attendance data) |
 | 6 | Rider assign/unassign from card view on Home | Phase 3 (same pattern) |
+| 7 | Scheduled rider alerts (20m lead + collision/FCM fixes), break/night reminder silencing + floor fallback, and `premium_laundry` ironing pipeline (`R8`–`R10`) | None |

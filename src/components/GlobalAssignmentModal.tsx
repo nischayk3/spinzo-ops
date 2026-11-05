@@ -4,7 +4,7 @@ import { BellRing, MapPin, Zap, Clock, X } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { acceptTask } from '../utils/opsPickup';
-import { isPending, pickupLabel } from '../utils/opsTasks';
+import { isPending, pickupLabel, taskAlertKey } from '../utils/opsTasks';
 import { slotLabel } from '../utils/orderFeed';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
@@ -22,10 +22,17 @@ const safeAddress = (addr: any): string => {
 };
 
 export function GlobalAssignmentModal() {
-  const { myTasks, myDeliveries } = useOpsStaffStore();
+  const { staffDoc, myTasks, myDeliveries } = useOpsStaffStore();
   const orders = useOrderFeedStore(state => state.orders);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [locallyAcceptedIds, setLocallyAcceptedIds] = useState<Set<string>>(new Set());
+
+  const isOffShift = staffDoc ? staffDoc.onShift !== true : false;
+  const isOnBreak = Boolean(
+    staffDoc?.onBreak ||
+    staffDoc?.attendanceStatus === 'lunch' ||
+    staffDoc?.attendanceStatus === 'short_break'
+  );
 
   // Only alert for pickup tasks whose ORDER is still awaiting pickup
   const isOrderAwaitingPickup = (orderId?: string) => {
@@ -35,30 +42,55 @@ export function GlobalAssignmentModal() {
     return order.status === 'placed' || order.status === 'confirmed' || order.status === 'in_transit_to_store';
   };
 
-  const unacceptedPickup = myTasks.find(t =>
-    (t.status === 'pending' || t.status === 'assigned') &&
-    !t.acceptedAt &&
-    !locallyAcceptedIds.has(t.id) &&
-    !locallyAcceptedIds.has(t.orderId) &&
-    isOrderAwaitingPickup(t.orderId)
-  );
+  const unacceptedPickup = isOffShift
+    ? undefined
+    : myTasks.find(t => {
+        const key = taskAlertKey(t, 'pickup');
+        const isSupervisorOverride = Boolean(t.assignedBy && t.assignedBy !== 'system_auto');
+        if (isOnBreak && !isSupervisorOverride) return false;
+        return (
+          (t.status === 'pending' || t.status === 'assigned') &&
+          !t.acceptedAt &&
+          !locallyAcceptedIds.has(key) &&
+          isOrderAwaitingPickup(t.orderId)
+        );
+      });
 
-  const unacceptedDelivery = myDeliveries.find(t =>
-    (t.status === 'pending' || t.status === 'assigned' || t.status === 'out_for_delivery') &&
-    !t.acceptedAt &&
-    !locallyAcceptedIds.has(t.id) &&
-    !locallyAcceptedIds.has(t.orderId)
-  );
+  const unacceptedDelivery = isOffShift
+    ? undefined
+    : myDeliveries.find(t => {
+        const key = taskAlertKey(t, 'delivery');
+        const isSupervisorOverride = Boolean(t.assignedBy && t.assignedBy !== 'system_auto');
+        if (isOnBreak && !isSupervisorOverride) return false;
+        return (
+          (t.status === 'pending' || t.status === 'assigned' || t.status === 'out_for_delivery') &&
+          !t.acceptedAt &&
+          !locallyAcceptedIds.has(key)
+        );
+      });
 
   const activeTask = unacceptedPickup || unacceptedDelivery;
 
   const isDelivery = Boolean(activeTask && 'deliveryAddress' in activeTask);
+  const activeTaskKey = activeTask
+    ? taskAlertKey(activeTask, isDelivery ? 'delivery' : 'pickup')
+    : '';
   const matchedOrder = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
   const isInstant = !isDelivery && Boolean(
     (activeTask as any)?.pickupSlot?.isInstant || matchedOrder?.pickupDetails?.isInstant
   );
-  const slotText = !isDelivery && activeTask
-    ? (matchedOrder ? slotLabel(matchedOrder) : pickupLabel(activeTask as any))
+  const deliverySlotText = isDelivery && activeTask
+    ? [
+        (activeTask as any).deliveryDate || (matchedOrder as any)?.deliveryDate,
+        (activeTask as any).deliveryTime || (matchedOrder as any)?.deliveryTime,
+      ]
+        .filter(Boolean)
+        .join(' • ')
+    : '';
+  const slotText = activeTask
+    ? isDelivery
+      ? deliverySlotText
+      : (matchedOrder ? slotLabel(matchedOrder) : pickupLabel(activeTask as any))
     : '';
 
   const rawAddress = activeTask
@@ -69,8 +101,8 @@ export function GlobalAssignmentModal() {
   const shortId = safeShortId(orderId);
 
   useEffect(() => {
-    if (activeTask && !acceptingId && !locallyAcceptedIds.has(activeTask.id)) {
-      dramaticChime();
+    if (activeTask && activeTaskKey && !acceptingId && !locallyAcceptedIds.has(activeTaskKey)) {
+      dramaticChime(true);
       triggerAssignmentNotification({
         orderId,
         orderShortId: shortId,
@@ -85,7 +117,7 @@ export function GlobalAssignmentModal() {
           SpinzoOverlay.showOverlay({
             orderId,
             taskType: isDelivery ? 'delivery' : (isInstant ? 'instant_pickup' : 'pickup'),
-            customerName: matchedOrder?.customerName || '',
+            customerName: (activeTask as any)?.customerName || matchedOrder?.customerName || '',
             address,
             slot: slotText,
             isInstant: isInstant ? 'true' : 'false',
@@ -111,10 +143,10 @@ export function GlobalAssignmentModal() {
         } catch {}
       }
     };
-  }, [activeTask?.id]);
+  }, [activeTaskKey, acceptingId]);
 
   const handleAccept = async () => {
-    if (!activeTask) return;
+    if (!activeTask || !activeTaskKey) return;
     const taskId = activeTask.id;
     const targetOrderId = activeTask.orderId || taskId;
 
@@ -128,8 +160,8 @@ export function GlobalAssignmentModal() {
     }
 
     // 2. Optimistically dismiss modal immediately so rider is never trapped
-    setLocallyAcceptedIds(prev => new Set([...prev, taskId, targetOrderId]));
-    setAcceptingId(taskId);
+    setLocallyAcceptedIds(prev => new Set([...prev, activeTaskKey]));
+    setAcceptingId(activeTaskKey);
 
     // 3. Dispatch backend call with both targetOrderId and taskId
     try {
@@ -152,8 +184,8 @@ export function GlobalAssignmentModal() {
         SpinzoOverlay.dismissOverlay();
       } catch {}
     }
-    if (activeTask) {
-      setLocallyAcceptedIds(prev => new Set([...prev, activeTask.id, activeTask.orderId]));
+    if (activeTaskKey) {
+      setLocallyAcceptedIds(prev => new Set([...prev, activeTaskKey]));
     }
   };
 

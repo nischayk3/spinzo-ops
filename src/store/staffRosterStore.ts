@@ -8,6 +8,8 @@ export interface StaffMember {
   phone: string;
   role: string;
   onShift?: boolean;
+  onBreak?: boolean;
+  attendanceStatus?: 'working' | 'lunch' | 'short_break' | 'off';
   shiftStartAt?: unknown;
   activeHelperTask?: { orderId: string; step: string } | null;
   storeId?: string;

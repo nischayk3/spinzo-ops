@@ -202,9 +202,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         await useOpsStaffStore.getState().goOffShift(uid);
       }
       await firebaseSignOut(auth);
-      // Drop the rider's live staff/task listeners so they don't leak past logout
-      // and keep announcing for the previous user.
+      // Drop the rider/helper live staff/task/process listeners and scheduled timers so nothing leaks past logout.
       useOpsStaffStore.getState().reset();
+      const { useOpsProcessStore } = await import('./opsProcessStore');
+      useOpsProcessStore.getState().reset();
       clearAssignmentNotifications();
       set({ user: null, isLoggedIn: false, activeRole: null, currentStoreId: null });
     } catch (error) {

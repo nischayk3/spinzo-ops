@@ -4,6 +4,7 @@ export interface OpsTask {
   id: string;
   orderId: string;
   assignee: string;
+  assignedBy?: string;
   status: 'pending' | 'picked_up' | 'cancelled' | string;
   pickupAddress?: string;
   pickupSlot?: { type?: string; scheduledDate?: string; scheduledTime?: string; isInstant?: boolean } | null;
@@ -38,6 +39,7 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     id,
     orderId: d.orderId ?? id,
     assignee: d.assignee ?? '',
+    assignedBy: d.assignedBy ?? undefined,
     status: d.status ?? 'pending',
     pickupAddress: d.pickupAddress ?? undefined,
     // Real snapshots express a missing slot as explicit null; an absent snapshot leaves it undefined.
@@ -72,9 +74,39 @@ export function isPending(task: Pick<OpsTask, 'status'>): boolean {
   return task.status === 'pending' || task.status === 'assigned' || task.status === 'in_transit_to_store' || task.status === 'out_for_delivery';
 }
 
-export function shouldAnnounce(task: Pick<OpsTask, 'id' | 'status'> & { acceptedAt?: unknown }, seenIds: Set<string>): boolean {
+function assignedAtToKey(ts: unknown): string {
+  if (!ts) return '0';
+  if (typeof ts === 'number') return String(ts);
+  if (typeof (ts as any).toMillis === 'function') return String((ts as any).toMillis());
+  if (typeof (ts as any).seconds === 'number') return String((ts as any).seconds * 1000);
+  if (typeof (ts as any)._seconds === 'number') return String((ts as any)._seconds * 1000);
+  const parsed = Date.parse(String(ts));
+  return Number.isNaN(parsed) ? '0' : String(parsed);
+}
+
+/**
+ * Unique composite key per task type + order + assignment timestamp so:
+ * 1) Pickup (`ops_tasks/{orderId}`) and Delivery (`ops_delivery_tasks/{orderId}`) never collide.
+ * 2) Reassigned / rescheduled tasks with a new `assignedAt` always alert the rider again.
+ */
+export function taskAlertKey(
+  task: { id?: string; orderId?: string; assignedAt?: unknown },
+  kind: 'pickup' | 'delivery' = 'pickup'
+): string {
+  const baseId = task.orderId || task.id || '';
+  return `${kind}:${baseId}:${assignedAtToKey(task.assignedAt)}`;
+}
+
+export function shouldAnnounce(
+  task: Pick<OpsTask, 'id' | 'status'> & { orderId?: string; assignedAt?: unknown; acceptedAt?: unknown },
+  seenIds: Set<string>,
+  kind: 'pickup' | 'delivery' = 'pickup'
+): boolean {
   if (!task || !task.id) return false;
-  if (seenIds.has(task.id)) return false;
+  const compositeKey = taskAlertKey(task, kind);
+  if (seenIds.has(compositeKey)) return false;
+  // Backward-compat: if caller stored bare task.id without composite key and assignedAt is absent
+  if (!task.assignedAt && seenIds.has(task.id)) return false;
   // If the task has already been accepted, never announce it
   if (task.acceptedAt) return false;
   return isPending(task);

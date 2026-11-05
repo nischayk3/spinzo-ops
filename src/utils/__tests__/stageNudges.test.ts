@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getProcessNudge, STAGE_NUDGE_RULES, recordLocalSnooze, clearLocalSnooze } from '../stageNudges';
+import { getProcessNudge, getActiveStageNudge, STAGE_NUDGE_RULES, recordLocalSnooze, clearLocalSnooze } from '../stageNudges';
 import { OpsProcess } from '../opsProcess';
 
 function makeTestProcess(cur: 'getting_washed' | 'getting_dried', stageData: any): OpsProcess {
@@ -148,6 +148,50 @@ describe('stageNudges', () => {
     // Supervisor also does not see it (supervisors must never receive or interfere with helper operations check modals)
     expect(getProcessNudge(process, 'supervisor_1', now, 'supervisor')).toBeNull();
     expect(getProcessNudge(process, 'admin_1', now, 'admin')).toBeNull();
+  });
+
+  it('silences nudges for off-shift or on-break helpers and routes due nudges to a working floor helper', () => {
+    const baseTime = 5000000;
+    const process = makeTestProcess('getting_washed', {
+      assignee: 'helper_on_lunch',
+      startedAt: baseTime,
+    });
+    const now = baseTime + 36 * 60 * 1000; // 35m wash cycle elapsed
+
+    // 1. Helper on lunch or clocked out is 100% silenced
+    expect(
+      getActiveStageNudge([process], 'helper_on_lunch', now, 'helper', {
+        onShift: true,
+        onBreak: true,
+        workingHelperIds: new Set(['helper_working']),
+      })
+    ).toBeNull();
+
+    expect(
+      getActiveStageNudge([process], 'helper_on_lunch', now, 'helper', {
+        onShift: false,
+        onBreak: false,
+        workingHelperIds: new Set(),
+      })
+    ).toBeNull();
+
+    // 2. Working floor helper covers the washer unload while original assignee is on lunch
+    const routed = getActiveStageNudge([process], 'helper_working', now, 'helper', {
+      onShift: true,
+      onBreak: false,
+      workingHelperIds: new Set(['helper_working']),
+    });
+    expect(routed).not.toBeNull();
+    expect(routed?.actionLabel).toBe('Complete & Unload');
+
+    // 3. When original assignee IS working on-shift, other helpers are not spammed
+    expect(
+      getActiveStageNudge([process], 'helper_working', now, 'helper', {
+        onShift: true,
+        onBreak: false,
+        workingHelperIds: new Set(['helper_on_lunch', 'helper_working']),
+      })
+    ).toBeNull();
   });
 });
 

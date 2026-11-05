@@ -87,12 +87,16 @@ export function clearLocalSnooze(key: string) {
 
 /**
  * Checks if a specific process has an active nudge due for a given staff user.
+ * If `workingHelperIds` is provided and the original assignee is NOT among currently
+ * working helpers (e.g. went on lunch, short break, or clocked out), any working
+ * floor helper (`role === 'helper' || role === 'iron'`) may receive the reminder.
  */
 export function getProcessNudge(
   process: OpsProcess,
   uid: string,
   now: number = Date.now(),
-  role?: string
+  role?: string,
+  workingHelperIds?: Set<string>
 ): ActiveStageNudge | null {
   const cur = currentStep(process);
   if (cur !== 'getting_washed' && cur !== 'getting_dried') return null;
@@ -101,9 +105,15 @@ export function getProcessNudge(
   if (!stage) return null;
 
   const isSupervisor = role === 'supervisor' || role === 'admin';
-  // Stage nudges are strictly for the assigned helper doing the operations.
-  // Supervisors and admins must never receive or interfere with these reminder modals.
-  if (isSupervisor || !stage.assignee || stage.assignee !== uid) return null;
+  if (isSupervisor || !stage.assignee) return null;
+
+  const isDirectAssignee = stage.assignee === uid;
+  const isCoveringUnavailableAssignee =
+    !isDirectAssignee &&
+    (role === 'helper' || role === 'iron' || !role) &&
+    Boolean(workingHelperIds && workingHelperIds.has(uid) && !workingHelperIds.has(stage.assignee));
+
+  if (!isDirectAssignee && !isCoveringUnavailableAssignee) return null;
 
   // If already completed, no nudge
   if (stage.completedAt) return null;
@@ -187,10 +197,20 @@ export function getActiveStageNudge(
   processes: OpsProcess[],
   uid: string,
   now: number = Date.now(),
-  role?: string
+  role?: string,
+  options?: {
+    onShift?: boolean;
+    onBreak?: boolean;
+    workingHelperIds?: Set<string>;
+  }
 ): ActiveStageNudge | null {
   // Supervisors and admins must never receive or operate on helper stage nudges
   if (role === 'supervisor' || role === 'admin') {
+    return null;
+  }
+
+  // Never disturb helpers who are clocked out / off-shift or on lunch / short break
+  if (options?.onShift === false || options?.onBreak === true) {
     return null;
   }
 
@@ -200,7 +220,7 @@ export function getActiveStageNudge(
   }
 
   for (const process of processes) {
-    const nudge = getProcessNudge(process, uid, now, role);
+    const nudge = getProcessNudge(process, uid, now, role, options?.workingHelperIds);
     if (nudge) return nudge;
   }
   return null;

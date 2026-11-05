@@ -238,6 +238,7 @@ export function RootNavigator() {
       }
       if (role === 'helper' || role === 'iron') {
         useOpsProcessStore.getState().initialize(uid);
+        useStaffRosterStore.getState().initialize();
       }
       if (role === 'supervisor' || role === 'admin') {
         useOrderFeedStore.getState().initialize();
