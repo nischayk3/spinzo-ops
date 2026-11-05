@@ -259,7 +259,7 @@ export const DashboardScreen = () => {
                     <Utensils color={status !== 'working' || currentShift?.lunch !== null ? "#9ca3af" : "#a855f7"} size={20} />
                     <View>
                       <Text className={`font-bold text-base ${status !== 'working' || currentShift?.lunch !== null ? 'text-gray-400' : 'text-purple-600'}`}>Lunch Break</Text>
-                      <Text className="text-xs text-center text-gray-500">{currentShift?.lunch ? 'Completed' : '2 hour limit'}</Text>
+                      <Text className="text-xs text-center text-gray-500">{currentShift?.lunch ? 'Completed' : activeRole === 'rider' ? '2 hour limit' : '1.5 hour limit'}</Text>
                     </View>
                   </TouchableOpacity>
                 )

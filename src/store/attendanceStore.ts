@@ -23,11 +23,20 @@ export interface ShiftDoc {
   shortBreaks: ShortBreak[];
   totalWorkMs: number;
   totalLunchMs: number;
+  // Fines (₹)
+  lateFine?: number;       // ₹50 if login after 8:30 AM
+  lunchOvertimeFine?: number; // ₹50 if lunch > limit
+  earlyLogoutFine?: number;  // ₹50 if logout before 10 PM
 }
 
-const LUNCH_LIMIT_MS = 2 * 60 * 60 * 1000; // 2 hours
+const HELPER_LUNCH_LIMIT_MS = 1.5 * 60 * 60 * 1000; // 1.5 hours for helpers
+const RIDER_LUNCH_LIMIT_MS = 2 * 60 * 60 * 1000;    // 2 hours for riders
 const SHORT_BREAK_LIMIT_MS = 10 * 60 * 1000; // 10 minutes
 const MAX_SHORT_BREAKS = 3;
+
+const LATE_LOGIN_CUTOFF = 8 * 60 + 30; // 8:30 AM in minutes from midnight
+const EARLY_LOGOUT_CUTOFF = 22 * 60;   // 10:00 PM in minutes from midnight
+const FINE_AMOUNT = 50; // ₹50 per rule violation
 
 interface AttendanceState {
   currentShift: ShiftDoc | null;
@@ -38,7 +47,7 @@ interface AttendanceState {
   shortBreakRemainingMs: number;
   shortBreakOverdue: boolean;
   shortBreakCount: number;
-  
+
   initializeListener: () => void;
   clockIn: (storeId: string) => Promise<void>;
   lunchOut: () => Promise<void>;
@@ -46,6 +55,7 @@ interface AttendanceState {
   shortBreakOut: () => Promise<void>;
   shortBreakIn: () => Promise<void>;
   clockOut: () => Promise<void>;
+  getLunchLimit: () => number;
 }
 
 let unsubShift: Unsubscribe | null = null;
@@ -62,7 +72,7 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
   status: 'off',
   isLoading: false,
   lunchOverdue: false,
-  lunchRemainingMs: LUNCH_LIMIT_MS,
+  lunchRemainingMs: HELPER_LUNCH_LIMIT_MS, // default; getLunchLimit() resolves per role
   shortBreakRemainingMs: SHORT_BREAK_LIMIT_MS,
   shortBreakOverdue: false,
   shortBreakCount: 0,
@@ -109,10 +119,11 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
         }
         
         if (lunchTicker) clearInterval(lunchTicker);
+        const lunchLimitForRole = get().getLunchLimit();
         if (data.status === 'lunch' && data.lunch && !data.lunch.endAt) {
           const tickFn = () => {
             const elapsed = Date.now() - data.lunch!.startAt;
-            const remaining = LUNCH_LIMIT_MS - elapsed;
+            const remaining = lunchLimitForRole - elapsed;
             set({
               lunchRemainingMs: Math.max(0, remaining),
               lunchOverdue: remaining <= 0,
@@ -121,12 +132,17 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
           tickFn(); // immediate
           lunchTicker = setInterval(tickFn, 1000);
         } else {
-          set({ lunchRemainingMs: LUNCH_LIMIT_MS, lunchOverdue: false });
+          set({ lunchRemainingMs: lunchLimitForRole, lunchOverdue: false });
         }
       } else {
-        set({ currentShift: null, status: 'off', lunchRemainingMs: LUNCH_LIMIT_MS, lunchOverdue: false });
+        set({ currentShift: null, status: 'off', lunchRemainingMs: get().getLunchLimit(), lunchOverdue: false });
       }
     });
+  },
+
+  getLunchLimit: () => {
+    const role = useAuthStore.getState().activeRole;
+    return role === 'rider' ? RIDER_LUNCH_LIMIT_MS : HELPER_LUNCH_LIMIT_MS;
   },
 
   clockIn: async (storeId) => {
@@ -139,7 +155,12 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
     try {
       const today = getTodayStr();
       const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, today);
-      
+
+      // Check if late (after 8:30 AM)
+      const now = new Date();
+      const minutesSinceMidnight = now.getHours() * 60 + now.getMinutes();
+      const lateFine = minutesSinceMidnight > LATE_LOGIN_CUTOFF ? FINE_AMOUNT : 0;
+
       const snap = await getDoc(shiftRef);
       if (!snap.exists()) {
         const newShift: ShiftDoc = {
@@ -153,12 +174,17 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
           shortBreaks: [],
           totalWorkMs: 0,
           totalLunchMs: 0,
+          lateFine,
         };
         await setDoc(shiftRef, newShift);
       } else {
-        await updateDoc(shiftRef, { status: 'working', logoutAt: null, storeId });
+        await updateDoc(shiftRef, { status: 'working', logoutAt: null, storeId, lateFine });
       }
-      
+
+      if (lateFine > 0) {
+        Alert.alert('Late Login', `You logged in after 8:30 AM. A fine of ₹${lateFine} has been applied.`);
+      }
+
       // Sync with ops_staff for order assignment
       await useOpsStaffStore.getState().goOnShift(user.id, user.role, user.phone, user.name, { storeId });
     } catch (err: any) {
@@ -200,15 +226,22 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       const user = useAuthStore.getState().user;
       if (!user) return;
       const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, currentShift.date);
-      
+
       const lunch = { ...currentShift.lunch, endAt: Date.now() };
       const duration = lunch.endAt - lunch.startAt;
-      
+      const limit = get().getLunchLimit();
+      const lunchOvertimeFine = duration > limit ? FINE_AMOUNT : 0;
+
       await updateDoc(shiftRef, {
         status: 'working',
         lunch,
         totalLunchMs: (currentShift.totalLunchMs || 0) + duration,
+        lunchOvertimeFine,
       });
+
+      if (lunchOvertimeFine > 0) {
+        Alert.alert('Lunch Overtime', `Your lunch exceeded the time limit. A fine of ₹${lunchOvertimeFine} has been applied.`);
+      }
     } catch (err) {
       console.error('Failed to end lunch:', err);
     } finally {
@@ -282,14 +315,21 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       const user = useAuthStore.getState().user;
       if (!user) return;
       const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, currentShift.date);
-      
+      const now = Date.now();
+
+      // Check early logout (before 10 PM)
+      const logoutH = new Date(now).getHours();
+      const logoutMin = new Date(now).getMinutes();
+      const minutesSinceMidnight = logoutH * 60 + logoutMin;
+      const earlyLogoutFine = minutesSinceMidnight < EARLY_LOGOUT_CUTOFF ? FINE_AMOUNT : 0;
+
       const updates: any = {
         status: 'off',
-        logoutAt: Date.now(),
+        logoutAt: now,
+        earlyLogoutFine,
       };
-      
+
       // If on lunch, end it before clocking out
-      const now = Date.now();
       if (currentShift.status === 'lunch' && currentShift.lunch && !currentShift.lunch.endAt) {
         updates.lunch = { ...currentShift.lunch, endAt: now };
         updates.totalLunchMs = (currentShift.totalLunchMs || 0) + (now - currentShift.lunch.startAt);
@@ -297,7 +337,11 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
 
       await updateDoc(shiftRef, updates);
       if (lunchTicker) clearInterval(lunchTicker);
-      
+
+      if (earlyLogoutFine > 0) {
+        Alert.alert('Early Logout', `You logged out before 10 PM. A fine of ₹${earlyLogoutFine} has been applied.`);
+      }
+
       // Sync with ops_staff to stop receiving new orders
       await useOpsStaffStore.getState().goOffShift(user.id);
     } catch (err) {

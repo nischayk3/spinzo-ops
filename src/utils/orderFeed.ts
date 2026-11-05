@@ -551,11 +551,18 @@ const tsToMs = (t: any): number => {
   return isNaN(parsed) ? 0 : parsed;
 };
 
-export const formatInstantTime = (p: PickupSlot | null | undefined, createdAt?: any): string => {
-  if (!p) return '';
-  const explicit = p.scheduledTime || (p as any).time || (p as any).slot;
-  if (explicit && String(explicit).trim() && !String(explicit).toLowerCase().includes('instant')) {
-    return String(explicit).trim();
+export const formatInstantTime = (p: PickupSlot | null | undefined, createdAt?: any, fallbackSlot?: string): string => {
+  if (!p && !fallbackSlot) return '';
+  const explicit = (p && (p.scheduledTime || (p as any).time || (p as any).slot)) || fallbackSlot;
+  if (explicit && String(explicit).trim()) {
+    const s = String(explicit).trim();
+    if (!s.toLowerCase().includes('instant')) {
+      return s;
+    }
+    const cleaned = s.replace(/instant\s*(pickup)?\s*[-•:]?\s*/gi, '').trim();
+    if (cleaned && /\d/.test(cleaned)) {
+      return cleaned;
+    }
   }
   if (createdAt) {
     const ms = tsToMs(createdAt);
@@ -627,6 +634,22 @@ export function formatFriendlyDate(dateInput: any, now: Date = new Date()): stri
   return `${dayOfWeek}, ${parsed.day} ${monthName}`;
 }
 
+/** Formats a Firestore/numeric/ISO timestamp as a short date label (same shape as formatFriendlyDate). */
+function formatFriendlyDateFromTimestamp(ts: any, now: Date = new Date()): string {
+  const ms = tsToMs(ts);
+  if (ms <= 0) return '';
+  const d = new Date(ms);
+  const todayYear = now.getFullYear();
+  const todayMonth = now.getMonth() + 1;
+  const todayDay = now.getDate();
+  if (d.getFullYear() === todayYear && d.getMonth() + 1 === todayMonth && d.getDate() === todayDay) return 'Today';
+  const tomorrow = new Date(todayYear, todayMonth - 1, todayDay + 1);
+  if (d.getFullYear() === tomorrow.getFullYear() && d.getMonth() + 1 === tomorrow.getMonth() + 1 && d.getDate() === tomorrow.getDate()) return 'Tomorrow';
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const dayOfWeek = d.toLocaleDateString('en-US', { weekday: 'short' });
+  return `${dayOfWeek}, ${d.getDate()} ${monthNames[d.getMonth()]}`;
+}
+
 export interface OrderPickupInfo {
   isInstant: boolean;
   type: 'instant' | 'scheduled';
@@ -673,20 +696,25 @@ export function getPickupInfo(order: FeedOrder | any, now: Date = new Date()): O
 
   let timeLabel = '';
   if (isInstant) {
-    timeLabel = formatInstantTime(raw, order.createdAt);
+    timeLabel = formatInstantTime(raw, order.createdAt, rawTime ? String(rawTime).trim() : undefined);
   } else if (rawTime && String(rawTime).trim()) {
     timeLabel = String(rawTime).trim();
   }
 
   const hasInfo = Boolean(isInstant || rawDate || rawTime);
 
+  const placedDateLabel = order?.createdAt ? formatFriendlyDateFromTimestamp(order.createdAt, now) : '';
+  const resolvedDateLabel = dateLabel || (isInstant ? placedDateLabel : '');
+
   let fullDisplay = '';
   if (isInstant) {
-    fullDisplay = `⚡ Instant • ${timeLabel || 'Within 30–45 mins'}`;
-  } else if (dateLabel && timeLabel) {
-    fullDisplay = `📅 Scheduled • ${dateLabel}, ${timeLabel}`;
-  } else if (dateLabel) {
-    fullDisplay = `📅 Scheduled • ${dateLabel}`;
+    fullDisplay = resolvedDateLabel
+      ? `⚡ Instant • ${resolvedDateLabel} • ${timeLabel || 'Within 30–45 mins'}`
+      : `⚡ Instant • ${timeLabel || 'Within 30–45 mins'}`;
+  } else if (resolvedDateLabel && timeLabel) {
+    fullDisplay = `📅 Scheduled • ${resolvedDateLabel}, ${timeLabel}`;
+  } else if (resolvedDateLabel) {
+    fullDisplay = `📅 Scheduled • ${resolvedDateLabel}`;
   } else if (timeLabel) {
     fullDisplay = `📅 Scheduled • ${timeLabel}`;
   } else {
@@ -698,10 +726,12 @@ export function getPickupInfo(order: FeedOrder | any, now: Date = new Date()): O
     type: isInstant ? 'instant' : 'scheduled',
     scheduledDate: rawDate ? String(rawDate) : undefined,
     scheduledTime: rawTime ? String(rawTime) : undefined,
-    dateLabel,
+    dateLabel: resolvedDateLabel,
     timeLabel,
     fullDisplay,
-    badgeLabel: isInstant ? '⚡ Instant Pickup' : '📅 Scheduled Pickup',
+    badgeLabel: isInstant
+      ? `⚡ Instant Pickup${resolvedDateLabel ? ` • ${resolvedDateLabel}` : ''}`
+      : '📅 Scheduled Pickup',
     hasInfo,
   };
 }
@@ -793,6 +823,54 @@ export const customerIndex = (orders: FeedOrder[]): Map<string, CustomerSummary>
   map.forEach(c => c.orders.sort((a, b) => tsToMs(b.createdAt) - tsToMs(a.createdAt)));
   return map;
 };
+
+/**
+ * Returns true if the order's pickup is for today (instant orders count as today).
+ */
+export function isTodayPickup(order: FeedOrder): boolean {
+  const pInfo = getPickupInfo(order);
+  if (!pInfo.hasInfo) return false;
+  if (pInfo.dateLabel === 'Today') return true;
+  if (pInfo.isInstant) return true;
+  return false;
+}
+
+/**
+ * Sorts orders by pickup time in ASCENDING order (earliest first).
+ * Instant orders sort first, then by earliest slot time.
+ */
+export function sortByPickupTimeAsc(orders: FeedOrder[]): FeedOrder[] {
+  const getSlotMinutes = (o: FeedOrder): number => {
+    const pInfo = getPickupInfo(o);
+    if (pInfo.isInstant) return 0;
+    if (pInfo.scheduledTime) {
+      const startMin = parseSlotStartMinutes(pInfo.scheduledTime);
+      if (startMin !== null) return startMin;
+    }
+    return 9999;
+  };
+
+  return [...orders].sort((a, b) => {
+    const aMs = getSlotMinutes(a);
+    const bMs = getSlotMinutes(b);
+    if (aMs !== bMs) return aMs - bMs;
+    if (a.isUrgent && !b.isUrgent) return -1;
+    if (!a.isUrgent && b.isUrgent) return 1;
+    return 0;
+  });
+}
+
+export function isWithinDeliverySlot(order: FeedOrder): boolean {
+  if (order.status !== 'ready' && order.status !== 'out_for_delivery') return false;
+  const slot = order.deliverySlot || order.deliveryTime || (order as any).deliveryDetails?.scheduledTime;
+  if (!slot || typeof slot !== 'string') return false;
+  const startMin = parseSlotStartMinutes(slot);
+  if (startMin === null) return false;
+  const now = new Date();
+  const currentMin = now.getHours() * 60 + now.getMinutes();
+  const endMin = startMin + 60;
+  return currentMin >= startMin && currentMin <= endMin;
+}
 
 /**
  * Robust search matcher across token numbers, service tokens, order IDs,

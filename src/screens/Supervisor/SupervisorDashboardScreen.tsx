@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, Linking } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, TextInput, Linking, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
   Search, ChevronRight, Truck, Users, AlertTriangle, IndianRupee, Timer, X, Zap,
@@ -11,12 +11,14 @@ import { useAuthStore } from '../../store/authStore';
 import { useStaffRosterStore, StaffMember } from '../../store/staffRosterStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
-import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo } from '../../utils/orderFeed';
+import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo, isTodayPickup, sortByPickupTimeAsc } from '../../utils/orderFeed';
 import { announceSkippedOrder } from '../../utils/alerts';
 import { stepLabel, currentStep, isDone } from '../../utils/opsProcess';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
+import { OperationsRecordSheet } from './OperationsRecordSheet';
 import { SupervisorRiderRouteModal } from '../../components/Supervisor/SupervisorRiderRouteModal';
+import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
 import type { FeedOrder } from '../../utils/orderFeed';
@@ -26,8 +28,36 @@ const formatStaffName = (name?: string, fallback = 'Staff'): string => {
   return name.charAt(0).toUpperCase() + name.slice(1);
 };
 
+const tsToMs = (t: any): number => {
+  if (!t) return 0;
+  if (typeof t === 'number') return t;
+  if (typeof t.toMillis === 'function') return t.toMillis();
+  if (typeof t.toDate === 'function') return t.toDate().getTime();
+  if (t.seconds) return t.seconds * 1000;
+  const p = new Date(t).getTime();
+  return isNaN(p) ? 0 : p;
+};
+
+const formatPickupTime = (t: any): string => {
+  const ms = tsToMs(t);
+  if (!ms) return '—';
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+};
+
+const calcDuration = (start: any, end: any): string => {
+  const startMs = tsToMs(start);
+  const endMs = tsToMs(end);
+  if (!startMs || !endMs || endMs <= startMs) return '';
+  const min = Math.round((endMs - startMs) / 60000);
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+};
+
 export function SupervisorDashboardScreen() {
   const { orders, initialize } = useOrderFeedStore();
+  const [showRecordSheet, setShowRecordSheet] = useState(false);
   const processes = useOpsProcessStore(s => s.processes);
   const user = useAuthStore(s => s.user);
   const { roster } = useStaffRosterStore();
@@ -36,38 +66,42 @@ export function SupervisorDashboardScreen() {
   const { isWideDesktop, isDesktop, isTablet, maxContainerStyle } = useResponsive();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [inboundFilter, setInboundFilter] = useState<'all' | 'urgent' | 'transit' | 'tagging'>('all');
+  const [inboundFilter, setInboundFilter] = useState<'today_pickups' | 'all' | 'urgent' | 'transit' | 'tagging' | 'in_ride'>('today_pickups');
   const [selectedRosterRider, setSelectedRosterRider] = useState<StaffMember | null>(null);
   const [benchmarkFilter, setBenchmarkFilter] = useState<'1d' | '7d' | '15d' | '30d'>('1d');
+  // Inline rider assign from card view
+  const [showCardAssignRider, setShowCardAssignRider] = useState(false);
+  const [cardAssignOrderId, setCardAssignOrderId] = useState('');
+  const [cardAssignIsDelivery, setCardAssignIsDelivery] = useState(false);
+  const [cardAssignUserId, setCardAssignUserId] = useState('');
 
   useEffect(() => {
     initialize();
   }, [initialize]);
 
-  // Inbound queue = orders waiting for pickup or in transit or ready to tag
+  // Inbound queue = orders awaiting pickup processing (NOT in-transit, NOT urgent, NOT tomorrow)
   const inbound = useMemo(() => {
-    return orders
-      .filter(o => (o.status === 'placed' || o.status === 'confirmed' || o.status === 'in_transit_to_store' || o.status === 'pickup_completed'))
-      .sort((a, b) => {
-        // Urgent first
-        if (a.isUrgent && !b.isUrgent) return -1;
-        if (!a.isUrgent && b.isUrgent) return 1;
-        const aMs = (a.createdAt as any)?.toMillis ? (a.createdAt as any).toMillis() : new Date((a.createdAt as any) || Date.now()).getTime();
-        const bMs = (b.createdAt as any)?.toMillis ? (b.createdAt as any).toMillis() : new Date((b.createdAt as any) || Date.now()).getTime();
-        return bMs - aMs;
-      });
+    // Base: placed/confirmed/pickup_completed — in_transit has its own tab
+    const base = orders
+      .filter(o => (o.status === 'placed' || o.status === 'confirmed' || o.status === 'pickup_completed'))
+      .filter(o => !o.isUrgent) // urgent orders only in urgent tab
+    // Today's pickups: only placed/confirmed with today's date, sorted ascending
+    return sortByPickupTimeAsc(base);
   }, [orders]);
 
-  // Deduplicated alerts for skipped orders
+  // Deduplicated alerts for skipped orders (only today's pickups)
   useEffect(() => {
     if (user?.role === 'supervisor') {
-      inbound.forEach(o => { 
-        if (o.status === 'placed' || o.status === 'confirmed') { 
-          announceSkippedOrder(o.id); 
-        } 
+      const todayPickups = orders.filter(o =>
+        (o.status === 'placed' || o.status === 'confirmed') &&
+        !o.isUrgent &&
+        isTodayPickup(o)
+      );
+      todayPickups.forEach(o => {
+        announceSkippedOrder(o.id);
       });
     }
-  }, [inbound.length]);
+  }, [orders]);
 
   const stats = useMemo(() => dayRevenue(orders), [orders]);
 
@@ -94,11 +128,20 @@ export function SupervisorDashboardScreen() {
   }, [searchQuery, orders]);
 
   const filteredInbound = useMemo(() => {
-    if (inboundFilter === 'urgent') return inbound.filter(o => o.isUrgent);
-    if (inboundFilter === 'transit') return inbound.filter(o => o.status === 'in_transit_to_store');
+    if (inboundFilter === 'today_pickups') {
+      return sortByPickupTimeAsc(
+        inbound.filter(o => o.status !== 'pickup_completed' && isTodayPickup(o))
+      );
+    }
+    if (inboundFilter === 'urgent') return orders.filter(o => o.isUrgent && o.status !== 'delivered' && o.status !== 'cancelled');
+    if (inboundFilter === 'in_ride') {
+      return sortByPickupTimeAsc(orders.filter(o => o.status === 'out_for_delivery'));
+    }
+    if (inboundFilter === 'transit') return orders.filter(o => o.status === 'in_transit_to_store');
     if (inboundFilter === 'tagging') return inbound.filter(o => o.status === 'pickup_completed');
-    return inbound;
-  }, [inbound, inboundFilter]);
+    // 'all': exclude urgent
+    return inbound.filter(o => !o.isUrgent);
+  }, [inbound, inboundFilter, orders]);
 
   // Helper token identifier: prefers Token # (e.g. T-65, T-17), falls back to order shortId (#ATIWMR)
   const getOrderTokenTag = (orderId: string, processToken?: string) => {
@@ -300,10 +343,9 @@ export function SupervisorDashboardScreen() {
       });
     });
 
-    return Object.entries(targetMap).map(([key, config]) => {
+    const benchRows = Object.entries(targetMap).map(([key, config]) => {
       const d = dataMap[key];
       const completedAvg = d.completedCount > 0 ? Math.round(d.completedTotalMin / d.completedCount) : null;
-
       return {
         key,
         label: config.label,
@@ -312,6 +354,38 @@ export function SupervisorDashboardScreen() {
         completedCount: d.completedCount,
       };
     });
+
+    // Pickup benchmark: average time from createdAt → pickedUpAt
+    let pickupTotal = 0, pickupCount = 0;
+    orders.forEach(o => {
+      const oMs = getMs(o.createdAt);
+      const pickTs = o.pickedUpAt || (o as any).pickupCompletedAt;
+      if (!pickTs) return;
+      const pickMs = getMs(pickTs);
+      if (pickMs && pickMs < cutoffMs) return;
+      if (pickMs > oMs && oMs > 0) {
+        const min = Math.round((pickMs - oMs) / 60000);
+        if (min > 0 && min < 600) { pickupTotal += min; pickupCount += 1; }
+      }
+    });
+    const pickupAvg = pickupCount > 0 ? Math.round(pickupTotal / pickupCount) : null;
+
+    // Delivery benchmark: average time from readyAt → deliveredAt
+    let deliveryTotal = 0, deliveryCount = 0;
+    orders.forEach(o => {
+      const delTs = o.deliveredAt || (o as any).deliveryCompletedAt;
+      if (!delTs) return;
+      const delMs = getMs(delTs);
+      if (delMs && delMs < cutoffMs) return;
+      const refMs = getMs(o.outForDeliveryAt || o.readyAt || o.createdAt);
+      if (delMs > refMs && refMs > 0) {
+        const min = Math.round((delMs - refMs) / 60000);
+        if (min > 0 && min < 600) { deliveryTotal += min; deliveryCount += 1; }
+      }
+    });
+    const deliveryAvg = deliveryCount > 0 ? Math.round(deliveryTotal / deliveryCount) : null;
+
+    return { stages: benchRows, pickupAvg, pickupCount, deliveryAvg, deliveryCount };
   }, [orders, processes, benchmarkFilter]);
 
   const renderInboundCard = (o: FeedOrder) => {
@@ -371,18 +445,24 @@ export function SupervisorDashboardScreen() {
           </View>
 
           <View className={`px-2 py-0.2 rounded-full border ${
-            o.status === 'in_transit_to_store' ? 'bg-sky-50 border-sky-200' :
             o.status === 'pickup_completed' ? 'bg-purple-50 border-purple-200' :
-            'bg-amber-50 border-amber-200'
+            o.status === 'out_for_delivery' ? 'bg-orange-50 border-orange-200' :
+            o.status === 'in_transit_to_store' ? 'bg-indigo-50 border-indigo-200' :
+            'bg-blue-50 border-blue-200'
           }`}>
             <Text className={`font-bold text-[9px] uppercase tracking-wider ${
-              o.status === 'in_transit_to_store' ? 'text-sky-700' :
               o.status === 'pickup_completed' ? 'text-purple-700' :
-              'text-amber-800'
+              o.status === 'out_for_delivery' ? 'text-orange-700' :
+              o.status === 'in_transit_to_store' ? 'text-indigo-700' :
+              'text-blue-700'
             }`}>
-              {o.status === 'in_transit_to_store' ? '🚚 In Transit' :
-               o.status === 'pickup_completed' ? '📦 Ready to Tag' :
-               o.status.replace(/_/g, ' ')}
+              {o.status === 'pickup_completed' ? 'Ready to Tag' :
+               o.status === 'out_for_delivery' ? 'Out for Delivery' :
+               o.status === 'in_transit_to_store' ? 'In Transit' :
+               o.status === 'confirmed' ? 'Confirmed' :
+               o.status === 'processing' ? 'Processing' :
+               o.status === 'ready' ? 'Ready' :
+               'Pickup'}
             </Text>
           </View>
         </View>
@@ -461,10 +541,17 @@ export function SupervisorDashboardScreen() {
             {(() => {
               const pInfo = getPickupInfo(o);
               if (pInfo.isInstant) {
+                const timePart = pInfo.timeLabel || 'Within 30–45 mins';
+                const isTimeSlot = /\d{1,2}:\d{2}/.test(timePart) && !timePart.toLowerCase().includes('within');
+                const displayTiming = pInfo.dateLabel
+                  ? (isTimeSlot ? `${pInfo.dateLabel} ${timePart}` : `${pInfo.dateLabel} • ${timePart}`)
+                  : timePart;
                 return (
                   <View className="bg-amber-100/90 border border-amber-300 px-1.5 py-0.2 rounded flex-row items-center">
                     <Zap size={8} color="#b45309" className="mr-0.5" />
-                    <Text className="text-amber-900 font-extrabold text-[9px]">{pInfo.timeLabel || 'Instant'}</Text>
+                    <Text className="text-amber-900 font-extrabold text-[9px]">
+                      Instant • {displayTiming}
+                    </Text>
                   </View>
                 );
               }
@@ -491,11 +578,55 @@ export function SupervisorDashboardScreen() {
             )}
           </View>
 
+          {(o.status === 'placed' || o.status === 'confirmed') && (
+            <TouchableOpacity
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                setCardAssignOrderId(o.id);
+                setCardAssignUserId(o.userId);
+                setCardAssignIsDelivery(false);
+                setShowCardAssignRider(true);
+              }}
+              className="bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded flex-row items-center mr-1 active:bg-blue-100"
+            >
+              <Truck size={8} color="#2563eb" className="mr-0.5" />
+              <Text className="text-blue-700 font-bold text-[10px]">Assign Rider</Text>
+            </TouchableOpacity>
+          )}
           <View className="bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded flex-row items-center">
             <Text className="text-purple-700 font-bold text-[10px] mr-0.5">Manage</Text>
             <ChevronRight size={10} color="#7e22ce" />
           </View>
         </View>
+
+        {/* Lifecycle timing strip */}
+        {(() => {
+          const pickTs = o.pickedUpAt || (o as any).pickupCompletedAt;
+          const delTs = o.deliveredAt || (o as any).deliveryCompletedAt;
+          const hasPickup = !!pickTs;
+          const hasDelivery = !!delTs;
+          if (!hasPickup && !hasDelivery) return null;
+          return (
+            <View className="flex-row items-center gap-2 mt-0.5 pt-0.5 border-t border-slate-100/80">
+              {hasPickup && (
+                <View className="flex-row items-center gap-0.5">
+                  <Truck size={7} color="#3b82f6" />
+                  <Text className="text-blue-500 text-[8px]">Pickup {formatPickupTime(pickTs)}</Text>
+                  <Text className="text-slate-300 text-[8px]">·</Text>
+                  <Text className="text-slate-400 text-[7px]">{calcDuration(o.createdAt, pickTs)}</Text>
+                </View>
+              )}
+              {hasDelivery && (
+                <View className="flex-row items-center gap-0.5">
+                  <CheckCircle2 size={7} color="#059669" />
+                  <Text className="text-emerald-600 text-[8px]">Delivered {formatPickupTime(delTs)}</Text>
+                  <Text className="text-slate-300 text-[8px]">·</Text>
+                  <Text className="text-slate-400 text-[7px]">{calcDuration(o.outForDeliveryAt || o.readyAt || o.createdAt, delTs)}</Text>
+                </View>
+              )}
+            </View>
+          );
+        })()}
       </TouchableOpacity>
     );
   };
@@ -539,8 +670,14 @@ export function SupervisorDashboardScreen() {
               )}
             </View>
 
-            {/* Right: Hardware Capacity Badges */}
+            {/* Right: Hardware Capacity Badges + Records Button */}
             <View className="flex-row items-center gap-1.5 bg-white border border-slate-200/90 p-1 rounded-xl shadow-2xs">
+              <TouchableOpacity
+                onPress={() => setShowRecordSheet(true)}
+                className="bg-purple-100 px-2 py-0.5 rounded-md active:bg-purple-200"
+              >
+                <Text className="text-purple-800 font-extrabold text-[11px]">📊 Records</Text>
+              </TouchableOpacity>
               <View className="bg-purple-50 px-2 py-0.5 rounded-md">
                 <Text className="text-purple-800 font-extrabold text-[11px]">🌀 {resources.washers} Washers</Text>
               </View>
@@ -612,31 +749,31 @@ export function SupervisorDashboardScreen() {
               </View>
             </View>
 
-            {/* Tile 3: Urgent Priority */}
+            {/* Tile 3: Today's Pickups Queue */}
             <View className={`${isDesktop ? 'flex-1' : isTablet ? 'w-[48%]' : 'w-full'} bg-white rounded-xl px-3.5 py-2.5 justify-between shadow-2xs border ${
-              urgentOrders.length > 0 ? 'border-rose-300 bg-rose-50/30' : 'border-slate-200/90'
+              inbound.length > 0 ? 'border-sky-300 bg-sky-50/30' : 'border-slate-200/90'
             }`}>
               <View className="flex-row items-center justify-between">
                 <View className="flex-row items-center">
-                  <Zap color={urgentOrders.length > 0 ? '#e11d48' : '#64748b'} size={13} className="mr-1" />
-                  <Text className={`${urgentOrders.length > 0 ? 'text-rose-700' : 'text-slate-500'} font-bold text-[10px] uppercase tracking-wider`}>Urgent Priority</Text>
+                  <Calendar color={inbound.length > 0 ? '#0284c7' : '#64748b'} size={13} className="mr-1" />
+                  <Text className={`${inbound.length > 0 ? 'text-sky-700' : 'text-slate-500'} font-bold text-[10px] uppercase tracking-wider`}>Today's Pickups</Text>
                 </View>
-                {urgentOrders.length > 0 ? (
-                  <View className="bg-rose-500 px-1.5 py-0.2 rounded">
-                    <Text className="text-white font-black text-[9px] uppercase">ACTION REQ</Text>
+                {inbound.length > 0 ? (
+                  <View className="bg-sky-500 px-1.5 py-0.2 rounded">
+                    <Text className="text-white font-black text-[9px] uppercase">PICKUPS</Text>
                   </View>
                 ) : (
                   <View className="bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200">
-                    <Text className="text-emerald-700 font-bold text-[9px]">ON TRACK</Text>
+                    <Text className="text-emerald-700 font-bold text-[9px]">ALL CLEAR</Text>
                   </View>
                 )}
               </View>
               <View className="flex-row items-baseline justify-between mt-1">
-                <Text className={`text-xl font-black ${urgentOrders.length > 0 ? 'text-rose-600' : 'text-slate-900'} tracking-tight`}>
-                  {urgentOrders.length}
+                <Text className={`text-xl font-black ${inbound.length > 0 ? 'text-sky-600' : 'text-slate-900'} tracking-tight`}>
+                  {inbound.length}
                 </Text>
                 <Text className="text-slate-500 text-[11px] font-medium">
-                  {inbound.length} orders in queue
+                  {orders.filter(o => o.status === 'pickup_completed').length} to tag
                 </Text>
               </View>
             </View>
@@ -678,7 +815,14 @@ export function SupervisorDashboardScreen() {
                 </View>
 
                 {/* Filter pills */}
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingRight: 4 }}>
                 <View className="flex-row items-center gap-1">
+                  <TouchableOpacity
+                    onPress={() => setInboundFilter('today_pickups')}
+                    className={`px-2.5 py-0.5 rounded-full border ${inboundFilter === 'today_pickups' ? 'bg-emerald-500 border-emerald-500' : 'bg-white border-slate-200'}`}
+                  >
+                    <Text className={`font-bold text-[11px] ${inboundFilter === 'today_pickups' ? 'text-white' : 'text-slate-600'}`}>Today's Pickups</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => setInboundFilter('all')}
                     className={`px-2.5 py-0.5 rounded-full border ${inboundFilter === 'all' ? 'bg-[#994bff] border-[#994bff]' : 'bg-white border-slate-200'}`}
@@ -686,10 +830,16 @@ export function SupervisorDashboardScreen() {
                     <Text className={`font-bold text-[11px] ${inboundFilter === 'all' ? 'text-white' : 'text-slate-600'}`}>All</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
+                    onPress={() => setInboundFilter('in_ride')}
+                    className={`px-2.5 py-0.5 rounded-full border ${inboundFilter === 'in_ride' ? 'bg-blue-600 border-blue-600' : 'bg-white border-slate-200'}`}
+                  >
+                    <Text className={`font-bold text-[11px] ${inboundFilter === 'in_ride' ? 'text-white' : 'text-slate-600'}`}>Today's In-Ride ({outForDeliveryOrdersCount})</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
                     onPress={() => setInboundFilter('urgent')}
                     className={`px-2.5 py-0.5 rounded-full border ${inboundFilter === 'urgent' ? 'bg-rose-500 border-rose-500' : 'bg-white border-slate-200'}`}
                   >
-                    <Text className={`font-bold text-[11px] ${inboundFilter === 'urgent' ? 'text-white' : 'text-slate-600'}`}>⚡ Urgent</Text>
+                    <Text className={`font-bold text-[11px] ${inboundFilter === 'urgent' ? 'text-white' : 'text-slate-600'}`}>Urgent</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => setInboundFilter('tagging')}
@@ -704,6 +854,7 @@ export function SupervisorDashboardScreen() {
                     <Text className={`font-bold text-[11px] ${inboundFilter === 'transit' ? 'text-white' : 'text-slate-600'}`}>In Transit</Text>
                   </TouchableOpacity>
                 </View>
+                </ScrollView>
               </View>
 
               {/* Cards Grid */}
@@ -859,18 +1010,18 @@ export function SupervisorDashboardScreen() {
                     ))}
                   </View>
                 </View>
-                <View className="flex-row gap-1.5">
-                  {stageBenchmarks.map(s => {
+                <View className="flex-row flex-wrap gap-1.5">
+                  {stageBenchmarks.stages.map(s => {
                     const displayVal = s.completedAvg !== null ? `${s.completedAvg}m` : '—';
                     const isAboveTarget = s.completedAvg !== null && s.completedAvg > s.target;
                     const isWithinTarget = s.completedAvg !== null && s.completedAvg <= s.target;
 
                     return (
-                      <View key={s.key} className={`flex-1 p-1.5 rounded-xl border items-center ${
-                        isAboveTarget 
-                          ? 'bg-amber-50/70 border-amber-200' 
+                      <View key={s.key} className={`flex-1 min-w-[60px] p-1.5 rounded-xl border items-center ${
+                        isAboveTarget
+                          ? 'bg-amber-50/70 border-amber-200'
                           : isWithinTarget
-                          ? 'bg-emerald-50/60 border-emerald-200' 
+                          ? 'bg-emerald-50/60 border-emerald-200'
                           : 'bg-slate-50 border-slate-100'
                       }`}>
                         <Text className="text-slate-400 text-[9px] font-bold uppercase">{s.label}</Text>
@@ -887,6 +1038,34 @@ export function SupervisorDashboardScreen() {
                       </View>
                     );
                   })}
+                </View>
+
+                {/* Pickup & Delivery Benchmarks */}
+                <View className="flex-row gap-1.5 mt-2 pt-2 border-t border-slate-100">
+                  <View className="flex-1 bg-blue-50/70 rounded-xl p-2 border border-blue-200 items-center">
+                    <View className="flex-row items-center gap-1">
+                      <Truck size={9} color="#2563eb" />
+                      <Text className="text-blue-600 text-[9px] font-bold uppercase">Pickup</Text>
+                    </View>
+                    <Text className="font-black text-xs text-blue-800 mt-0.5">
+                      {stageBenchmarks.pickupAvg !== null ? `${stageBenchmarks.pickupAvg}m` : '—'}
+                    </Text>
+                    <Text className="text-blue-500 text-[8px] mt-0.5">
+                      {stageBenchmarks.pickupCount > 0 ? `${stageBenchmarks.pickupCount} ord` : 'no data'}
+                    </Text>
+                  </View>
+                  <View className="flex-1 bg-emerald-50/70 rounded-xl p-2 border border-emerald-200 items-center">
+                    <View className="flex-row items-center gap-1">
+                      <CheckCircle2 size={9} color="#059669" />
+                      <Text className="text-emerald-600 text-[9px] font-bold uppercase">Delivery</Text>
+                    </View>
+                    <Text className="font-black text-xs text-emerald-800 mt-0.5">
+                      {stageBenchmarks.deliveryAvg !== null ? `${stageBenchmarks.deliveryAvg}m` : '—'}
+                    </Text>
+                    <Text className="text-emerald-500 text-[8px] mt-0.5">
+                      {stageBenchmarks.deliveryCount > 0 ? `${stageBenchmarks.deliveryCount} ord` : 'no data'}
+                    </Text>
+                  </View>
                 </View>
               </View>
 
@@ -926,6 +1105,21 @@ export function SupervisorDashboardScreen() {
         orders={orders}
         onClose={() => setSelectedRosterRider(null)}
         onOpenOrder={(orderId) => navigation.navigate('OrderDetail', { orderId })}
+      />
+
+      <Modal visible={showRecordSheet} animationType="slide" onRequestClose={() => setShowRecordSheet(false)}>
+        <OperationsRecordSheet onClose={() => setShowRecordSheet(false)} />
+      </Modal>
+
+      <AssignRiderModal
+        visible={showCardAssignRider}
+        onClose={() => setShowCardAssignRider(false)}
+        onAssign={async (riderId) => {
+          const res = await useOpsProcessStore.getState().assignTaskToRider(cardAssignOrderId, cardAssignUserId, riderId, cardAssignIsDelivery);
+          if (!res.ok) console.warn('assignTaskToRider failed:', res.error);
+        }}
+        orderId={cardAssignOrderId}
+        isDelivery={cardAssignIsDelivery}
       />
     </SafeAreaView>
   );

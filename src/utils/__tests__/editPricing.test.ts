@@ -9,10 +9,39 @@ describe('calculateItemPrice', () => {
     ).toBe(7 * 85 + 3 * 18);
   });
 
-  it('keeps wash_fold credit items at their stored price', () => {
+  it('covers up to 7 kg for wash_fold credit items and charges extra weight at locked pack rate', () => {
+    // Exactly 7 kg covered by credit -> ₹0
     expect(
-      calculateItemPrice({ serviceId: 'wash_fold', weight: 7, isCreditItem: true, totalPrice: 999 })
-    ).toBe(999);
+      calculateItemPrice({ serviceId: 'wash_fold', weight: 7, isCreditItem: true, ratePerKg: 70, kgPerCredit: 7 })
+    ).toBe(0);
+
+    // Below 7 kg (e.g. 5 kg) covered by credit -> ₹0
+    expect(
+      calculateItemPrice({ serviceId: 'wash_fold', weight: 5, isCreditItem: true, ratePerKg: 70, kgPerCredit: 7 })
+    ).toBe(0);
+
+    // 12 kg (5 kg extra @ ₹70/kg) -> ₹350
+    expect(
+      calculateItemPrice({ serviceId: 'wash_fold', weight: 12, isCreditItem: true, ratePerKg: 70, kgPerCredit: 7 })
+    ).toBe(350);
+
+    // 12 kg + 3 addon ironed (₹350 + 3 * 18 = ₹404)
+    expect(
+      calculateItemPrice({
+        serviceId: 'wash_fold',
+        weight: 12,
+        isCreditItem: true,
+        ratePerKg: 70,
+        kgPerCredit: 7,
+        ironingEnabled: true,
+        ironingCount: 3,
+      })
+    ).toBe(350 + 3 * 18);
+
+    // Wash & Iron credit item: 9 kg (2 kg extra @ ₹125/kg) -> ₹250
+    expect(
+      calculateItemPrice({ serviceId: 'wash_iron', weight: 9, isCreditItem: true, ratePerKg: 125, kgPerCredit: 7 })
+    ).toBe(250);
   });
 
   it('prices wash_iron by weight', () => {

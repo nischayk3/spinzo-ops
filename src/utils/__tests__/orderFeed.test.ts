@@ -196,6 +196,20 @@ describe('getPickupInfo', () => {
     expect(info.fullDisplay).toBe('⚡ Instant • 10:00 - 10:30');
   });
 
+  it('identifies instant orders with slot on root order and resolves createdAt date', () => {
+    const o = makeOrder({
+      pickupDetails: { isInstant: true },
+      slot: '11:00 - 12:00',
+      createdAt: refDate.getTime(),
+    });
+    const info = getPickupInfo(o, refDate);
+    expect(info.isInstant).toBe(true);
+    expect(info.timeLabel).toBe('11:00 - 12:00');
+    expect(info.dateLabel).toBe('Today');
+    expect(info.badgeLabel).toBe('⚡ Instant Pickup • Today');
+    expect(info.fullDisplay).toBe('⚡ Instant • Today • 11:00 - 12:00');
+  });
+
   it('identifies scheduled orders for today', () => {
     const o = makeOrder({
       pickupDetails: { scheduledDate: '2026-10-20', scheduledTime: '17:00 - 18:00' },

@@ -16,6 +16,7 @@ import { PickupsScreen } from '../screens/Rider/PickupsScreen';
 import { DashboardScreen } from '../screens/Home/DashboardScreen';
 import { SupervisorDashboardScreen } from '../screens/Supervisor/SupervisorDashboardScreen';
 import { CustomerDetailScreen } from '../screens/Supervisor/CustomerDetailScreen';
+import { OperationsRecordSheet } from '../screens/Supervisor/OperationsRecordSheet';
 import { ProcessingScreen } from '../screens/Helper/ProcessingScreen';
 import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
@@ -41,6 +42,7 @@ export type RootStackParamList = {
   Main: undefined;
   OrderDetail: { orderId: string, processId?: string };
   CustomerDetail: { phone: string };
+  OperationsRecord: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -240,6 +242,7 @@ export function RootNavigator() {
       if (role === 'supervisor' || role === 'admin') {
         useOrderFeedStore.getState().initialize();
         useStaffRosterStore.getState().initialize();
+        useOpsProcessStore.getState().initialize(uid || '');
       }
     }
   }, [uid, activeRole, staffDoc?.role]);
@@ -332,6 +335,10 @@ export function RootNavigator() {
         <Stack.Screen
           name="CustomerDetail"
           component={CustomerDetailScreen}
+        />
+        <Stack.Screen
+          name="OperationsRecord"
+          component={OperationsRecordSheet}
         />
       </Stack.Navigator>
       {isLoggedIn && effectiveRole === 'rider' && <GlobalAssignmentModal />}

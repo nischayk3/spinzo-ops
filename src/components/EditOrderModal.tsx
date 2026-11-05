@@ -30,7 +30,7 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
           ...it,
           serviceId: sid,
           serviceType: it.serviceType || sid,
-          weight: it.weight || ((isWF || isWI) ? 5 : undefined),
+          weight: it.weight ?? (it.unit === 'kg' && it.quantity ? it.quantity : ((isWF || isWI) ? 5 : undefined)),
           ironingEnabled: isWF ? Boolean(it.ironingEnabled) : undefined,
           ironingCount: isWF && it.ironingEnabled ? (it.ironingCount || 0) : (isIroningOnly ? (it.ironingCount || it.clothesCount || it.quantity || 1) : 0),
           clothesCount: (isWF || isWI) ? undefined : (it.clothesCount || it.ironingCount || it.quantity || 1),
@@ -118,13 +118,18 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
     // Recalculate price
     updatedItem.totalPrice = calculateItemPrice(updatedItem);
 
-    if (sid === 'wash_fold' && !updatedItem.isCreditItem) {
-      updatedItem.quantity = 1;
-      const maxPieces = Math.round((updatedItem.weight || 5) * 3);
-      if (!updatedItem.ironingEnabled) {
-        updatedItem.ironingCount = 0;
-      } else if (updatedItem.ironingCount > maxPieces) {
-        updatedItem.ironingCount = maxPieces;
+    if (sid === 'wash_fold') {
+      if (!updatedItem.isCreditItem) {
+        updatedItem.quantity = 1;
+        const maxPieces = Math.round((updatedItem.weight || 5) * 3);
+        if (!updatedItem.ironingEnabled) {
+          updatedItem.ironingCount = 0;
+        } else if (updatedItem.ironingCount > maxPieces) {
+          updatedItem.ironingCount = maxPieces;
+        }
+      } else {
+        // Keep weight and quantity (kg) in sync for subscription credit items
+        updatedItem.quantity = updatedItem.weight;
       }
     }
 
@@ -209,23 +214,32 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
         vendorId: order.vendorId || 'vendor_1',
         action: 'editOrder',
         items,
-        totalAmount: grandTotal,
+        totalAmount: grandTotal ?? 0,
         billDetails: {
           ...(order.billDetails || {}),
           itemTotal,
           discount,
           deliveryFee,
-          total: grandTotal
+          total: grandTotal ?? 0
         }
       });
       if (res.data?.ok) {
         Alert.alert('Success', 'Order updated successfully');
         onClose();
       } else {
-        Alert.alert('Error', res.data?.error || 'Failed to update order');
+        const errorMsg = res.data?.error || 'Failed to update order';
+        console.error('[EditOrderModal] Failed to update order:', errorMsg);
+        Alert.alert('Error', errorMsg);
+        if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+          window.alert(`Error: ${errorMsg}`);
+        }
       }
     } catch (err: any) {
+      console.error('[EditOrderModal] Error updating order:', err);
       Alert.alert('Error', err.message || 'Failed to update order');
+      if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+        window.alert(`Error: ${err.message || 'Failed to update order'}`);
+      }
     } finally {
       setProcessing(false);
     }
@@ -309,28 +323,91 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
                 )}
 
                 {/* Wash & Fold Credit */}
-                {sid === 'wash_fold' && item.isCreditItem && (
-                  <View className="gap-3">
-                    <Text className="text-xs text-blue-600">Subscription Item (Paid via Credit)</Text>
+                {sid === 'wash_fold' && item.isCreditItem && (() => {
+                  const kgPerCredit = item.kgPerCredit || 7;
+                  const ratePerKg = item.ratePerKg || 70;
+                  const currentWeight = item.weight ?? kgPerCredit;
+                  const extraKg = Math.max(0, currentWeight - kgPerCredit);
+                  const extraAmt = extraKg * ratePerKg;
+
+                  return (
+                    <View className="gap-2.5">
+                      <View className="bg-blue-50/90 border border-blue-200 rounded-lg p-2.5">
+                        <Text className="text-xs font-bold text-blue-900">Subscription Item (Plan Credit)</Text>
+                        <Text className="text-[11px] text-blue-700 mt-0.5">
+                          1 Credit covers up to {kgPerCredit} kg. Extra weight billed @ ₹{ratePerKg}/kg.
+                        </Text>
+                        {extraKg > 0 ? (
+                          <View className="mt-1.5 pt-1.5 border-t border-blue-200 flex-row items-center justify-between">
+                            <Text className="text-[11px] font-semibold text-amber-800">
+                              Extra: +{extraKg} kg @ ₹{ratePerKg}/kg
+                            </Text>
+                            <Text className="text-xs font-black text-amber-900">+₹{extraAmt}</Text>
+                          </View>
+                        ) : (
+                          <Text className="text-[10px] font-semibold text-emerald-700 mt-1">
+                            ✓ Covered by plan credit (₹0 extra)
+                          </Text>
+                        )}
+                      </View>
+                      <CounterRow
+                        label={`Adjust Weight (₹${ratePerKg}/kg over ${kgPerCredit} kg)`}
+                        value={`${currentWeight} kg`}
+                        onDecrement={() => updateItem(index, { weight: Math.max(1, currentWeight - 1) })}
+                        onIncrement={() => updateItem(index, { weight: Math.min(50, currentWeight + 1) })}
+                        disableDecrement={currentWeight <= 1}
+                      />
+                    </View>
+                  );
+                })()}
+
+                {/* Wash & Iron */}
+                {sid === 'wash_iron' && (
+                  item.isCreditItem ? (() => {
+                    const kgPerCredit = item.kgPerCredit || 7;
+                    const ratePerKg = item.ratePerKg || 125;
+                    const currentWeight = item.weight ?? kgPerCredit;
+                    const extraKg = Math.max(0, currentWeight - kgPerCredit);
+                    const extraAmt = extraKg * ratePerKg;
+
+                    return (
+                      <View className="gap-2.5">
+                        <View className="bg-blue-50/90 border border-blue-200 rounded-lg p-2.5">
+                          <Text className="text-xs font-bold text-blue-900">Subscription Item (Plan Credit)</Text>
+                          <Text className="text-[11px] text-blue-700 mt-0.5">
+                            1 Credit covers up to {kgPerCredit} kg. Extra weight billed @ ₹{ratePerKg}/kg.
+                          </Text>
+                          {extraKg > 0 ? (
+                            <View className="mt-1.5 pt-1.5 border-t border-blue-200 flex-row items-center justify-between">
+                              <Text className="text-[11px] font-semibold text-amber-800">
+                                Extra: +{extraKg} kg @ ₹{ratePerKg}/kg
+                              </Text>
+                              <Text className="text-xs font-black text-amber-900">+₹{extraAmt}</Text>
+                            </View>
+                          ) : (
+                            <Text className="text-[10px] font-semibold text-emerald-700 mt-1">
+                              ✓ Covered by plan credit (₹0 extra)
+                            </Text>
+                          )}
+                        </View>
+                        <CounterRow
+                          label={`Adjust Weight (₹${ratePerKg}/kg over ${kgPerCredit} kg)`}
+                          value={`${currentWeight} kg`}
+                          onDecrement={() => updateItem(index, { weight: Math.max(1, currentWeight - 1) })}
+                          onIncrement={() => updateItem(index, { weight: Math.min(50, currentWeight + 1) })}
+                          disableDecrement={currentWeight <= 1}
+                        />
+                      </View>
+                    );
+                  })() : (
                     <CounterRow
-                      label="Adjust Weight"
+                      label="Adjust Weight (₹140/kg)"
                       value={`${item.weight || 5} kg`}
                       onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
                       onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
                       disableDecrement={(item.weight || 5) <= 5}
                     />
-                  </View>
-                )}
-
-                {/* Wash & Iron */}
-                {sid === 'wash_iron' && (
-                  <CounterRow
-                    label="Adjust Weight (₹140/kg)"
-                    value={`${item.weight || 5} kg`}
-                    onDecrement={() => updateItem(index, { weight: Math.max(5, (item.weight || 5) - 1) })}
-                    onIncrement={() => updateItem(index, { weight: Math.min(50, (item.weight || 5) + 1) })}
-                    disableDecrement={(item.weight || 5) <= 5}
-                  />
+                  )
                 )}
 
                 {/* Steam Iron (standalone) with Tiered Breakdown */}

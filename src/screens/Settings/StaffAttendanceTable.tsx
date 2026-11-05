@@ -320,6 +320,9 @@ export function StaffAttendanceTable() {
     // Fee
     const fee = isPresent ? (activeDoc?.fee || activeDoc?.dailyFee || target.defaultFee) : 0;
 
+    // Fines
+    const finesTotal = (shift?.lateFine || 0) + (shift?.lunchOvertimeFine || 0) + (shift?.earlyLogoutFine || 0);
+
     // Remark
     let remarkText = 'Absent';
     let badgeBg = 'bg-rose-50 border-rose-200';
@@ -367,6 +370,7 @@ export function StaffAttendanceTable() {
       breakTime,
       logoutTime,
       fee,
+      finesTotal,
       isPresent,
       remarkText,
       badgeBg,
@@ -377,6 +381,7 @@ export function StaffAttendanceTable() {
   const presentCount = rows.filter(r => r.isPresent).length;
   const absentCount = rows.length - presentCount;
   const totalDailyPayout = rows.reduce((sum, r) => sum + r.fee, 0);
+  const totalDailyFines = rows.reduce((sum, r) => sum + r.finesTotal, 0);
 
   return (
     <View className="bg-white rounded-3xl p-5 mb-5 border border-gray-200/80 shadow-xs">
@@ -466,6 +471,9 @@ export function StaffAttendanceTable() {
             <IndianRupee size={13} color="#994bff" />
           </View>
           <Text className="text-purple-950 font-black text-xl">₹{totalDailyPayout.toLocaleString('en-IN')}</Text>
+          {totalDailyFines > 0 && (
+            <Text className="text-rose-600 font-bold text-[10px] mt-0.5">Fines: ₹{totalDailyFines}</Text>
+          )}
         </View>
       </View>
 
@@ -490,6 +498,7 @@ export function StaffAttendanceTable() {
               <Text className="w-[95px] text-[11px] font-black text-gray-700 uppercase tracking-wider">BREAK</Text>
               <Text className="w-[100px] text-[11px] font-black text-gray-700 uppercase tracking-wider">LOG OUT</Text>
               <Text className="w-[85px] text-[11px] font-black text-gray-700 uppercase tracking-wider">FEE</Text>
+              <Text className="w-[65px] text-[11px] font-black text-gray-700 uppercase tracking-wider">FINES</Text>
               <Text className="w-[140px] text-[11px] font-black text-gray-700 uppercase tracking-wider">REMARK</Text>
             </View>
 
@@ -574,7 +583,14 @@ export function StaffAttendanceTable() {
                     </Text>
                   </View>
 
-                  {/* 7. REMARK */}
+                  {/* 7. FINES */}
+                  <View className="w-[65px] pr-2">
+                    <Text className={`text-xs font-black ${row.finesTotal > 0 ? 'text-rose-700' : 'text-gray-400'}`}>
+                      {row.finesTotal > 0 ? `₹${row.finesTotal}` : '—'}
+                    </Text>
+                  </View>
+
+                  {/* 8. REMARK */}
                   <View className="w-[140px] pr-2">
                     <View className={`px-2.5 py-1 rounded-xl border self-start ${row.badgeBg}`}>
                       <Text className={`text-[10px] font-black ${row.badgeText}`} numberOfLines={1}>

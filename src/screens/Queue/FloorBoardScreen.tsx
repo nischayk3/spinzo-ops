@@ -1,11 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, FlatList, ActivityIndicator, TouchableOpacity, TextInput, Linking, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag, Zap, Clock, Calendar, CheckCircle2, Truck, AlertTriangle, Video } from 'lucide-react-native';
+import { Search, ChevronRight, Phone, MapPin, PackageOpen, Tag, Zap, Clock, Calendar, CheckCircle2, Truck, AlertTriangle, Video, UserPlus } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo, timeAgo, formatDateTime, isToday } from '../../utils/orderFeed';
-import { stepLabel } from '../../utils/opsProcess';
+import { useOpsProcessStore } from '../../store/opsProcessStore';
+import { useAuthStore } from '../../store/authStore';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo, timeAgo, formatDateTime, isToday, isWithinDeliverySlot, getDeliveryTargetTimestamp } from '../../utils/orderFeed';
+import { stepLabel, currentStep, isDone } from '../../utils/opsProcess';
+import { AssignHelperModal } from '../../components/Supervisor/AssignHelperModal';
+import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -29,6 +33,8 @@ const FILTER_TABS = ['All', 'Action Required', 'Processing', 'Ready', 'Out for D
 export function FloorBoardScreen() {
   const { orders, isLoading, initialize } = useOrderFeedStore();
   const roster = useStaffRosterStore(s => s.roster);
+  const processes = useOpsProcessStore(s => s.processes);
+  const user = useAuthStore(s => s.user);
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const { isDesktop, isTablet, maxContainerStyle } = useResponsive();
 
@@ -36,9 +42,55 @@ export function FloorBoardScreen() {
   const [activeTab, setActiveTab] = useState('All');
   const [urgentOnly, setUrgentOnly] = useState(false);
 
+  // Assign modals state
+  const [showAssignHelperModal, setShowAssignHelperModal] = useState(false);
+  const [showAssignRiderModal, setShowAssignRiderModal] = useState(false);
+  const [assignModalOrderId, setAssignModalOrderId] = useState('');
+  const [assignModalProcessId, setAssignModalProcessId] = useState('');
+  const [assignModalUserId, setAssignModalUserId] = useState('');
+  const [assignModalIsDelivery, setAssignModalIsDelivery] = useState(false);
+  const [assignModalStepName, setAssignModalStepName] = useState('');
+
   useEffect(() => {
     initialize();
   }, [initialize]);
+
+  // Get active process for an order, if any
+  const getOrderProcess = (orderId: string) =>
+    processes.find(p => p.orderId === orderId && !isDone(p));
+
+  const openAssignHelper = (orderId: string, processId: string, userId: string, stepName: string) => {
+    setAssignModalOrderId(orderId);
+    setAssignModalProcessId(processId);
+    setAssignModalUserId(userId);
+    setAssignModalStepName(stepName);
+    setShowAssignHelperModal(true);
+  };
+
+  const openAssignRider = (orderId: string, userId: string, isDelivery: boolean) => {
+    setAssignModalOrderId(orderId);
+    setAssignModalUserId(userId);
+    setAssignModalIsDelivery(isDelivery);
+    setShowAssignRiderModal(true);
+  };
+
+  const handleAssignHelper = async (helperId: string) => {
+    const res = await useOpsProcessStore.getState().assignStepToHelper(
+      assignModalOrderId, assignModalProcessId, assignModalUserId, helperId
+    );
+    if (!res.ok) {
+      console.warn('assignStepToHelper failed:', res.error);
+    }
+  };
+
+  const handleAssignRider = async (riderId: string) => {
+    const res = await useOpsProcessStore.getState().assignTaskToRider(
+      assignModalOrderId, assignModalUserId, riderId, assignModalIsDelivery
+    );
+    if (!res.ok) {
+      console.warn('assignTaskToRider failed:', res.error);
+    }
+  };
 
   const parseTimeMs = (ts: any): number => {
     if (!ts) return 0;
@@ -347,16 +399,41 @@ export function FloorBoardScreen() {
                     ) : null}
                   </View>
 
-                  {item.status === 'processing' && item.processingStep && (
-                    <View className="items-end">
-                      <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Floor Step</Text>
-                      <View className="bg-blue-100 px-2 py-0.5 rounded mt-0.5">
-                        <Text className="text-blue-800 font-bold text-xs">
-                          {stepLabel(item.processingStep)}
-                        </Text>
+                  {item.status === 'processing' && item.processingStep && (() => {
+                    const proc = getOrderProcess(item.id);
+                    const cur = proc ? currentStep(proc) : null;
+                    const curStg = cur && proc?.stages?.[cur] ? (proc.stages[cur] as any) : null;
+                    const assigneeName: string | undefined = curStg?.assigneeName;
+                    return (
+                      <View className="items-end">
+                        <Text className="text-gray-400 text-[10px] uppercase tracking-wider font-extrabold">Floor Step</Text>
+                        <View className="flex-row items-center gap-1 mt-0.5">
+                          <View className="bg-blue-100 px-2 py-0.5 rounded">
+                            <Text className="text-blue-800 font-bold text-xs">
+                              {stepLabel(item.processingStep)}
+                            </Text>
+                          </View>
+                        </View>
+                        {assigneeName && proc && cur ? (
+                          <TouchableOpacity
+                            onPress={() => openAssignHelper(item.id, proc.id, item.userId, cur)}
+                            className="flex-row items-center gap-1 mt-1 bg-purple-50 border border-purple-200 px-2 py-0.5 rounded active:bg-purple-100"
+                          >
+                            <UserPlus size={10} color="#994bff" />
+                            <Text className="text-purple-800 font-bold text-[10px]">{assigneeName}</Text>
+                          </TouchableOpacity>
+                        ) : proc && cur ? (
+                          <TouchableOpacity
+                            onPress={() => openAssignHelper(item.id, proc.id, item.userId, cur)}
+                            className="flex-row items-center gap-1 mt-1 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded active:bg-amber-100"
+                          >
+                            <UserPlus size={10} color="#d97706" />
+                            <Text className="text-amber-800 font-bold text-[10px]">Assign Helper</Text>
+                          </TouchableOpacity>
+                        ) : null}
                       </View>
-                    </View>
-                  )}
+                    );
+                  })()}
 
                   {['placed', 'confirmed', 'in_transit_to_store'].includes(item.status) && (() => {
                     const pInfo = getPickupInfo(item);
@@ -390,6 +467,10 @@ export function FloorBoardScreen() {
                     const rObj = riderUid ? roster.riders.find(r => r.uid === riderUid) : null;
                     const riderName = (item as any).deliveryRiderName || rObj?.name || (item as any).riderName;
                     const isReady = item.status === 'ready';
+                    const inSlot = isWithinDeliverySlot(item);
+                    const deliveryTimeStr = item.deliveryDate
+                      ? `${item.deliveryDate}${item.deliveryTime ? `, ${item.deliveryTime}` : ''}`
+                      : null;
 
                     return (
                       <View className="items-end gap-1">
@@ -403,27 +484,44 @@ export function FloorBoardScreen() {
                           </View>
                         )}
 
-                        {/* Delivery Rider Assignment */}
+                        {/* Highlighted Delivery Slot — most prominent info */}
+                        {deliveryTimeStr ? (
+                          <View className={`px-2 py-1 rounded-lg border flex-row items-center ${
+                            inSlot
+                              ? 'bg-emerald-100 border-emerald-400 shadow-xs'
+                              : 'bg-blue-50 border-blue-200'
+                          }`}>
+                            <Calendar size={9} color={inSlot ? '#059669' : '#1d4ed8'} className="mr-1" />
+                            <Text className={`font-extrabold text-[11px] ${
+                              inSlot ? 'text-emerald-900' : 'text-blue-900'
+                            }`}>
+                              {inSlot ? '🔔 ' : ''}{deliveryTimeStr}
+                            </Text>
+                          </View>
+                        ) : (
+                          <View className="bg-amber-50 border border-amber-300 px-2 py-0.5 rounded">
+                            <Text className="text-amber-800 font-bold text-[10px]">Awaiting Slot</Text>
+                          </View>
+                        )}
+
+                        {/* Delivery Rider Assignment - tappable for reassign */}
                         {riderName ? (
-                          <View className="bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded flex-row items-center">
+                          <TouchableOpacity
+                            onPress={() => openAssignRider(item.id, item.userId, true)}
+                            className="bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded flex-row items-center active:bg-blue-100"
+                          >
                             <Truck size={9} color="#1d4ed8" className="mr-0.5" />
                             <Text className="text-blue-800 font-extrabold text-[10px]">{riderName}</Text>
-                          </View>
+                          </TouchableOpacity>
                         ) : isReady ? (
-                          <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex-row items-center">
-                            <AlertTriangle size={9} color="#d97706" className="mr-0.5" />
-                            <Text className="text-amber-800 font-extrabold text-[10px]">Rider Unassigned</Text>
-                          </View>
+                          <TouchableOpacity
+                            onPress={() => openAssignRider(item.id, item.userId, true)}
+                            className="bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex-row items-center active:bg-amber-100"
+                          >
+                            <UserPlus size={9} color="#d97706" className="mr-0.5" />
+                            <Text className="text-amber-800 font-extrabold text-[10px]">Assign Rider</Text>
+                          </TouchableOpacity>
                         ) : null}
-
-                        {/* Target Delivery slot */}
-                        {item.deliveryDate ? (
-                          <Text className="text-gray-500 font-semibold text-[10px]">
-                            Target: {item.deliveryDate} {item.deliveryTime || ''}
-                          </Text>
-                        ) : (
-                          <Text className="text-amber-600 font-bold text-[10px]">Awaiting Slot</Text>
-                        )}
                       </View>
                     );
                   })()}
@@ -467,6 +565,21 @@ export function FloorBoardScreen() {
           }}
         />
       </View>
+
+      <AssignHelperModal
+        visible={showAssignHelperModal}
+        onClose={() => setShowAssignHelperModal(false)}
+        onAssign={handleAssignHelper}
+        processId={assignModalProcessId}
+        stepName={assignModalStepName}
+      />
+      <AssignRiderModal
+        visible={showAssignRiderModal}
+        onClose={() => setShowAssignRiderModal(false)}
+        onAssign={handleAssignRider}
+        orderId={assignModalOrderId}
+        isDelivery={assignModalIsDelivery}
+      />
     </SafeAreaView>
   );
 }

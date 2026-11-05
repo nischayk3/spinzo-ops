@@ -18,6 +18,7 @@ function stageRoleGate(step, role, phone) {
 
 admin.initializeApp();
 const db = admin.firestore();
+db.settings({ ignoreUndefinedProperties: true });
 const TS = () => admin.firestore.FieldValue.serverTimestamp();
 
 // Generate a random 4-digit OTP (matching production Livfresh generateOTP).
@@ -1939,13 +1940,19 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     }
 
     try {
+      const resolvedTotal = totalAmount !== undefined ? totalAmount : (order.totalAmount ?? 0);
       const updateData = {
         items,
-        totalAmount: totalAmount || order.totalAmount,
-        billDetails: billDetails || order.billDetails,
+        totalAmount: resolvedTotal,
+        billDetails: billDetails || order.billDetails || { total: resolvedTotal, itemTotal: resolvedTotal, deliveryFee: 0, discount: 0 },
         updatedAt: admin.firestore.Timestamp.now(),
         lastEditedBy: auth.uid,
       };
+      if (order.totalAmount === 0 && resolvedTotal > 0 && order.paymentStatus === 'paid') {
+        updateData.paymentStatus = 'pending';
+      } else if (resolvedTotal === 0 && (order.paymentMode === 'credit' || (Array.isArray(order.items) && order.items.every(i => i && i.isCreditItem)))) {
+        updateData.paymentStatus = 'paid';
+      }
       await orderRef.update(updateData);
       // Also update the vendor mirror
       await db.doc(`vendors/${vendorId}/orders/${realOrderId}`).set(updateData, { merge: true });

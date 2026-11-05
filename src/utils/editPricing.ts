@@ -64,13 +64,27 @@ export const calculateItemPrice = (item: EditLineItem): number => {
   const sid = sidOf(item);
 
   if (sid === 'wash_fold') {
-    const base = (item.weight || 5) * 85;
     const ironing = item.ironingEnabled && item.ironingCount ? item.ironingCount * 18 : 0;
-    if (item.isCreditItem) return item.totalPrice || 0;
+    if (item.isCreditItem) {
+      const kgPerCredit = item.kgPerCredit || 7;
+      const ratePerKg = item.ratePerKg || 70;
+      const weight = item.weight ?? kgPerCredit;
+      const extraKg = Math.max(0, weight - kgPerCredit);
+      const extraBase = extraKg * ratePerKg;
+      return extraBase + ironing;
+    }
+    const base = (item.weight || 5) * 85;
     return base + ironing;
   }
 
   if (sid === 'wash_iron') {
+    if (item.isCreditItem) {
+      const kgPerCredit = item.kgPerCredit || 7;
+      const ratePerKg = item.ratePerKg || 125;
+      const weight = item.weight ?? kgPerCredit;
+      const extraKg = Math.max(0, weight - kgPerCredit);
+      return extraKg * ratePerKg;
+    }
     return (item.weight || 5) * 140;
   }
 

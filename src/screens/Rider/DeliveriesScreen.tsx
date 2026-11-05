@@ -245,7 +245,7 @@ export function DeliveriesScreen() {
               const total = order ? orderTotal(order) : (t.totalAmount || 0);
               const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
               const isCredit = order?.paymentMode === "credit";
-              const unpaidAmt = total > 0 && !isPaid && !isCredit ? total : undefined;
+              const unpaidAmt = total > 0 && !isPaid ? total : undefined;
 
               return (
                 <RiderTaskCard

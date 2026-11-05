@@ -5,7 +5,7 @@
   "description": "SpinZo Ops dispatch cloud functions (codebase: ops).",
   "main": "index.js",
   "type": "commonjs",
-  "engines": { "node": "20" },
+  "engines": { "node": "22" },
   "scripts": {
     "test": "node --test"
   },
