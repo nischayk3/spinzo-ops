@@ -1,6 +1,6 @@
 import { OpsTask } from './opsTasks';
 import { DeliveryTask } from '../store/opsStaffStore';
-import { FeedOrder, orderTotal, slotLabel } from './orderFeed';
+import { FeedOrder, isExpressOrder, orderTotal, slotLabel } from './orderFeed';
 import { haversineMeters, LatLng, SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from './storeGeo';
 
 export interface SmartRouteStop {
@@ -18,6 +18,7 @@ export interface SmartRouteStop {
   slot?: string;
   isUrgent: boolean;
   isInstant: boolean;
+  isExpress?: boolean;
   distanceMeters?: number;
   status: string;
   totalAmount?: number;
@@ -234,6 +235,7 @@ export function buildSmartRoute({
     const isInTransit = t.status === 'in_transit_to_store' || order?.status === 'in_transit_to_store';
     const isInstant = isInTransit ? false : Boolean(t.pickupSlot?.isInstant || order?.pickupDetails?.isInstant);
     const isUrgent = isInTransit ? false : Boolean(t.isUrgent || order?.isUrgent);
+    const isExpress = Boolean(t.isExpress || isExpressOrder(order) || isExpressOrder(t));
 
     const addr = safeAddressText(t.pickupAddress || order?.address);
     const locality = isInTransit ? 'STORE' : extractLocality(addr);
@@ -257,6 +259,7 @@ export function buildSmartRoute({
       slot: isInTransit ? 'Drop to store' : slot,
       isUrgent,
       isInstant,
+      ...(isExpress ? { isExpress: true } : {}),
       status: t.status,
       totalAmount: order ? orderTotal(order) : (typeof t.totalAmount === 'number' ? t.totalAmount : 0),
       paymentStatus: order?.paymentStatus || t.paymentStatus,
@@ -289,6 +292,7 @@ export function buildSmartRoute({
     }
 
     const isPickupFromStore = d.status === 'assigned';
+    const isDelExpress = Boolean(d.isExpress || isExpressOrder(order) || isExpressOrder(d));
     const addr = safeAddressText(d.deliveryAddress || order?.address);
     const locality = isPickupFromStore ? 'STORE' : extractLocality(addr);
     const locCoord = LOCALITY_COORDINATES[locality];
@@ -311,6 +315,7 @@ export function buildSmartRoute({
       slot,
       isUrgent: false,
       isInstant: false,
+      ...(isDelExpress ? { isExpress: true } : {}),
       status: d.status,
       totalAmount: order ? orderTotal(order) : (d.totalAmount || 0),
       paymentStatus: order?.paymentStatus,
@@ -347,9 +352,9 @@ export function buildSmartRoute({
       return aIsStoreDrop ? 1 : -1;
     }
 
-    // 1. Instant / Urgent priority
-    const aUrgentScore = (a.isInstant ? 2000 : 0) + (a.isUrgent ? 1000 : 0);
-    const bUrgentScore = (b.isInstant ? 2000 : 0) + (b.isUrgent ? 1000 : 0);
+    // 1. Express / Instant / Urgent priority (Express 6–8h orders get top dispatch priority)
+    const aUrgentScore = (a.isExpress ? 5000 : 0) + (a.isInstant ? 2000 : 0) + (a.isUrgent ? 1000 : 0);
+    const bUrgentScore = (b.isExpress ? 5000 : 0) + (b.isInstant ? 2000 : 0) + (b.isUrgent ? 1000 : 0);
     if (aUrgentScore !== bUrgentScore) return bUrgentScore - aUrgentScore;
 
     // 2. Distance proximity from origin (or store hub)

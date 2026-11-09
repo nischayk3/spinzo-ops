@@ -22,6 +22,7 @@ import { OrderDetailScreen } from '../screens/Helper/OrderDetailScreen';
 import { DeliveriesScreen } from '../screens/Rider/DeliveriesScreen';
 import { SettingsScreen } from '../screens/Settings/SettingsScreen';
 import { useLifecycleNotifications } from '../utils/lifecycleNotifications';
+import { useRiderLocationSync } from '../utils/useRiderLocationSync';
 import { setupNotificationChannels, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { stopAlarm } from '../utils/alerts';
 import { GlobalAssignmentModal } from '../components/GlobalAssignmentModal';
@@ -141,6 +142,7 @@ export function RootNavigator() {
   const [hasGrantedPermissions, setHasGrantedPermissions] = React.useState(false);
   const [permissionsLoaded, setPermissionsLoaded] = React.useState(false);
   useLifecycleNotifications();
+  useRiderLocationSync();
 
   // Check permissions: On Android, verify both stored setup and actual OS overlay permission
   const checkPermissionsStatus = React.useCallback(async () => {

@@ -26,6 +26,8 @@ export interface FeedOrder {
     scheduledDate?: string;
     scheduledTime?: string;
     isInstant?: boolean;
+    isExpress?: boolean;
+    guaranteedWindow?: string;
     slot?: string;
     time?: string;
     date?: string;
@@ -35,6 +37,8 @@ export interface FeedOrder {
   pickupTime?: string;
   slot?: string;
   isInstant?: boolean;
+  isExpress?: boolean;
+  turnaroundMode?: string;
   riderName?: string;
   deliveryDetails?: {
     scheduledDate?: string;
@@ -133,6 +137,16 @@ export type PickupSlot = {
 // Admin-precedence price: billDetails.total is the canonical total on customer orders.
 export const orderTotal = (o: FeedOrder): number =>
   o.billDetails?.total ?? o.totalAmount ?? 0;
+
+export const isExpressOrder = (o: any): boolean =>
+  Boolean(
+    o?.isExpress ||
+    o?.turnaroundMode === 'express_6_8h' ||
+    o?.pickupDetails?.isExpress ||
+    o?.pickupSlot?.isExpress ||
+    o?.billDetails?.isExpress ||
+    (Array.isArray(o?.items) && o.items.some((i: any) => i?.isExpress))
+  );
 
 export interface TokenChip {
   serviceKey?: string;
@@ -497,6 +511,10 @@ export function sortReadyOrders(orders: FeedOrder[]): FeedOrder[] {
   };
 
   return [...orders].sort((a, b) => {
+    const aExp = isExpressOrder(a);
+    const bExp = isExpressOrder(b);
+    if (aExp !== bExp) return aExp ? -1 : 1;
+
     const targetA = getDeliveryTargetTimestamp(a);
     const targetB = getDeliveryTargetTimestamp(b);
 
@@ -851,6 +869,10 @@ export function sortByPickupTimeAsc(orders: FeedOrder[]): FeedOrder[] {
   };
 
   return [...orders].sort((a, b) => {
+    const aExp = isExpressOrder(a);
+    const bExp = isExpressOrder(b);
+    if (aExp !== bExp) return aExp ? -1 : 1;
+
     const aMs = getSlotMinutes(a);
     const bMs = getSlotMinutes(b);
     if (aMs !== bMs) return aMs - bMs;
@@ -931,7 +953,8 @@ export function matchOrderSearch(o: FeedOrder, query: string): boolean {
     return true;
   }
 
-  // 7. Pickup Note or Instructions
+  // 7. Pickup Note, Instructions, or "express" keyword
+  if (lowerQ === 'express' && isExpressOrder(o)) return true;
   if (o.pickupNote && o.pickupNote.toLowerCase().includes(lowerQ)) return true;
   if (o.notes && o.notes.toLowerCase().includes(lowerQ)) return true;
 

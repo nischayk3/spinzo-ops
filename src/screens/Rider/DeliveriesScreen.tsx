@@ -8,7 +8,7 @@ import { useOpsStaffStore, DeliveryTask } from '../../store/opsStaffStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { isPending } from '../../utils/opsTasks';
-import { timeAgo, orderTotal, FeedOrder } from '../../utils/orderFeed';
+import { timeAgo, orderTotal, FeedOrder, isExpressOrder } from '../../utils/orderFeed';
 import { DeliveryVerification } from '../../components/DeliveryVerification';
 import { QRScanner } from '../../components/QRScanner';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
@@ -272,6 +272,7 @@ export function DeliveriesScreen() {
                   locality={locality}
                   loadUnits={stop?.loadUnits}
                   isUrgent={Boolean(order?.isUrgent || (t as any).isUrgent)}
+                  isExpress={Boolean(t.isExpress || isExpressOrder(order) || isExpressOrder(t))}
                   pickupNote={order?.pickupNote || (t as any).pickupNote}
                   isOverdue={Boolean(overdue)}
                   unpaidAmount={unpaidAmt}

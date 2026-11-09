@@ -7,7 +7,7 @@ import { Inbox, Clock, Phone, MapPin, ChevronDown, User, AlertTriangle, Zap, Tag
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, FeedOrder, orderTotal } from '../../utils/orderFeed';
+import { serviceSummary, FeedOrder, orderTotal, isExpressOrder } from '../../utils/orderFeed';
 import { currentStep, isDone, myInProgress, stage, stepLabel, stepQueue, isMachineStep, OpsProcess } from '../../utils/opsProcess';
 import { slaRemainingMinutes, slaTone, STAGE_SLA_MINUTES, SlaTone } from '../../utils/sla';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
@@ -189,6 +189,14 @@ function SupervisorFeed() {
     return c;
   }, [validProcesses, claimableOrders, role, user?.id]);
 
+  const sortQueueByExpress = (list: QueueItem[]): QueueItem[] =>
+    [...list].sort((a, b) => {
+      const aExp = isExpressOrder(orderById.get(a.orderId));
+      const bExp = isExpressOrder(orderById.get(b.orderId));
+      if (aExp !== bExp) return aExp ? -1 : 1;
+      return 0;
+    });
+
   const pendingItems = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
     if (selected === 'tagging') {
@@ -205,8 +213,8 @@ function SupervisorFeed() {
       if (!stepQueue(p, cur)) continue;
       items.push({ key: p.id, orderId: p.orderId, process: p });
     }
-    return items;
-  }, [selected, validProcesses, claimableOrders, role, user?.id]);
+    return sortQueueByExpress(items);
+  }, [selected, validProcesses, claimableOrders, role, user?.id, orderById]);
 
   const myItems = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
@@ -215,8 +223,8 @@ function SupervisorFeed() {
       if (!myInProgress(p, user?.id || '')) continue;
       items.push({ key: p.id, orderId: p.orderId, process: p });
     }
-    return items;
-  }, [selected, validProcesses, user?.id]);
+    return sortQueueByExpress(items);
+  }, [selected, validProcesses, user?.id, orderById]);
   
   const inProgressByOthers = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
@@ -232,8 +240,8 @@ function SupervisorFeed() {
         items.push({ key: p.id, orderId: p.orderId, process: p });
       }
     }
-    return items;
-  }, [selected, validProcesses, role, user?.id]);
+    return sortQueueByExpress(items);
+  }, [selected, validProcesses, role, user?.id, orderById]);
 
   // Floating task state
   const activeFloatingProcess = useMemo(() => {
@@ -315,6 +323,7 @@ function SupervisorFeed() {
     const matchingItems = p ? (order?.items?.filter(i => i.serviceType === p.serviceType) || []) : (order?.items || []);
     const qty = matchingItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
     const isUrgent = !!order?.isUrgent;
+    const isExpress = isExpressOrder(order);
     const stationLabel = (() => {
       if (cur === 'getting_washed') return curStage?.startedAt ? '🌀 In Washer' : '🧺 Washer Queue';
       if (cur === 'getting_dried') return curStage?.startedAt ? '💨 In Dryer' : '🧺 Dryer Queue';
@@ -322,22 +331,39 @@ function SupervisorFeed() {
       return null;
     })();
 
-    const accentBorderClass = isCycleDone
-      ? 'border-l-4 border-l-emerald-500'
+    const accentBorderClass = isExpress
+      ? 'border-2 border-orange-500 bg-orange-50/25'
+      : isCycleDone
+      ? 'border border-gray-100 border-l-4 border-l-emerald-500 bg-white'
       : (isMachine && curStage?.startedAt)
-      ? 'border-l-4 border-l-[#994bff]'
+      ? 'border border-gray-100 border-l-4 border-l-[#994bff] bg-white'
       : cur === 'tagging'
-      ? 'border-l-4 border-l-blue-500'
+      ? 'border border-gray-100 border-l-4 border-l-blue-500 bg-white'
       : cur === 'getting_ironed'
-      ? 'border-l-4 border-l-amber-500'
-      : 'border-l-4 border-l-gray-200';
+      ? 'border border-gray-100 border-l-4 border-l-amber-500 bg-white'
+      : 'border border-gray-100 border-l-4 border-l-gray-200 bg-white';
 
     return (
       <TouchableOpacity
         key={item.key}
         onPress={() => handleItemPress(item)}
-        className={`bg-white rounded-2xl p-4 mb-3 border border-gray-100 ${accentBorderClass} shadow-xs active:opacity-90`}
+        className={`rounded-2xl mb-3 overflow-hidden ${accentBorderClass} shadow-xs active:opacity-90`}
       >
+        {isExpress && (
+          <View className="bg-orange-600 px-4 py-1.5 flex-row items-center justify-between">
+            <View className="flex-row items-center">
+              <Zap size={12} color="#ffffff" />
+              <Text className="text-white font-black text-[10px] uppercase tracking-wider ml-1">
+                EXPRESS ORDER • 6–8H URGENT
+              </Text>
+            </View>
+            <Text className="text-orange-100 font-extrabold text-[9px] uppercase">
+              PROCESS FIRST
+            </Text>
+          </View>
+        )}
+
+        <View className="p-4">
         {/* Top Header Row: Order ID, Tokens, Urgency & Status Badge */}
         <View className="flex-row items-center justify-between mb-2">
           <View className="flex-1 mr-2">
@@ -345,7 +371,13 @@ function SupervisorFeed() {
               <Text className="text-gray-900 font-extrabold text-base shrink-1" numberOfLines={1}>
                 #{order?.shortId?.toUpperCase() || item.orderId.substring(0,6).toUpperCase()}{p && p.siblingCount && p.siblingCount > 1 ? `-${p.serviceType?.toUpperCase().substring(0,2)}${p.loadCount && p.loadCount > 1 ? `-L${p.loadIndex || 1}` : ''}` : ''}
               </Text>
-              {isUrgent && (
+              {isExpress && (
+                <View className="bg-orange-100 border border-orange-400 px-2 py-0.5 rounded-full flex-row items-center">
+                  <Zap size={10} color="#c2410c" className="mr-0.5" />
+                  <Text className="text-orange-800 font-black text-[10px] uppercase">EXPRESS 6-8H</Text>
+                </View>
+              )}
+              {isUrgent && !isExpress && (
                 <View className="bg-red-500/15 border border-red-500/40 px-2 py-0.5 rounded-full flex-row items-center">
                   <Zap size={10} color="#ef4444" className="mr-0.5" />
                   <Text className="text-red-600 font-black text-[10px] uppercase">URGENT</Text>
@@ -564,11 +596,12 @@ function SupervisorFeed() {
               <View className="w-2 h-2 rounded-full bg-red-500" />
               <LiveTimer startTimeMs={startMs} />
             </View>
-          ) : !isMine && cur === 'tagging' ? (
-             <View className="bg-[#994bff] px-4 py-2 rounded-xl">
-               <Text className="text-white font-bold text-xs">Start Tagging</Text>
-             </View>
-          ) : null}
+            ) : !isMine && cur === 'tagging' ? (
+               <View className="bg-[#994bff] px-4 py-2 rounded-xl">
+                 <Text className="text-white font-bold text-xs">Start Tagging</Text>
+               </View>
+            ) : null}
+          </View>
         </View>
       </TouchableOpacity>
     );

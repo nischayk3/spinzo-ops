@@ -32,6 +32,13 @@ const orderFromDoc = (d: any): FeedOrder => {
     ...rawPickup,
     isInstant: isInstant || Boolean(rawPickup.isInstant),
   } : (isInstant ? { isInstant: true } : undefined);
+  const isExpress = Boolean(
+    data.isExpress ||
+    data.turnaroundMode === 'express_6_8h' ||
+    rawPickup?.isExpress ||
+    data.billDetails?.isExpress ||
+    (Array.isArray(data.items) && data.items.some((i: any) => i?.isExpress))
+  );
 
   return {
     id: d.id,
@@ -46,6 +53,8 @@ const orderFromDoc = (d: any): FeedOrder => {
     pickupTime: data.pickupTime || rawPickup?.scheduledTime || rawPickup?.time || rawPickup?.slot,
     slot: data.slot || rawPickup?.scheduledTime || rawPickup?.slot,
     isInstant,
+    isExpress,
+    turnaroundMode: data.turnaroundMode || (isExpress ? 'express_6_8h' : undefined),
     riderName: data.riderName || data.assignedRiderName,
     items: data.items || [],
     totalAmount: data.totalAmount || data.billDetails?.total || data.cartTotal,

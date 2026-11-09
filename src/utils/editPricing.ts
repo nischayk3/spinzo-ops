@@ -60,8 +60,21 @@ export const SHOE_EDIT_CATEGORIES = [
 const sidOf = (item: EditLineItem): string =>
   (item.serviceId || item.serviceType || '').toLowerCase();
 
+export const EXPRESS_ELIGIBLE_SERVICES = [
+  'wash_fold',
+  'wash_iron',
+  'premium_laundry',
+  'blanket_wash',
+  'ironing',
+];
+export const EXPRESS_MULTIPLIER = 1.55;
+
 export const calculateItemPrice = (item: EditLineItem): number => {
   const sid = sidOf(item);
+  const mult =
+    !item.isCreditItem && item.isExpress && EXPRESS_ELIGIBLE_SERVICES.includes(sid)
+      ? EXPRESS_MULTIPLIER
+      : 1;
 
   if (sid === 'wash_fold') {
     const ironing = item.ironingEnabled && item.ironingCount ? item.ironingCount * 18 : 0;
@@ -74,7 +87,7 @@ export const calculateItemPrice = (item: EditLineItem): number => {
       return extraBase + ironing;
     }
     const base = (item.weight || 5) * 85;
-    return base + ironing;
+    return Math.round((base + ironing) * mult);
   }
 
   if (sid === 'wash_iron') {
@@ -85,11 +98,11 @@ export const calculateItemPrice = (item: EditLineItem): number => {
       const extraKg = Math.max(0, weight - kgPerCredit);
       return extraKg * ratePerKg;
     }
-    return (item.weight || 5) * 140;
+    return Math.round((item.weight || 5) * 140 * mult);
   }
 
   if (sid === 'ironing') {
-    return getIroningBreakdown(item).amount;
+    return Math.round(getIroningBreakdown(item).amount * mult);
   }
 
   if (sid === 'ironing_addon' || (item.serviceName || '').toLowerCase().includes('ironing')) {
@@ -100,11 +113,11 @@ export const calculateItemPrice = (item: EditLineItem): number => {
   if (sid === 'blanket_wash') {
     const single = item.singleBlanketCount || 0;
     const double = item.doubleBlanketCount || 0;
-    return single * 299 + double * 399;
+    return Math.round((single * 299 + double * 399) * mult);
   }
 
   if (sid === 'premium_laundry') {
-    return (item.weight || 5) * 200;
+    return Math.round((item.weight || 5) * 200 * mult);
   }
 
   if (sid === 'shoe_clean') {

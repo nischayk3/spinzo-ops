@@ -85,6 +85,7 @@ export interface DeliveryTask {
   pickedUpAt?: unknown;
   deliveredAt?: unknown;
   proofUrl?: string | null;
+  isExpress?: boolean;
 }
 
 interface OpsStaffState {
@@ -250,6 +251,11 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             pickedUpAt: d.pickedUpAt,
             deliveredAt: d.deliveredAt,
             proofUrl: d.proofUrl || null,
+            isExpress: Boolean(
+              d.isExpress ||
+              d.turnaroundMode === 'express_6_8h' ||
+              (Array.isArray(d.items) && d.items.some((i: any) => i?.isExpress))
+            ) || undefined,
           };
           deliveries.push(task);
           const alertKey = taskAlertKey(task, 'delivery');

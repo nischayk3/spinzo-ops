@@ -7,7 +7,7 @@ import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { isPending, pickupLabel, OpsTask } from '../../utils/opsTasks';
-import { timeAgo, orderTotal, slotLabel, FeedOrder } from '../../utils/orderFeed';
+import { timeAgo, orderTotal, slotLabel, FeedOrder, isExpressOrder } from '../../utils/orderFeed';
 import { verifyPickupOTP, verifyStoreOTP, updatePickupMeta } from '../../utils/opsPickup';
 import { EditOrderModal } from '../../components/EditOrderModal';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
@@ -357,6 +357,7 @@ export function PickupsScreen() {
         lat={order?.latitude || order?.address?.latitude || t.latitude}
         lng={order?.longitude || order?.address?.longitude || t.longitude}
         isUrgent={t.isUrgent ?? order?.isUrgent}
+        isExpress={Boolean(t.isExpress || isExpressOrder(order) || isExpressOrder(t))}
         pickupNote={t.pickupNote || order?.pickupNote}
         stopNumber={stop?.stopNumber}
         locality={locality}

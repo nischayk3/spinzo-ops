@@ -86,6 +86,11 @@ export function SmartRouteSheet({
               <Text className="text-white font-black text-xs" numberOfLines={1}>
                 STOP 1: {currentStop.customerName || `#${safeShortId(currentStop.orderId)}`}
               </Text>
+              {currentStop.isExpress && (
+                <View className="bg-orange-500 px-1.5 py-0.2 rounded shadow-xs">
+                  <Text className="text-white text-[9px] font-black">⚡ EXPRESS 6-8H</Text>
+                </View>
+              )}
               {currentStop.isInstant && (
                 <View className="bg-amber-400 px-1 py-0.2 rounded shadow-xs">
                   <Text className="text-slate-950 text-[9px] font-black">⚡ INSTANT</Text>
@@ -182,6 +187,13 @@ export function SmartRouteSheet({
                             ? 'Store Pickup'
                             : 'Delivery'}
                         </Text>
+                        {stop.isExpress && (
+                          <View className="bg-orange-600 border border-orange-700 px-2 py-0.5 rounded shadow-xs">
+                            <Text className="text-white font-black text-[10px]">
+                              ⚡ EXPRESS 6-8H
+                            </Text>
+                          </View>
+                        )}
                         {stop.isInstant && (
                           <View className="bg-amber-400 border border-amber-500 px-2 py-0.5 rounded shadow-xs">
                             <Text className="text-slate-950 font-black text-[10px]">

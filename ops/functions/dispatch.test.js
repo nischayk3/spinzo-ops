@@ -814,3 +814,27 @@ test('break & lunch gating: skips helpers and riders on lunch, short_break, or o
   assert.strictEqual(stageDecision.helper.uid, 'h_abdur');
 });
 
+test('isSlotDueForDispatch: dispatches Express 6-8h orders immediately when scheduled for today, holds future-day Express orders', () => {
+  const { isSlotDueForDispatch } = require('./dispatch');
+  const opts = { todayStr: '2026-11-07', currentMinutesIST: 10 * 60 }; // 10:00 AM IST
+
+  // Standard scheduled order at 16:00 today -> held (360m > 20m lead time)
+  assert.strictEqual(
+    isSlotDueForDispatch({ scheduledDate: '2026-11-07', scheduledTime: '16:00 - 17:00', isExpress: false }, 20, opts),
+    false
+  );
+
+  // Express 6-8h order placed for 16:00 today -> DUE IMMEDIATELY so ops starts catering right away!
+  assert.strictEqual(
+    isSlotDueForDispatch({ scheduledDate: '2026-11-07', scheduledTime: '16:00 - 17:00', isExpress: true }, 20, opts),
+    true
+  );
+
+  // Express 6-8h order explicitly booked for tomorrow -> held until tomorrow
+  assert.strictEqual(
+    isSlotDueForDispatch({ scheduledDate: '2026-11-08', scheduledTime: '10:00 - 11:00', isExpress: true }, 20, opts),
+    false
+  );
+});
+
+

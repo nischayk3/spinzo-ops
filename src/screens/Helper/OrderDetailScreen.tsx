@@ -16,7 +16,7 @@ import { useOpsProcessStore, OpsProcessingResult } from '../../store/opsProcessS
 import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
-import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel, getPickupInfo, formatDateTime, computePickupBenchmark, computeDeliveryBenchmark } from '../../utils/orderFeed';
+import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel, getPickupInfo, formatDateTime, computePickupBenchmark, computeDeliveryBenchmark, isExpressOrder } from '../../utils/orderFeed';
 import { currentStep, isDone, stage, stepLabel, GarmentsRecord } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
 import { printGarmentLabels } from '../../utils/labelPrint';
@@ -1717,7 +1717,24 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
         {/* Enhanced Customer & Order Hero Card */}
         {order && (
-          <View className="mb-5 bg-white p-5 rounded-3xl shadow-sm border border-gray-100 z-0">
+          <View className={`mb-5 bg-white rounded-3xl shadow-sm overflow-hidden z-0 ${
+            isExpressOrder(order) ? 'border-2 border-orange-500' : 'border border-gray-100'
+          }`}>
+            {isExpressOrder(order) && (
+              <View className="bg-orange-600 px-5 py-2.5 flex-row items-center justify-between">
+                <View className="flex-row items-center">
+                  <Zap size={14} color="#ffffff" />
+                  <Text className="text-white font-black text-xs uppercase tracking-wider ml-1.5">
+                    EXPRESS ORDER • 6–8H GUARANTEED SLA
+                  </Text>
+                </View>
+                <View className="bg-white/20 px-2.5 py-0.5 rounded-full">
+                  <Text className="text-white font-extrabold text-[10px] uppercase">CATER FIRST</Text>
+                </View>
+              </View>
+            )}
+
+            <View className="p-5">
             {/* Top Row: Customer Avatar, Name, Service & Contact Actions */}
             <View className="flex-row items-center justify-between pb-4 border-b border-gray-100">
               <View className="flex-row items-center flex-1 mr-3">
@@ -1779,7 +1796,12 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   </Text>
                 </View>
                 <View className="flex-row items-center gap-1">
-                  {order.isUrgent && (
+                  {isExpressOrder(order) && (
+                    <View className="bg-orange-600 px-2 py-0.5 rounded-full mr-1">
+                      <Text className="text-white text-[10px] font-black uppercase">⚡ EXPRESS 6-8H</Text>
+                    </View>
+                  )}
+                  {order.isUrgent && !isExpressOrder(order) && (
                     <View className="bg-red-500 px-2 py-0.5 rounded-full mr-1">
                       <Text className="text-white text-[10px] font-black uppercase">⚡ URGENT</Text>
                     </View>
@@ -1823,6 +1845,8 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                         ? `Rider: ${assignedRiderName}`
                         : pickupInfo.isInstant
                         ? 'Searching on-shift riders for immediate pickup'
+                        : isExpressOrder(order)
+                        ? 'Express 6–8h • Immediate priority rider dispatch'
                         : 'Parked • Dispatches 15m before slot window'}
                     </Text>
                   </View>
@@ -1983,11 +2007,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                     </Text>
                   </View>
                 </View>
-                {order.isUrgent && (
-                  <View className="bg-red-500 px-2 py-0.5 rounded-full">
-                    <Text className="text-white text-[10px] font-black tracking-wide uppercase">⚡ URGENT</Text>
-                  </View>
-                )}
+                <View className="flex-row items-center gap-1">
+                  {isExpressOrder(order) && (
+                    <View className="bg-orange-600 px-2 py-0.5 rounded-full">
+                      <Text className="text-white text-[10px] font-black tracking-wide uppercase">⚡ EXPRESS 6-8H</Text>
+                    </View>
+                  )}
+                  {order.isUrgent && !isExpressOrder(order) && (
+                    <View className="bg-red-500 px-2 py-0.5 rounded-full">
+                      <Text className="text-white text-[10px] font-black tracking-wide uppercase">⚡ URGENT</Text>
+                    </View>
+                  )}
+                </View>
               </View>
             ) : null}
 
@@ -2086,7 +2117,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             <View className="mt-3 bg-gray-50 rounded-xl p-3 border border-gray-100">
               <View className="flex-row items-center justify-between mb-2">
                 <Text className="text-xs font-extrabold text-gray-500 uppercase tracking-wider">Garment / Item Breakdown</Text>
-                {isTaggingState && (
+                {(isTaggingState || (isSupervisor && ['processing', 'ready'].includes(order.status))) && (
                   <TouchableOpacity
                     onPress={() => setShowEditModal(true)}
                     className="flex-row items-center bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-lg active:opacity-70"
@@ -2135,6 +2166,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   </View>
                 </View>
               ) : null}
+            </View>
             </View>
           </View>
         )}

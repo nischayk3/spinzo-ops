@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -31,6 +31,16 @@ function pickupAddressFromOrder(order) {
   if (!a) return '';
   if (typeof a === 'string') return a;
   return a.formattedAddress || a.address || a.fullAddress || a.line1 || [a.houseNumber, a.building, a.street, a.area, a.city].filter(Boolean).join(', ') || '';
+}
+
+function isOrderExpress(order) {
+  if (!order) return false;
+  if (order.isExpress === true || order.turnaroundMode === 'express_6_8h') return true;
+  if (order.pickupDetails && order.pickupDetails.isExpress === true) return true;
+  if (order.pickupSlot && order.pickupSlot.isExpress === true) return true;
+  if (order.billDetails && order.billDetails.isExpress === true) return true;
+  if (Array.isArray(order.items) && order.items.some((i) => i && i.isExpress === true)) return true;
+  return false;
 }
 
 /**
@@ -192,6 +202,7 @@ async function selectRider() {
 function taskPayload(orderId, order, assignee, userId, vendorId) {
   const addr = pickupAddressFromOrder(order);
   const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
+  const isExpress = isOrderExpress(order);
   return {
     orderId,
     userId,
@@ -202,6 +213,8 @@ function taskPayload(orderId, order, assignee, userId, vendorId) {
     customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
     pickupAddress: addr,
     pickupSlot: (order && order.pickupDetails) || null,
+    isExpress,
+    turnaroundMode: (order && order.turnaroundMode) || (isExpress ? 'express_6_8h' : 'standard_24_48h'),
     tokenNumber: (order && order.tokenNumber) || null,
     tokens: (order && order.tokens) || null,
     pickupOTP: (order && order.pickupOTP) || null,
@@ -223,8 +236,10 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const orderId = event.params.orderId;
   const order = event.data.data();
 
-  const pickupSlot = (order && (order.pickupDetails || order.pickup)) || null;
-  const isDueForDispatch = isSlotDueForDispatch(pickupSlot, 20);
+  const isExpress = isOrderExpress(order);
+  const rawPickupSlot = (order && (order.pickupDetails || order.pickup)) || null;
+  const pickupSlot = rawPickupSlot && isExpress ? { ...rawPickupSlot, isExpress: true } : rawPickupSlot;
+  const isDueForDispatch = isSlotDueForDispatch(pickupSlot || (isExpress ? { isExpress: true } : null), 20);
   const assignee = isDueForDispatch ? await selectRider() : null;
   const userId = event.params.userId;
   const vendorId = order.vendorId || 'default';
@@ -240,6 +255,8 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
         customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
         pickupAddress: pickupAddressFromOrder(order),
         pickupSlot,
+        isExpress,
+        turnaroundMode: (order && order.turnaroundMode) || (isExpress ? 'express_6_8h' : 'standard_24_48h'),
         tokenNumber: (order && order.tokenNumber) || null,
         tokens: (order && order.tokens) || null,
         pickupOTP: (order && order.pickupOTP) || null,
@@ -265,18 +282,36 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
 
   if (assignee) {
     const isInstant = Boolean(order && order.pickupDetails && order.pickupDetails.isInstant);
-    const slot = (order && order.pickupDetails && order.pickupDetails.type === 'instant')
+    const slot = isExpress
+      ? `⚡ Express 6-8h${pickupSlot && pickupSlot.scheduledTime ? ` • ${pickupSlot.scheduledTime}` : ''}`
+      : (order && order.pickupDetails && order.pickupDetails.type === 'instant')
       ? 'Instant Pickup'
       : (order && order.pickupDetails && order.pickupDetails.scheduledTime) || '';
     await sendFCMOrderAssignment({
       staffId: assignee,
       orderId,
-      taskType: isInstant ? 'Instant Pickup' : 'Pickup',
+      taskType: isExpress ? '⚡ Express Pickup (6-8h)' : (isInstant ? 'Instant Pickup' : 'Pickup'),
       customerName: (order && (order.customerName || order.userName)) || '',
       address: pickupAddressFromOrder(order),
       slot,
-      isInstant,
+      isInstant: isInstant || isExpress,
     });
+
+    // Dual-write rider details directly to customer's order doc for real-time app tracking
+    try {
+      const staffSnap = await db.doc(`ops_staff/${assignee}`).get();
+      const staffData = staffSnap.exists ? staffSnap.data() : null;
+      const rName = staffData?.name || 'SpinZo Pickup Partner';
+      const rPhone = staffData?.phone || '';
+      await db.doc(`users/${userId}/orders/${orderId}`).set({
+        riderId: assignee,
+        riderName: rName,
+        riderPhone: rPhone,
+        pickupRider: { id: assignee, name: rName, phone: rPhone },
+      }, { merge: true });
+    } catch (rSyncErr) {
+      console.warn('[autoAssignRider] Sync rider to order failed:', rSyncErr);
+    }
   } else if (!isDueForDispatch) {
     console.log(`[autoAssignRider] Order ${orderId} scheduled for later (${(pickupSlot && pickupSlot.scheduledDate) || ''} ${(pickupSlot && pickupSlot.scheduledTime) || ''}). Parked in ops_queue.`);
   }
@@ -354,7 +389,11 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const pending = queue.docs.filter((d) => {
     const entryData = d.data();
     if (entryData.status !== 'pending' && entryData.status !== 'scheduled') return false;
-    return isSlotDueForDispatch(entryData.pickupSlot, 20);
+    const isExp = isOrderExpress(entryData);
+    const slotForCheck = entryData.pickupSlot && isExp
+      ? { ...entryData.pickupSlot, isExpress: true }
+      : (entryData.pickupSlot || (isExp ? { isExpress: true } : null));
+    return isSlotDueForDispatch(slotForCheck, 20);
   });
 
   for (const entry of pending) {
@@ -376,6 +415,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
       }
       const assignee = await selectRider();
       if (!assignee) continue; // still no eligible rider; leave parked
+      const isExp = isOrderExpress(data);
       await db.runTransaction(async (tx) => {
         const taskRef = db.doc(`ops_tasks/${orderId}`);
         const taskSnap = await tx.get(taskRef);
@@ -393,6 +433,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
           customerPhone: data.customerPhone || '',
           pickupAddress: data.pickupAddress || '',
           pickupSlot: data.pickupSlot || null,
+          isExpress: isExp,
+          turnaroundMode: data.turnaroundMode || (isExp ? 'express_6_8h' : 'standard_24_48h'),
           tokenNumber: data.tokenNumber || null,
           tokens: data.tokens || null,
           pickupOTP: data.pickupOTP || null,
@@ -422,8 +464,9 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
-      // Only assign if the customer HAS picked a slot AND that slot is due NOW (within 20 mins or overdue)
-      if (!delData.assignee && delData.deliveryDate && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 20)) {
+      const isExp = isOrderExpress(delData);
+      // Only assign if the customer HAS picked a slot (or Express order) AND that slot is due NOW
+      if (!delData.assignee && (delData.deliveryDate || isExp) && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime, isExpress: isExp }, 20)) {
         await delDoc.ref.update({
           assignee: newRiderUid,
           status: 'assigned',
@@ -433,11 +476,11 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
         await sendFCMOrderAssignment({
           staffId: newRiderUid,
           orderId: delDoc.id,
-          taskType: 'delivery',
+          taskType: isExp ? '⚡ Express Delivery (6-8h)' : 'delivery',
           customerName: delData.customerName || '',
           address: delData.deliveryAddress || '',
-          slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim(),
-          isInstant: false,
+          slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
+          isInstant: isExp,
         });
         console.log(`[onShiftCatchUp] Assigned due delivery ${delDoc.id} (${delData.deliveryDate}) to newly on-shift rider ${newRiderUid}`);
       }
@@ -1297,8 +1340,12 @@ async function drainScheduledRiderTasks() {
         }
       }
 
-      // Check if slot is due (within 20 min or overdue)
-      if (!isSlotDueForDispatch(data.pickupSlot, 20)) {
+      // Check if slot is due (within 20 min, overdue, or Express today)
+      const isExp = isOrderExpress(data);
+      const slotForCheck = data.pickupSlot && isExp
+        ? { ...data.pickupSlot, isExpress: true }
+        : (data.pickupSlot || (isExp ? { isExpress: true } : null));
+      if (!isSlotDueForDispatch(slotForCheck, 20)) {
         continue; // not due yet, keep parked
       }
 
@@ -1323,6 +1370,8 @@ async function drainScheduledRiderTasks() {
           customerPhone: data.customerPhone || '',
           pickupAddress: data.pickupAddress || '',
           pickupSlot: data.pickupSlot || null,
+          isExpress: isExp,
+          turnaroundMode: data.turnaroundMode || (isExp ? 'express_6_8h' : 'standard_24_48h'),
           tokenNumber: data.tokenNumber || null,
           tokens: data.tokens || null,
           pickupOTP: data.pickupOTP || null,
@@ -1342,17 +1391,19 @@ async function drainScheduledRiderTasks() {
 
       if (assignedSuccessfully) {
         const isInstant = Boolean(data.pickupSlot && data.pickupSlot.isInstant);
-        const slot = (data.pickupSlot && data.pickupSlot.type === 'instant')
+        const slot = isExp
+          ? `⚡ Express 6-8h${data.pickupSlot && data.pickupSlot.scheduledTime ? ` • ${data.pickupSlot.scheduledTime}` : ''}`
+          : (data.pickupSlot && data.pickupSlot.type === 'instant')
           ? 'Instant Pickup'
           : (data.pickupSlot && data.pickupSlot.scheduledTime) || '';
         await sendFCMOrderAssignment({
           staffId: assignee,
           orderId,
-          taskType: isInstant ? 'Instant Pickup' : 'Pickup',
+          taskType: isExp ? '⚡ Express Pickup (6-8h)' : (isInstant ? 'Instant Pickup' : 'Pickup'),
           customerName: data.customerName || '',
           address: data.pickupAddress || '',
           slot,
-          isInstant,
+          isInstant: isInstant || isExp,
         });
         console.log(`[drainScheduledRiderTasks] Auto-dispatched due pickup ${orderId} (slot: ${slot}) to rider ${assignee}`);
       }
@@ -1367,10 +1418,11 @@ async function drainScheduledRiderTasks() {
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
       if (delData.assignee) continue; // already assigned
-      if (!delData.deliveryDate) continue; // customer hasn't selected a date yet (awaiting_slot)
+      const isExp = isOrderExpress(delData);
+      if (!delData.deliveryDate && !isExp) continue; // customer hasn't selected a date yet (awaiting_slot)
 
-      // Check if slot has arrived / is within 20 min
-      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime }, 20)) {
+      // Check if slot has arrived / is within 20 min (or Express immediate)
+      if (!isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime, isExpress: isExp }, 20)) {
         continue; // not due yet, keep holding on store shelf
       }
 
@@ -1388,11 +1440,11 @@ async function drainScheduledRiderTasks() {
       await sendFCMOrderAssignment({
         staffId: riderUid,
         orderId: delDoc.id,
-        taskType: 'delivery',
+        taskType: isExp ? '⚡ Express Delivery (6-8h)' : 'delivery',
         customerName: delData.customerName || '',
         address: delData.deliveryAddress || '',
-        slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim(),
-        isInstant: false,
+        slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
+        isInstant: isExp,
       });
       console.log(`[drainScheduledRiderTasks] Auto-dispatched due delivery ${delDoc.id} (slot: ${delData.deliveryDate} ${delData.deliveryTime}) to rider ${riderUid}`);
     }
@@ -1740,13 +1792,15 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     const bundleCount = processSnap.exists ? processSnap.data().stages?.packaging?.bundleCount || 1 : 1;
     const bundleLabels = processSnap.exists ? processSnap.data().stages?.packaging?.bundleLabels || [] : [];
 
-    const deliveryDate = after.deliveryDate || after.deliverySlot || null;
-    const deliveryTime = after.deliveryTime || null;
+    const isExpress = isOrderExpress(after);
+    const explicitSlot = Boolean(after.deliveryDate || after.deliverySlot);
+    const deliveryDate = after.deliveryDate || after.deliverySlot || (isExpress ? getTodayDateString() : null);
+    const deliveryTime = after.deliveryTime || (isExpress && !explicitSlot ? 'Express 6–8h Priority' : null);
 
     const hasSlot = Boolean(deliveryDate);
-    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime }, 20);
+    const isDueForDispatch = hasSlot && isSlotDueForDispatch({ deliveryDate, deliveryTime, isExpress }, 20);
 
-    // 1. If customer has NOT picked a slot yet:
+    // 1. If customer has NOT picked a slot yet (standard non-express orders):
     // Order sits on store rack waiting for customer to select slot.
     // Rider must NOT be assigned or notified.
     if (!hasSlot) {
@@ -1756,6 +1810,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         vendorId: after.vendorId || 'default',
         type: 'delivery',
         status: 'awaiting_slot',
+        isExpress,
         assignee: null,
         assignedAt: null,
         acceptedAt: admin.firestore.FieldValue.delete(),
@@ -1786,6 +1841,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         vendorId: after.vendorId || 'default',
         type: 'delivery',
         status: 'scheduled',
+        isExpress,
         assignee: null,
         assignedAt: null,
         acceptedAt: admin.firestore.FieldValue.delete(),
@@ -1807,7 +1863,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       return;
     }
 
-    // 3. Customer scheduled slot is DUE NOW (within 20 mins or overdue):
+    // 3. Customer scheduled slot is DUE NOW (within 20 mins, overdue, or Express 6-8h):
     // Auto-dispatch to on-shift rider now!
     let riderUid = existingTask?.assignee || null;
     if (riderUid) {
@@ -1827,6 +1883,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       vendorId: after.vendorId || 'default',
       type: 'delivery',
       status: riderUid ? 'assigned' : 'pending',
+      isExpress,
       assignee: riderUid || null,
       assignedAt: riderUid ? (isNewlyAssignedRider ? TS() : (existingTask.assignedAt || TS())) : null,
       ...(isNewlyAssignedRider || !riderUid ? { acceptedAt: admin.firestore.FieldValue.delete() } : {}),
@@ -1850,11 +1907,11 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       await sendFCMOrderAssignment({
         staffId: riderUid,
         orderId,
-        taskType: 'delivery',
+        taskType: isExpress ? '⚡ Express Delivery (6-8h)' : 'delivery',
         customerName: after.customerName || after.userName || '',
         address: deliveryAddress,
         slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
-        isInstant: false,
+        isInstant: isExpress,
       });
       console.log(`[syncDeliveryTask] Outbound delivery for order ${orderId} (slot: ${deliveryDate} ${deliveryTime}) auto-assigned to rider ${riderUid}`);
     } else if (!riderUid) {
@@ -1993,16 +2050,32 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
       }
     }
 
-    if (!isOrderEditable(order, procDocs)) {
+    // Supervisors/admins may correct weights at any active stage (e.g. weight
+    // re-checked after tagging); riders/helpers stay limited to pre-processing/tagging.
+    const isSupervisorRole = role === 'supervisor' || role === 'admin';
+    const supervisorEditable = isSupervisorRole && ['processing', 'ready'].includes(order.status);
+    if (!supervisorEditable && !isOrderEditable(order, procDocs)) {
       return { ok: false, error: 'order_already_processing' };
     }
 
     try {
-      const resolvedTotal = totalAmount !== undefined ? totalAmount : (order.totalAmount ?? 0);
+      // Server-side guard: Express orders are always billed at 1.55x, even if
+      // an older client app sends standard-rate prices.
+      const express = isOrderExpress(order);
+      let finalItems = items;
+      let finalBill = billDetails || order.billDetails || null;
+      let resolvedTotal = totalAmount !== undefined ? totalAmount : (order.totalAmount ?? 0);
+      if (express) {
+        const baseBill = billDetails || order.billDetails || {};
+        const priced = applyExpressPricing(items, baseBill);
+        finalItems = priced.items;
+        resolvedTotal = priced.total;
+        finalBill = { ...baseBill, isExpress: true, itemTotal: priced.itemTotal, total: priced.total };
+      }
       const updateData = {
-        items,
+        items: finalItems,
         totalAmount: resolvedTotal,
-        billDetails: billDetails || order.billDetails || { total: resolvedTotal, itemTotal: resolvedTotal, deliveryFee: 0, discount: 0 },
+        billDetails: finalBill || { total: resolvedTotal, itemTotal: resolvedTotal, deliveryFee: 0, discount: 0 },
         updatedAt: admin.firestore.Timestamp.now(),
         lastEditedBy: auth.uid,
       };
@@ -2021,7 +2094,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const tSnap = await taskRef.get();
         if (tSnap.exists) {
           await taskRef.set({
-            items,
+            items: updateData.items,
             totalAmount: updateData.totalAmount,
             billDetails: updateData.billDetails,
             updatedAt: updateData.updatedAt,
@@ -2037,7 +2110,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const qSnap = await queueRef.get();
         if (qSnap.exists) {
           await queueRef.set({
-            items,
+            items: updateData.items,
             totalAmount: updateData.totalAmount,
             billDetails: updateData.billDetails,
             updatedAt: updateData.updatedAt,
@@ -2047,7 +2120,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         console.warn('Failed to mirror editOrder to ops_queue', queueErr);
       }
 
-      return { ok: true };
+      return { ok: true, totalAmount: updateData.totalAmount, isExpress: express };
     } catch (err) {
       console.error('opsProcessing editOrder failed', err);
       return { ok: false, error: 'server_error' };
@@ -2523,7 +2596,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
               tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), updateData, { merge: true });
             }
           }
-        } else if (isProductionStep(nextStatus)) {
+        } else if (isProductionStep(nextStatus) || nextStatus === 'packaging') {
           const updateData = { processingStep: nextStatus, updatedAt: now };
           tx.set(orderRef, updateData, { merge: true });
           tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), updateData, { merge: true });
@@ -3313,10 +3386,12 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
 
         // Do not change order status yet, keep it 'ready' until pickup
         // Update delivery task to 'assigned'
+        const isExpress = isOrderExpress(order);
         if (delTaskSnap.exists) {
           tx.update(delTaskRef, {
             assignee,
             status: 'assigned',
+            isExpress,
             assignedAt: now,
             deliveryDate,
             deliveryTime,
@@ -3328,6 +3403,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             vendorId,
             type: 'delivery',
             status: 'assigned',
+            isExpress,
             assignee,
             deliveryAddress: pickupAddressFromOrder(order),
             deliveryDate,
@@ -3430,12 +3506,14 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           tx.set(vendorRef, updateData, { merge: true });
 
           const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
+          const isExpress = isOrderExpress(order);
 
           if (delTaskSnap.exists) {
             tx.update(delTaskRef, {
               assignee: riderId,
               assignedBy: auth.uid,
               status: 'out_for_delivery',
+              isExpress,
               assignedAt: now,
               deliveryDate,
               deliveryTime,
@@ -3451,6 +3529,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
+              isExpress,
               assignee: riderId, assignedBy: auth.uid, deliveryAddress: pickupAddressFromOrder(order),
               deliveryDate, deliveryTime,
               deliveryOTP: order.deliveryOTP || null,
@@ -3474,12 +3553,14 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           tx.set(vendorRef, { riderId: riderId, updatedAt: now }, { merge: true });
 
           const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
+          const isExpress = isOrderExpress(order);
           if (taskSnap.exists) {
             tx.update(db.doc(`ops_tasks/${orderId}`), {
               assignee: riderId,
               assignedBy: auth.uid,
               assignedAt: now,
               status: 'assigned',
+              isExpress,
               acceptedAt: admin.firestore.FieldValue.delete(),
             });
           } else if (queueSnap.exists) {
@@ -3493,6 +3574,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               assignedBy: auth.uid,
               assignedAt: now,
               status: 'assigned',
+              isExpress: isExpress || isOrderExpress(qData),
               customerName: qData.customerName || (order && (order.customerName || order.userName)) || '',
               customerPhone: qData.customerPhone || (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: qData.pickupAddress || pickupAddressFromOrder(order),
@@ -3505,6 +3587,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             // Manual pickup assignment with no existing task/queue — create one.
             tx.set(db.doc(`ops_tasks/${orderId}`), {
               orderId, userId, vendorId, assignee: riderId, assignedBy: auth.uid, status: 'assigned',
+              isExpress,
               customerName: (order && (order.customerName || order.userName)) || '',
               customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: pickupAddressFromOrder(order),
@@ -3693,6 +3776,32 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
     if (result.ok && action === 'assignTaskToRider') {
       try {
         const { riderId, isDelivery } = data;
+
+        // Fetch staff details to denormalize rider name and phone onto the order doc
+        const staffSnap = await db.doc(`ops_staff/${riderId}`).get();
+        const staffData = staffSnap.exists ? staffSnap.data() : null;
+        const rName = staffData?.name || (isDelivery ? 'SpinZo Delivery Partner' : 'SpinZo Pickup Partner');
+        const rPhone = staffData?.phone || '';
+
+        if (userId) {
+          const patch = isDelivery
+            ? {
+                deliveryRiderId: riderId,
+                deliveryRiderName: rName,
+                deliveryRiderPhone: rPhone,
+                deliveryRider: { id: riderId, name: rName, phone: rPhone },
+              }
+            : {
+                riderId: riderId,
+                riderName: rName,
+                riderPhone: rPhone,
+                pickupRider: { id: riderId, name: rName, phone: rPhone },
+              };
+          await db.doc(`users/${userId}/orders/${orderId}`).set(patch, { merge: true });
+          const vId = vendorId || 'default';
+          await db.doc(`vendors/${vId}/orders/${orderId}`).set(patch, { merge: true });
+        }
+
         const oSnap = userId ? await db.doc(`users/${userId}/orders/${orderId}`).get() : null;
         const oData = oSnap && oSnap.exists ? oSnap.data() : {};
         const addr = pickupAddressFromOrder(oData);
@@ -3811,6 +3920,27 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
       slot,
       isInstant,
     });
+  }
+
+  // Dual-write assigned pickup rider details to customer's order doc for real-time tracking
+  if (newAssignee && newAssignee !== oldAssignee) {
+    try {
+      const staffSnap = await db.doc(`ops_staff/${newAssignee}`).get();
+      const staffData = staffSnap.exists ? staffSnap.data() : null;
+      const rName = staffData?.name || 'SpinZo Pickup Partner';
+      const rPhone = staffData?.phone || '';
+      const uid = enrichedAfter.userId;
+      if (uid) {
+        await db.doc(`users/${uid}/orders/${event.params.orderId}`).set({
+          riderId: newAssignee,
+          riderName: rName,
+          riderPhone: rPhone,
+          pickupRider: { id: newAssignee, name: rName, phone: rPhone },
+        }, { merge: true });
+      }
+    } catch (rSyncErr) {
+      console.warn('onOpsTaskWritten sync rider to order error:', rSyncErr);
+    }
   }
 });
 
@@ -3935,5 +4065,26 @@ exports.onDeliveryTaskWritten = onDocumentWritten('ops_delivery_tasks/{orderId}'
       slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim(),
       isInstant: false,
     });
+  }
+
+  // Dual-write assigned delivery rider details to customer's order doc for real-time tracking
+  if (newAssignee && newAssignee !== oldAssignee) {
+    try {
+      const staffSnap = await db.doc(`ops_staff/${newAssignee}`).get();
+      const staffData = staffSnap.exists ? staffSnap.data() : null;
+      const dName = staffData?.name || 'SpinZo Delivery Partner';
+      const dPhone = staffData?.phone || '';
+      const uid = after.userId;
+      if (uid) {
+        await db.doc(`users/${uid}/orders/${event.params.orderId}`).set({
+          deliveryRiderId: newAssignee,
+          deliveryRiderName: dName,
+          deliveryRiderPhone: dPhone,
+          deliveryRider: { id: newAssignee, name: dName, phone: dPhone },
+        }, { merge: true });
+      }
+    } catch (rSyncErr) {
+      console.warn('onDeliveryTaskWritten sync delivery rider to order error:', rSyncErr);
+    }
   }
 });

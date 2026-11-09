@@ -908,7 +908,12 @@ function isSlotDueForDispatch(slotObj, leadTimeMinutes = 20, options = {}) {
   // 3. Scheduled for tomorrow or later
   if (dateStr > todayStr) return false;
 
-  // 4. Scheduled for today: check time slot
+  // 4. Express 6–8h orders scheduled for today dispatch immediately upon placement
+  if (slotObj.isExpress === true || slotObj.turnaroundMode === 'express_6_8h') {
+    return true;
+  }
+
+  // 5. Scheduled for today: check time slot
   const timeStr = slotObj.scheduledTime || slotObj.deliveryTime || slotObj.deliverySlot || slotObj.time || '';
   if (!timeStr || typeof timeStr !== 'string' || !timeStr.trim() || timeStr.toLowerCase() === 'anytime') {
     return true; // no specific slot constraint for today
@@ -953,6 +958,45 @@ function isOrderEditable(order, processes = []) {
   }
 
   return false;
+}
+
+// ── Express pricing (mirrors client editPricing.ts / Livfresh CartScreen) ──
+const EXPRESS_MULTIPLIER = 1.55;
+const EXPRESS_ELIGIBLE_SERVICES = ['wash_fold', 'wash_iron', 'premium_laundry', 'blanket_wash', 'ironing'];
+
+/** Standard (non-express) price for an express-eligible, non-credit line, or null if not eligible. */
+function standardLinePrice(item) {
+  const sid = String((item && (item.serviceId || item.serviceType)) || '').toLowerCase();
+  if (!item || item.isCreditItem || !EXPRESS_ELIGIBLE_SERVICES.includes(sid)) return null;
+  if (sid === 'wash_fold') {
+    const ironing = item.ironingEnabled && item.ironingCount ? item.ironingCount * 18 : 0;
+    return (item.weight || 5) * 85 + ironing;
+  }
+  if (sid === 'wash_iron') return (item.weight || 5) * 140;
+  if (sid === 'premium_laundry') return (item.weight || 5) * 200;
+  if (sid === 'blanket_wash') return (item.singleBlanketCount || 0) * 299 + (item.doubleBlanketCount || 0) * 399;
+  // ironing: light ₹10 / medium ₹30 / heavy ₹50
+  const total = item.ironingCount || item.clothesCount || item.quantity || 0;
+  const medium = Math.max(0, Math.min(item.mediumCount || 0, total));
+  const heavy = Math.max(0, Math.min(item.heavyCount || 0, total - medium));
+  return (total - medium - heavy) * 10 + medium * 30 + heavy * 50;
+}
+
+/**
+ * Enforce 1.55x Express pricing on edited items. Returns repriced items plus
+ * recomputed itemTotal / total (keeping the existing delivery fee and discount).
+ */
+function applyExpressPricing(items, billDetails = {}) {
+  const priced = (items || []).map((it) => {
+    const std = standardLinePrice(it);
+    if (std === null) return it;
+    return { ...it, isExpress: true, totalPrice: Math.round(std * EXPRESS_MULTIPLIER) };
+  });
+  const itemTotal = priced.reduce((s, it) => s + (Number(it && it.totalPrice) || 0), 0);
+  const deliveryFee = Number(billDetails.deliveryFee) || 0;
+  const discount = Number(billDetails.discount) || 0;
+  const total = Math.max(0, itemTotal + deliveryFee - discount);
+  return { items: priced, itemTotal, total };
 }
 
 /**
@@ -1091,6 +1135,8 @@ module.exports = {
   isSlotDueForDispatch,
   isStaffAvailableForAutoAssign,
   isOrderEditable,
+  applyExpressPricing,
+  EXPRESS_MULTIPLIER,
   checkPaymentGate,
   pickRider,
   normalizePhone,

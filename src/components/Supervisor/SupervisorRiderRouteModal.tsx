@@ -213,6 +213,13 @@ export function SupervisorRiderRouteModal({
                             </Text>
                           </View>
 
+                          {stop.isExpress && (
+                            <View className="bg-orange-600 border border-orange-700 px-1.5 py-0.2 rounded flex-row items-center">
+                              <Zap size={9} color="#ffffff" className="mr-0.5" />
+                              <Text className="text-white font-extrabold text-[9px]">EXPRESS 6-8H</Text>
+                            </View>
+                          )}
+
                           {stop.isInstant && (
                             <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.2 rounded flex-row items-center">
                               <Zap size={9} color="#d97706" className="mr-0.5" />

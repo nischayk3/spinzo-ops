@@ -6,7 +6,7 @@ import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useAuthStore } from '../../store/authStore';
-import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo, timeAgo, formatDateTime, isToday, isWithinDeliverySlot, getDeliveryTargetTimestamp } from '../../utils/orderFeed';
+import { ACTIVE_STATUSES, FeedOrder, serviceSummary, orderTotal, parseOrderTokens, matchOrderSearch, sortReadyOrders, getPickupInfo, timeAgo, formatDateTime, isToday, isWithinDeliverySlot, getDeliveryTargetTimestamp, isExpressOrder } from '../../utils/orderFeed';
 import { stepLabel, currentStep, isDone } from '../../utils/opsProcess';
 import { AssignHelperModal } from '../../components/Supervisor/AssignHelperModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
@@ -127,9 +127,9 @@ export function FloorBoardScreen() {
       });
     }
 
-    // Apply Urgent filter
+    // Apply Express / Urgent filter
     if (urgentOnly) {
-      result = result.filter(o => o.isUrgent);
+      result = result.filter(o => o.isUrgent || isExpressOrder(o));
     }
 
     // Apply Search
@@ -161,6 +161,16 @@ export function FloorBoardScreen() {
       result = result.filter(o => String(o.status).toLowerCase() === 'cancelled');
     }
 
+    // Sort active Express orders to the top in non-archived tabs so Ops caters immediately
+    if (activeTab !== 'Delivered' && activeTab !== 'Cancelled' && activeTab !== 'Ready' && activeTab !== 'Out for Delivery') {
+      result = [...result].sort((a, b) => {
+        const aExp = isExpressOrder(a) && a.status !== 'delivered' && a.status !== 'cancelled';
+        const bExp = isExpressOrder(b) && b.status !== 'delivered' && b.status !== 'cancelled';
+        if (aExp !== bExp) return aExp ? -1 : 1;
+        return 0;
+      });
+    }
+
     return result;
   }, [orders, searchQuery, activeTab, urgentOnly]);
 
@@ -182,16 +192,16 @@ export function FloorBoardScreen() {
             <Text className="text-gray-500 text-sm mt-0.5">Manage and track all store orders ({filteredOrders.length} showing)</Text>
           </View>
 
-          {/* Urgent Filter Toggle */}
+          {/* Express / Urgent Filter Toggle */}
           <TouchableOpacity
             onPress={() => setUrgentOnly(!urgentOnly)}
             className={`px-3 py-1.5 rounded-full border flex-row items-center ${
-              urgentOnly ? 'bg-red-500 border-red-500' : 'bg-white border-gray-200'
+              urgentOnly ? 'bg-orange-600 border-orange-600' : 'bg-orange-50 border-orange-300'
             }`}
           >
-            <Zap size={14} color={urgentOnly ? '#fff' : '#ef4444'} className="mr-1" />
-            <Text className={`font-bold text-xs ${urgentOnly ? 'text-white' : 'text-gray-700'}`}>
-              Urgent Only
+            <Zap size={14} color={urgentOnly ? '#fff' : '#ea580c'} className="mr-1" />
+            <Text className={`font-bold text-xs ${urgentOnly ? 'text-white' : 'text-orange-800'}`}>
+              Express / Urgent
             </Text>
           </TouchableOpacity>
         </View>
@@ -289,21 +299,45 @@ export function FloorBoardScreen() {
 
             const tokenChips = parseOrderTokens(item.tokens, item.tokenNumber, item.items);
             const garmentCount = item.garmentCount || (item as any).opsDetails?.garmentCount;
+            const isExpress = isExpressOrder(item);
 
             return (
               <TouchableOpacity
                 onPress={() => navigation.navigate('OrderDetail', { orderId: item.id })}
-                className={`bg-white rounded-2xl p-4 mb-3 border border-gray-200/90 shadow-xs active:opacity-90 ${
-                  isDesktop ? 'flex-1 m-1.5' : ''
-                }`}
+                className={`rounded-2xl mb-3 overflow-hidden shadow-xs active:opacity-90 ${
+                  isExpress
+                    ? 'bg-orange-50/30 border-2 border-orange-500'
+                    : 'bg-white border border-gray-200/90'
+                } ${isDesktop ? 'flex-1 m-1.5' : ''}`}
               >
+                {isExpress && (
+                  <View className="bg-orange-600 px-4 py-1.5 flex-row items-center justify-between">
+                    <View className="flex-row items-center">
+                      <Zap size={11} color="#ffffff" />
+                      <Text className="text-white font-black text-[10px] uppercase tracking-wider ml-1">
+                        EXPRESS ORDER • 6–8H URGENT SLA
+                      </Text>
+                    </View>
+                    <Text className="text-orange-100 font-extrabold text-[9px] uppercase">
+                      CATER IMMEDIATELY
+                    </Text>
+                  </View>
+                )}
+
+                <View className="p-4">
                 {/* Header: ID, Tokens, Urgency, Status */}
                 <View className="flex-row items-center justify-between mb-2">
                   <View className="flex-row items-center flex-wrap gap-1.5 flex-1 mr-2">
                     <Text className="text-gray-900 font-black text-base">
                       #{item.id.slice(-6).toUpperCase()}
                     </Text>
-                    {item.isUrgent && (
+                    {isExpress && (
+                      <View className="bg-orange-100 border border-orange-400 px-2 py-0.5 rounded-full flex-row items-center">
+                        <Zap size={10} color="#c2410c" className="mr-0.5" />
+                        <Text className="text-orange-800 text-[10px] font-black uppercase">EXPRESS 6-8H</Text>
+                      </View>
+                    )}
+                    {item.isUrgent && !isExpress && (
                       <View className="bg-red-500/15 border border-red-500/40 px-2 py-0.5 rounded-full flex-row items-center">
                         <Zap size={10} color="#ef4444" className="mr-0.5" />
                         <Text className="text-red-600 text-[10px] font-black uppercase">URGENT</Text>
@@ -560,6 +594,7 @@ export function FloorBoardScreen() {
                     </Text>
                   </View>
                 ) : null}
+                </View>
               </TouchableOpacity>
             );
           }}

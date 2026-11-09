@@ -11,7 +11,7 @@ import { useAuthStore } from '../../store/authStore';
 import { useStaffRosterStore, StaffMember } from '../../store/staffRosterStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
-import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo, isTodayPickup, sortByPickupTimeAsc } from '../../utils/orderFeed';
+import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo, isTodayPickup, sortByPickupTimeAsc, isExpressOrder } from '../../utils/orderFeed';
 import { announceSkippedOrder } from '../../utils/alerts';
 import { stepLabel, currentStep, isDone } from '../../utils/opsProcess';
 import { useResponsive } from '../../utils/useResponsive';
@@ -79,13 +79,11 @@ export function SupervisorDashboardScreen() {
     initialize();
   }, [initialize]);
 
-  // Inbound queue = orders awaiting pickup processing (NOT in-transit, NOT urgent, NOT tomorrow)
+  // Inbound queue = orders awaiting pickup processing (Express orders ALWAYS remain visible at top of active queues AND in Express/Urgent tab!)
   const inbound = useMemo(() => {
-    // Base: placed/confirmed/pickup_completed — in_transit has its own tab
     const base = orders
       .filter(o => (o.status === 'placed' || o.status === 'confirmed' || o.status === 'pickup_completed'))
-      .filter(o => !o.isUrgent) // urgent orders only in urgent tab
-    // Today's pickups: only placed/confirmed with today's date, sorted ascending
+      .filter(o => !o.isUrgent || isExpressOrder(o));
     return sortByPickupTimeAsc(base);
   }, [orders]);
 
@@ -105,8 +103,12 @@ export function SupervisorDashboardScreen() {
 
   const stats = useMemo(() => dayRevenue(orders), [orders]);
 
+  const activeExpressOrders = useMemo(() => {
+    return orders.filter(o => isExpressOrder(o) && o.status !== 'delivered' && o.status !== 'cancelled');
+  }, [orders]);
+
   const urgentOrders = useMemo(() => {
-    return orders.filter(o => o.isUrgent && o.status !== 'delivered' && o.status !== 'cancelled');
+    return orders.filter(o => (o.isUrgent || isExpressOrder(o)) && o.status !== 'delivered' && o.status !== 'cancelled');
   }, [orders]);
 
   const processingOrdersCount = useMemo(() => {
@@ -130,17 +132,21 @@ export function SupervisorDashboardScreen() {
   const filteredInbound = useMemo(() => {
     if (inboundFilter === 'today_pickups') {
       return sortByPickupTimeAsc(
-        inbound.filter(o => o.status !== 'pickup_completed' && isTodayPickup(o))
+        inbound.filter(o => o.status !== 'pickup_completed' && (isTodayPickup(o) || isExpressOrder(o)))
       );
     }
-    if (inboundFilter === 'urgent') return orders.filter(o => o.isUrgent && o.status !== 'delivered' && o.status !== 'cancelled');
+    if (inboundFilter === 'urgent') {
+      return sortByPickupTimeAsc(
+        orders.filter(o => (o.isUrgent || isExpressOrder(o)) && o.status !== 'delivered' && o.status !== 'cancelled')
+      );
+    }
     if (inboundFilter === 'in_ride') {
       return sortByPickupTimeAsc(orders.filter(o => o.status === 'out_for_delivery'));
     }
-    if (inboundFilter === 'transit') return orders.filter(o => o.status === 'in_transit_to_store');
-    if (inboundFilter === 'tagging') return inbound.filter(o => o.status === 'pickup_completed');
-    // 'all': exclude urgent
-    return inbound.filter(o => !o.isUrgent);
+    if (inboundFilter === 'transit') return sortByPickupTimeAsc(orders.filter(o => o.status === 'in_transit_to_store'));
+    if (inboundFilter === 'tagging') return sortByPickupTimeAsc(inbound.filter(o => o.status === 'pickup_completed'));
+    // 'all': exclude manual-only urgent, keep Express at top
+    return inbound.filter(o => !o.isUrgent || isExpressOrder(o));
   }, [inbound, inboundFilter, orders]);
 
   // Helper token identifier: prefers Token # (e.g. T-65, T-17), falls back to order shortId (#ATIWMR)
@@ -392,6 +398,7 @@ export function SupervisorDashboardScreen() {
     const chips = parseOrderTokens(o.tokens, o.tokenNumber, o.items);
     const garmentCount = o.garmentCount || (o as any).opsDetails?.garmentCount;
     const isUrgent = !!o.isUrgent;
+    const isExpress = isExpressOrder(o);
     const servicesList = (o.items || []).map(i => i.serviceName || i.name).filter(Boolean);
     const isPaid = String(o.paymentStatus).toLowerCase() === 'paid';
     const timeLabel = timeAgo(o.createdAt);
@@ -400,9 +407,28 @@ export function SupervisorDashboardScreen() {
       <TouchableOpacity
         key={o.id}
         onPress={() => navigation.navigate('OrderDetail', { orderId: o.id })}
-        style={{ paddingHorizontal: 11, paddingVertical: 9, borderRadius: 13 }}
-        className="bg-white mb-2 border border-slate-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03)] active:opacity-95"
+        style={{ borderRadius: 13 }}
+        className={`mb-2 overflow-hidden active:opacity-95 ${
+          isExpress
+            ? 'bg-orange-50/40 border-2 border-orange-500 shadow-sm'
+            : 'bg-white border border-slate-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03)]'
+        }`}
       >
+        {isExpress && (
+          <View className="bg-orange-600 px-2.5 py-1 flex-row items-center justify-between">
+            <View className="flex-row items-center">
+              <Zap size={10} color="#ffffff" />
+              <Text className="text-white font-black text-[9px] uppercase tracking-wider ml-1">
+                EXPRESS ORDER • 6–8H SLA
+              </Text>
+            </View>
+            <Text className="text-orange-100 font-extrabold text-[8px] uppercase">
+              CATER IMMEDIATELY
+            </Text>
+          </View>
+        )}
+
+        <View style={{ paddingHorizontal: 11, paddingVertical: 9 }}>
         {/* Row 1: ID, Tokens, Urgency, Status Pill */}
         <View className="flex-row items-center justify-between mb-1">
           <View className="flex-row items-center flex-wrap gap-1 flex-1 mr-2">
@@ -418,7 +444,13 @@ export function SupervisorDashboardScreen() {
                 <Text className="text-purple-700 font-black text-[8px]">VIDEO</Text>
               </View>
             )}
-            {isUrgent && (
+            {isExpress && (
+              <View className="bg-orange-100 border border-orange-400 px-1.5 py-0.2 rounded flex-row items-center">
+                <Zap size={8} color="#c2410c" className="mr-0.5" />
+                <Text className="text-orange-800 font-black text-[8px] uppercase">EXPRESS 6-8H</Text>
+              </View>
+            )}
+            {isUrgent && !isExpress && (
               <View className="bg-rose-50 border border-rose-300 px-1.5 py-0.2 rounded flex-row items-center">
                 <Zap size={8} color="#e11d48" className="mr-0.5" />
                 <Text className="text-rose-700 font-black text-[8px] uppercase">URGENT</Text>
@@ -627,6 +659,7 @@ export function SupervisorDashboardScreen() {
             </View>
           );
         })()}
+        </View>
       </TouchableOpacity>
     );
   };
@@ -702,6 +735,32 @@ export function SupervisorDashboardScreen() {
                 ))}
               </View>
             </View>
+          )}
+
+          {/* Live Express Priority Command Banner (surfaces immediately when any Express order is active) */}
+          {activeExpressOrders.length > 0 && (
+            <TouchableOpacity
+              onPress={() => setInboundFilter('urgent')}
+              className="mb-3 bg-orange-600 rounded-2xl px-4 py-2.5 flex-row items-center justify-between shadow-sm active:opacity-90"
+            >
+              <View className="flex-row items-center flex-1 mr-2">
+                <View className="w-7 h-7 rounded-xl bg-white/20 items-center justify-center mr-2.5">
+                  <Zap size={15} color="#ffffff" />
+                </View>
+                <View className="flex-1">
+                  <Text className="text-white font-black text-xs uppercase tracking-wider">
+                    ⚡ {activeExpressOrders.length} Active Express Order{activeExpressOrders.length > 1 ? 's' : ''} (6–8h SLA)
+                  </Text>
+                  <Text className="text-orange-100 text-[11px] font-semibold mt-0.5" numberOfLines={1}>
+                    Cater immediately — dispatch rider & prioritize floor stages first
+                  </Text>
+                </View>
+              </View>
+              <View className="bg-white px-2.5 py-1 rounded-lg flex-row items-center">
+                <Text className="text-orange-700 font-black text-[10px] uppercase mr-0.5">View</Text>
+                <ChevronRight size={11} color="#c2410c" />
+              </View>
+            </TouchableOpacity>
           )}
 
           {/* Command KPI Ribbon (4 Compact, High-Density Tiles) */}
@@ -837,9 +896,9 @@ export function SupervisorDashboardScreen() {
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => setInboundFilter('urgent')}
-                    className={`px-2.5 py-0.5 rounded-full border ${inboundFilter === 'urgent' ? 'bg-rose-500 border-rose-500' : 'bg-white border-slate-200'}`}
+                    className={`px-2.5 py-0.5 rounded-full border ${inboundFilter === 'urgent' ? 'bg-orange-600 border-orange-600' : 'bg-orange-50 border-orange-300'}`}
                   >
-                    <Text className={`font-bold text-[11px] ${inboundFilter === 'urgent' ? 'text-white' : 'text-slate-600'}`}>Urgent</Text>
+                    <Text className={`font-bold text-[11px] ${inboundFilter === 'urgent' ? 'text-white' : 'text-orange-800'}`}>⚡ Express / Urgent ({urgentOrders.length})</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     onPress={() => setInboundFilter('tagging')}

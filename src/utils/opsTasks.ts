@@ -3,11 +3,12 @@ import { slotLabel } from './orderFeed';
 export interface OpsTask {
   id: string;
   orderId: string;
+  userId?: string;
   assignee: string;
   assignedBy?: string;
   status: 'pending' | 'picked_up' | 'cancelled' | string;
   pickupAddress?: string;
-  pickupSlot?: { type?: string; scheduledDate?: string; scheduledTime?: string; isInstant?: boolean } | null;
+  pickupSlot?: { type?: string; scheduledDate?: string; scheduledTime?: string; isInstant?: boolean; isExpress?: boolean } | null;
   tokenNumber?: string;
   tokens?: Record<string, string>;
   pickupOTP?: string;
@@ -30,14 +31,22 @@ export interface OpsTask {
   cancelledAt?: any;
   proofUrl?: string | null;
   isUrgent?: boolean;
+  isExpress?: boolean;
   pickupNote?: string;
 }
 
 export function parseOpsTask(id: string, snapData: Record<string, any> | null | undefined): OpsTask {
   const d = snapData ?? {};
+  const computedExpress = Boolean(
+    d.isExpress ||
+    d.turnaroundMode === 'express_6_8h' ||
+    d.pickupSlot?.isExpress ||
+    (Array.isArray(d.items) && d.items.some((i: any) => i?.isExpress))
+  );
   return {
     id,
     orderId: d.orderId ?? id,
+    userId: d.userId ?? undefined,
     assignee: d.assignee ?? '',
     assignedBy: d.assignedBy ?? undefined,
     status: d.status ?? 'pending',
@@ -66,6 +75,7 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
     cancelledAt: d.cancelledAt ?? undefined,
     proofUrl: d.proofUrl ?? undefined,
     isUrgent: typeof d.isUrgent === 'boolean' ? d.isUrgent : (d.opsMeta?.isUrgent ?? undefined),
+    ...(computedExpress ? { isExpress: true } : {}),
     pickupNote: typeof d.pickupNote === 'string' ? d.pickupNote : (d.opsMeta?.pickupNote ?? undefined),
   };
 }

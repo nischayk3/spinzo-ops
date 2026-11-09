@@ -66,6 +66,7 @@ export interface RiderTaskCardProps {
   primaryLabel?: string;
   onEdit?: () => void;
   isUrgent?: boolean;
+  isExpress?: boolean;
   pickupNote?: string;
   onToggleUrgent?: () => void;
   onEditPickupNote?: () => void;
@@ -122,15 +123,34 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
     <Pressable
       onPress={() => p.onPrimary?.()}
       className={`bg-white rounded-3xl mb-5 border overflow-hidden shadow-md active:opacity-98 ${
-        isCurrentActive
+        p.isExpress
+          ? 'border-2 border-orange-500 shadow-lg shadow-orange-500/25'
+          : isCurrentActive
           ? 'border-2 border-purple-600 shadow-lg shadow-purple-600/20'
           : isInTransit
           ? 'border border-emerald-400 shadow-md shadow-emerald-500/15'
           : 'border border-slate-200/90 shadow-md shadow-slate-300/50'
       }`}
     >
-      {/* Active Mission Top Banner */}
-      {isCurrentActive && (
+      {/* Express 6–8h Urgent Priority Top Banner */}
+      {p.isExpress && (
+        <View className="bg-orange-600 px-4 py-2 flex-row items-center justify-between">
+          <View className="flex-row items-center">
+            <Zap size={13} color="#FFFFFF" />
+            <Text className="text-white font-black text-xs uppercase tracking-wider ml-1.5">
+              EXPRESS ORDER • 6–8H URGENT
+            </Text>
+          </View>
+          <View className="bg-white/20 px-2 py-0.5 rounded-full">
+            <Text className="text-white font-extrabold text-[10px] uppercase tracking-wide">
+              {isCurrentActive ? 'STOP 1 • TOP PRIORITY' : 'TOP PRIORITY'}
+            </Text>
+          </View>
+        </View>
+      )}
+
+      {/* Active Mission Top Banner (non-express) */}
+      {isCurrentActive && !p.isExpress && (
         <View className="bg-purple-600 px-4 py-2 flex-row items-center justify-between">
           <View className="flex-row items-center">
             <Zap size={13} color="#FFFFFF" />
@@ -147,7 +167,9 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
       {/* Customer Identity Hero Header: Unmistakable distinct visual anchor */}
       <View
         className={`px-4 py-3.5 border-b flex-row items-center justify-between ${
-          isInTransit
+          p.isExpress
+            ? 'bg-orange-50/90 border-orange-200'
+            : isInTransit
             ? 'bg-emerald-50/90 border-emerald-100'
             : isPickup
             ? 'bg-purple-50/90 border-purple-100'
@@ -265,7 +287,14 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
         {/* Quick Status & Micro-Badges Bar */}
         <View className="flex-row items-center flex-wrap gap-1.5 mb-3">
-          {p.isUrgent ? (
+          {p.isExpress ? (
+            <View className="bg-orange-600 px-2.5 py-1 rounded-lg flex-row items-center shadow-xs">
+              <Zap size={10} color="#FFFFFF" className="mr-1" />
+              <Text className="text-white font-black text-[10px] uppercase">EXPRESS • 6–8H URGENT</Text>
+            </View>
+          ) : null}
+
+          {p.isUrgent && !p.isExpress ? (
             <View className="bg-red-600 px-2.5 py-1 rounded-lg flex-row items-center shadow-xs">
               <Zap size={10} color="#FFFFFF" className="mr-1" />
               <Text className="text-white font-black text-[10px] uppercase">URGENT</Text>
@@ -278,7 +307,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             </View>
           ) : null}
 
-          {p.onToggleUrgent && (
+          {p.onToggleUrgent && !p.isExpress && (
             <Pressable
               onPress={(e) => {
                 e?.stopPropagation?.();

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Modal, ScrollView, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
-import { X, Minus, Plus, AlertTriangle } from 'lucide-react-native';
+import { X, Minus, Plus, AlertTriangle, Zap } from 'lucide-react-native';
 import { functions, httpsCallable } from '../config/firebase';
 
-import { SHOE_EDIT_CATEGORIES, calculateItemPrice, calculateDeliveryFee, getIroningBreakdown } from '../utils/editPricing';
+import { SHOE_EDIT_CATEGORIES, EXPRESS_ELIGIBLE_SERVICES, calculateItemPrice, calculateDeliveryFee, getIroningBreakdown } from '../utils/editPricing';
 
 interface EditOrderModalProps {
   visible: boolean;
@@ -19,6 +19,14 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
   const [grandTotal, setGrandTotal] = useState(0);
   const [processing, setProcessing] = useState(false);
 
+  const orderIsExpress = Boolean(
+    order?.isExpress ||
+    order?.turnaroundMode === 'express_6_8h' ||
+    order?.pickupDetails?.isExpress ||
+    order?.billDetails?.isExpress ||
+    (Array.isArray(order?.items) && order.items.some((i: any) => i?.isExpress))
+  );
+
   useEffect(() => {
     if (order && order.items) {
       const initialItems = JSON.parse(JSON.stringify(order.items)).map((it: any) => {
@@ -26,8 +34,9 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
         const isWF = sid === 'wash_fold';
         const isWI = sid === 'wash_iron';
         const isIroningOnly = sid === 'ironing' || sid === 'ironing_addon' || it.serviceName?.toLowerCase().includes('ironing');
-        return {
+        const normalized = {
           ...it,
+          isExpress: Boolean(orderIsExpress || it.isExpress),
           serviceId: sid,
           serviceType: it.serviceType || sid,
           weight: it.weight ?? (it.unit === 'kg' && it.quantity ? it.quantity : ((isWF || isWI) ? 5 : undefined)),
@@ -37,6 +46,12 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
           mediumCount: it.mediumCount || 0,
           heavyCount: it.heavyCount || 0,
         };
+        // Re-price Express lines on open so an order previously saved at the
+        // standard rate is corrected back to the 1.55x Express price.
+        if (orderIsExpress && !normalized.isCreditItem && EXPRESS_ELIGIBLE_SERVICES.includes(sid)) {
+          normalized.totalPrice = calculateItemPrice(normalized);
+        }
+        return normalized;
       });
       setItems(initialItems);
       setDiscount(order.billDetails?.discount || 0);
@@ -217,6 +232,7 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
         totalAmount: grandTotal ?? 0,
         billDetails: {
           ...(order.billDetails || {}),
+          ...(orderIsExpress ? { isExpress: true } : {}),
           itemTotal,
           discount,
           deliveryFee,
@@ -287,6 +303,15 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
             Actual weight and piece counts are verified during pickup or tagging. Changes update customer billing.
           </Text>
         </View>
+
+        {orderIsExpress && (
+          <View className="mx-4 mt-2 flex-row items-center bg-orange-50 border border-orange-300 rounded-xl p-3 gap-2">
+            <Zap size={16} color="#ea580c" />
+            <Text className="flex-1 text-orange-900 text-xs font-bold">
+              ⚡ Express Order (6–8h SLA) • 1.55× Express rates are active automatically on adjustments.
+            </Text>
+          </View>
+        )}
 
         {/* Items List */}
         <ScrollView className="flex-1 px-4 pt-4" contentContainerStyle={{ paddingBottom: 160 }}>
