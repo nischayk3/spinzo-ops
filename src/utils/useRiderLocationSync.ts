@@ -21,16 +21,21 @@ export function useRiderLocationSync() {
       return;
     }
 
-    // Check if there are active pickups or active deliveries
-    const activePickups = myTasks.filter(
+    // Active pickups en route to customer (for customer live map broadcast)
+    const enRoutePickups = myTasks.filter(
+      t => t.status === 'pending' || t.status === 'assigned'
+    );
+    // All active pickups including return to hub (for internal ops task tracking)
+    const allActivePickups = myTasks.filter(
       t => t.status === 'pending' || t.status === 'assigned' || t.status === 'in_transit_to_store'
     );
+    // Active deliveries (for internal ops delivery tracking only; customer delivery map is disabled)
     const activeDeliveries = myDeliveries.filter(
       d => d.status === 'assigned' || d.status === 'out_for_delivery'
     );
 
     // If rider has no active tasks, do nothing (zero battery/writes)
-    if (activePickups.length === 0 && activeDeliveries.length === 0) {
+    if (allActivePickups.length === 0 && activeDeliveries.length === 0) {
       return;
     }
 
@@ -60,13 +65,17 @@ export function useRiderLocationSync() {
         const now = Date.now();
         const locPayload = { latitude, longitude, updatedAt: now };
 
-        // 1. Update active pickups (customer order doc & task doc)
-        for (const task of activePickups) {
+        // 1. Update customer order docs ONLY while rider is en route for pickup
+        for (const task of enRoutePickups) {
           if (task.userId && task.orderId) {
             updateDoc(doc(db, 'users', task.userId, 'orders', task.orderId), {
               riderLocation: locPayload,
             }).catch(() => {});
           }
+        }
+
+        // 2. Update ops task docs for internal supervisor / hub tracking
+        for (const task of allActivePickups) {
           if (task.id) {
             updateDoc(doc(db, 'ops_tasks', task.id), {
               riderLocation: locPayload,
@@ -74,13 +83,8 @@ export function useRiderLocationSync() {
           }
         }
 
-        // 2. Update active deliveries (customer order doc & delivery task doc)
+        // 3. Update ops delivery task docs (internal ops only; customer delivery map is disabled)
         for (const delivery of activeDeliveries) {
-          if (delivery.userId && delivery.orderId) {
-            updateDoc(doc(db, 'users', delivery.userId, 'orders', delivery.orderId), {
-              riderLocation: locPayload,
-            }).catch(() => {});
-          }
           if (delivery.id) {
             updateDoc(doc(db, 'ops_delivery_tasks', delivery.id), {
               riderLocation: locPayload,

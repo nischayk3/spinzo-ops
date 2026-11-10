@@ -773,6 +773,7 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
         pickedUpAt: now,
         storeOTP,
         updatedAt: now,
+        riderLocation: admin.firestore.FieldValue.delete(),
       };
       const tokenList = data.tokens && typeof data.tokens === 'object'
         ? Object.values(data.tokens).filter(Boolean)
