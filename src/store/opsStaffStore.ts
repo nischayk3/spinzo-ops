@@ -79,6 +79,8 @@ export interface DeliveryTask {
   tokens?: Record<string, string> | null;
   items?: any[];
   totalAmount?: number;
+  paymentStatus?: string | null;
+  paymentMode?: string | null;
   createdAt?: unknown;
   assignedAt?: unknown;
   acceptedAt?: unknown;
@@ -245,6 +247,8 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             tokens: d.tokens || null,
             items: d.items,
             totalAmount: d.totalAmount,
+            paymentStatus: d.paymentStatus || null,
+            paymentMode: d.paymentMode || null,
             assignedAt: d.assignedAt,
             acceptedAt: d.acceptedAt,
             createdAt: d.createdAt,

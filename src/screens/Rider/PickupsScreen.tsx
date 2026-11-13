@@ -5,9 +5,8 @@ import { Bike, Clock, Package, ChevronRight } from 'lucide-react-native';
 import { useNavigation } from '@react-navigation/native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore } from '../../store/opsStaffStore';
-import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { isPending, pickupLabel, OpsTask } from '../../utils/opsTasks';
-import { timeAgo, orderTotal, slotLabel, FeedOrder, isExpressOrder } from '../../utils/orderFeed';
+import { timeAgo, isExpressOrder } from '../../utils/orderFeed';
 import { verifyPickupOTP, verifyStoreOTP, updatePickupMeta } from '../../utils/opsPickup';
 import { EditOrderModal } from '../../components/EditOrderModal';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
@@ -26,7 +25,6 @@ export function PickupsScreen() {
   const user = useAuthStore(state => state.user);
   const { myTasks, isLoading, initialize } = useOpsStaffStore();
   const myDeliveries = useOpsStaffStore(state => state.myDeliveries);
-  const orders = useOrderFeedStore(state => state.orders);
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeStoreTaskId, setActiveStoreTaskId] = useState<string | null>(null);
@@ -41,35 +39,21 @@ export function PickupsScreen() {
   useEffect(() => {
     if (user?.id) {
       initialize(user.id);
-      useOrderFeedStore.getState().initialize();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const pending = useMemo(() => {
-    return myTasks.filter(t => {
-      if (!isPending(t)) return false;
-      const order = orders.find(o => o.id === t.orderId || o.id === t.id);
-      if (!order) {
-        if (!t.customerName && !t.pickupAddress && (!t.items || t.items.length === 0)) {
-          return false;
-        }
-        return true;
-      }
-      if (order.status === 'cancelled') return false;
-      if (order.status !== 'placed' && order.status !== 'confirmed' && order.status !== 'in_transit_to_store') return false;
-      return true;
-    });
-  }, [myTasks, orders]);
+    return myTasks.filter(t => isPending(t));
+  }, [myTasks]);
 
   // Compute live smart route sequence
   const smartRouteStops = useMemo(() => {
     return buildSmartRoute({
       myTasks,
       myDeliveries,
-      orders,
     });
-  }, [myTasks, myDeliveries, orders]);
+  }, [myTasks, myDeliveries]);
 
   const stopMap = useMemo(() => {
     const map = new Map<string, SmartRouteStop>();
@@ -82,17 +66,8 @@ export function PickupsScreen() {
 
   // Only count live deliveries (ready / out_for_delivery)
   const activeDeliveriesCount = useMemo(() => {
-    return myDeliveries.filter(d => {
-      if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
-      const order = orders.find(o => o.id === d.orderId || o.id === d.id);
-      if (orders.length > 0) {
-        if (!order) return false;
-        if (order.status === 'cancelled' || order.status === 'delivered') return false;
-        if (order.status !== 'ready' && order.status !== 'out_for_delivery') return false;
-      }
-      return true;
-    }).length;
-  }, [myDeliveries, orders]);
+    return myDeliveries.filter(d => d.status === 'out_for_delivery' || d.status === 'assigned').length;
+  }, [myDeliveries]);
 
   // Group and sort pickups by Smart Route stop sequence
   const actionable = useMemo(() => {
@@ -117,17 +92,11 @@ export function PickupsScreen() {
     });
   }, [pending, stopMap]);
 
-  const getOrder = (task: OpsTask): FeedOrder | undefined =>
-    orders.find(o => o.id === task.orderId || o.id === task.id);
-
   const activeTask = pending.find(t => t.id === activeTaskId || t.orderId === activeTaskId);
-  const activeOrder = activeTask
-    ? (orders.find(o => o.id === activeTask.orderId) || orders.find(o => o.id === activeTaskId))
-    : orders.find(o => o.id === activeTaskId);
 
-  // Extract all distinct services requiring tokens from the active order or task
+  // Extract all distinct services requiring tokens from the active task
   const servicesToTag = useMemo(() => {
-    const activeItems = activeOrder?.items || activeTask?.items;
+    const activeItems = activeTask?.items;
     if (!activeItems || activeItems.length === 0) {
       return [{ key: 'general', label: 'Order Bag / Token', details: 'All items' }];
     }
@@ -208,7 +177,7 @@ export function PickupsScreen() {
       }
     }
     return list.length > 0 ? list : [{ key: 'general', label: 'Order Bag / Token', details: 'All items' }];
-  }, [activeOrder, activeTask]);
+  }, [activeTask]);
 
   const isOtpValid = otp.length === 4;
   const areTokensValid = servicesToTag.every(s => Boolean(tokens[s.key]?.trim()));
@@ -276,8 +245,7 @@ export function PickupsScreen() {
     }
   };
 
-  const editOrder = editOrderId ? orders.find(o => o.id === editOrderId) : null;
-
+  const editTask = editOrderId ? pending.find(t => t.orderId === editOrderId || t.id === editOrderId) : null;
 
   if (isLoading && pending.length === 0) {
     return (
@@ -289,12 +257,11 @@ export function PickupsScreen() {
   }
 
   const handleToggleUrgent = async (t: OpsTask) => {
-    const order = getOrder(t);
-    const currentUrgent = Boolean(t.isUrgent ?? order?.isUrgent);
+    const currentUrgent = Boolean(t.isUrgent);
     try {
       await updatePickupMeta(t.orderId, {
         isUrgent: !currentUrgent,
-        userId: order?.userId,
+        userId: t.userId,
       });
     } catch {
       Alert.alert('Error', 'Failed to update urgent status');
@@ -302,19 +269,17 @@ export function PickupsScreen() {
   };
 
   const handleOpenNoteModal = (t: OpsTask) => {
-    const order = getOrder(t);
     setNoteModalTask(t);
-    setNoteText(t.pickupNote || order?.pickupNote || '');
+    setNoteText(t.pickupNote || '');
   };
 
   const handleSaveNote = async () => {
     if (!noteModalTask) return;
     setSavingNote(true);
     try {
-      const order = getOrder(noteModalTask);
       await updatePickupMeta(noteModalTask.orderId, {
         pickupNote: noteText.trim(),
-        userId: order?.userId,
+        userId: noteModalTask.userId,
       });
       setNoteModalTask(null);
     } catch {
@@ -325,40 +290,37 @@ export function PickupsScreen() {
   };
 
   const renderCard = (t: OpsTask, isInTransit?: boolean) => {
-    const order = getOrder(t);
     const stop = stopMap.get(t.orderId || t.id);
-    const pickupSlotText = pickupLabel(t) !== '—'
-      ? pickupLabel(t)
-      : (order && slotLabel(order) !== '—' ? slotLabel(order) : undefined);
+    const pickupSlotText = pickupLabel(t) !== '—' ? pickupLabel(t) : undefined;
 
-    const items = order?.items || t.items;
-    const totalAmount = order ? orderTotal(order) : (typeof t.totalAmount === 'number' ? t.totalAmount : undefined);
-    const paymentStatus = order?.paymentStatus || t.paymentStatus;
-    const notes = order?.notes || t.notes;
-    const rawAddr = t.pickupAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined));
+    const items = t.items;
+    const totalAmount = typeof t.totalAmount === 'number' ? t.totalAmount : undefined;
+    const paymentStatus = t.paymentStatus;
+    const notes = t.notes;
+    const rawAddr = t.pickupAddress;
     const locality = isInTransit ? 'STORE DROP' : (stop?.locality || extractLocality(rawAddr));
 
     return (
       <RiderTaskCard
         type="pickup"
         orderNumber={safeShortId(t.orderId)}
-        customerName={order?.customerName || t.customerName}
-        customerPhone={order?.customerPhone || t.customerPhone}
+        customerName={t.customerName}
+        customerPhone={t.customerPhone}
         status={t.status}
-        createdAt={order?.createdAt || t.createdAt}
+        createdAt={t.createdAt}
         items={items}
         totalAmount={totalAmount}
         paymentStatus={paymentStatus}
         pickupAddress={rawAddr}
         pickupSlot={pickupSlotText}
         notes={notes}
-        tokenNumber={t.tokenNumber || order?.tokenNumber}
-        tokens={order?.tokens || (t as any).tokens}
-        lat={order?.latitude || order?.address?.latitude || t.latitude}
-        lng={order?.longitude || order?.address?.longitude || t.longitude}
-        isUrgent={t.isUrgent ?? order?.isUrgent}
-        isExpress={Boolean(t.isExpress || isExpressOrder(order) || isExpressOrder(t))}
-        pickupNote={t.pickupNote || order?.pickupNote}
+        tokenNumber={t.tokenNumber}
+        tokens={t.tokens}
+        lat={t.latitude}
+        lng={t.longitude}
+        isUrgent={t.isUrgent}
+        isExpress={Boolean(t.isExpress || isExpressOrder(t))}
+        pickupNote={t.pickupNote}
         stopNumber={stop?.stopNumber}
         locality={locality}
         loadUnits={stop?.loadUnits}
@@ -369,8 +331,8 @@ export function PickupsScreen() {
             ? () => { setOtp(''); setActiveStoreTaskId(t.id); }
             : () => {
                 setOtp('');
-                const raw = order?.tokens || (t as any).tokens;
-                const existingTokens = raw ? { ...raw } : (t.tokenNumber ? { general: t.tokenNumber } : {});
+                const raw = t.tokens;
+                const existingTokens: Record<string, string> = raw ? { ...raw } : (t.tokenNumber ? { general: t.tokenNumber } : {});
                 for (const [k, v] of Object.entries(existingTokens)) {
                   if (typeof v === 'string' && v.includes(',')) {
                     v.split(',').map(p => p.trim()).filter(Boolean).forEach((tk, idx) => {
@@ -406,6 +368,12 @@ export function PickupsScreen() {
     });
   }, [pending, stopMap]);
 
+  const currentList = useMemo(() => {
+    if (filterTab === 'pickup') return actionable;
+    if (filterTab === 'in_bag') return inTransit;
+    return routeSorted;
+  }, [filterTab, actionable, inTransit, routeSorted]);
+
   return (
     <SafeAreaView className="flex-1 bg-slate-100">
       {/* Header */}
@@ -426,7 +394,6 @@ export function PickupsScreen() {
       <SmartRouteSheet
         myTasks={myTasks}
         myDeliveries={myDeliveries}
-        orders={orders}
         onSelectTask={(stop) => {
           if (stop.type === 'delivery') {
             navigation.navigate('Deliveries');
@@ -438,9 +405,8 @@ export function PickupsScreen() {
                 setActiveStoreTaskId(task.id);
               } else {
                 setOtp('');
-                const targetOrder = getOrder(task);
-                const raw = targetOrder?.tokens || (task as any).tokens;
-                const existingTokens = raw ? { ...raw } : (task.tokenNumber ? { general: task.tokenNumber } : {});
+                const raw = task.tokens;
+                const existingTokens: Record<string, string> = raw ? { ...raw } : (task.tokenNumber ? { general: task.tokenNumber } : {});
                 for (const [k, v] of Object.entries(existingTokens)) {
                   if (typeof v === 'string' && v.includes(',')) {
                     v.split(',').map(p => p.trim()).filter(Boolean).forEach((tk, idx) => {
@@ -528,48 +494,29 @@ export function PickupsScreen() {
       </View>
 
       <FlatList
-        data={pending.length ? [0] : []}
-        keyExtractor={() => 'list'}
-        renderItem={() => null}
+        data={currentList}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item }) => (
+          <View key={item.id}>{renderCard(item, item.status === 'in_transit_to_store')}</View>
+        )}
         className="flex-1 px-4"
         contentContainerStyle={{ paddingBottom: 28 }}
+        initialNumToRender={4}
+        maxToRenderPerBatch={4}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === 'android'}
         ListEmptyComponent={
           <View className="items-center justify-center mt-20">
             <Bike size={36} color="#64748B" />
-            <Text className="text-slate-800 text-lg font-bold mt-3">No pickups assigned yet</Text>
+            <Text className="text-slate-800 text-lg font-bold mt-3">
+              {filterTab === 'pickup'
+                ? 'All pickups collected! Drop them at the store.'
+                : filterTab === 'in_bag'
+                ? 'No collected bags in bag. Complete a pickup first.'
+                : 'No pickups assigned yet'}
+            </Text>
             <Text className="text-slate-500 text-center mt-2">Assigned pickups appear here instantly.</Text>
           </View>
-        }
-        ListHeaderComponent={
-          <>
-            {filterTab === 'route' && routeSorted.map(t => (
-              <View key={t.id}>{renderCard(t, t.status === 'in_transit_to_store')}</View>
-            ))}
-
-            {filterTab === 'pickup' && (
-              actionable.length > 0 ? (
-                actionable.map(t => (
-                  <View key={t.id}>{renderCard(t, false)}</View>
-                ))
-              ) : (
-                <View className="py-12 items-center">
-                  <Text className="text-slate-500 font-bold text-sm">All pickups collected! Drop them at the store.</Text>
-                </View>
-              )
-            )}
-
-            {filterTab === 'in_bag' && (
-              inTransit.length > 0 ? (
-                inTransit.map(t => (
-                  <View key={t.id}>{renderCard(t, true)}</View>
-                ))
-              ) : (
-                <View className="py-12 items-center">
-                  <Text className="text-slate-500 font-bold text-sm">No collected bags in bag. Complete a pickup first.</Text>
-                </View>
-              )
-            )}
-          </>
         }
       />
 
@@ -707,7 +654,7 @@ export function PickupsScreen() {
         </View>
       </Modal>
 
-      <EditOrderModal visible={editOrderId !== null} onClose={() => setEditOrderId(null)} order={editOrder} />
+      <EditOrderModal visible={editOrderId !== null} onClose={() => setEditOrderId(null)} order={editTask} />
 
       {/* Pickup Note Modal */}
       <Modal visible={noteModalTask !== null} transparent animationType="fade" onRequestClose={() => setNoteModalTask(null)}>

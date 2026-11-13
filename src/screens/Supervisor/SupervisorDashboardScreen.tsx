@@ -125,8 +125,14 @@ export function SupervisorDashboardScreen() {
 
   const [searchResults, setSearchResults] = useState<any[]>([]);
   useEffect(() => {
-    if (!searchQuery.trim()) { setSearchResults([]); return; }
-    setSearchResults(orders.filter(o => matchOrderSearch(o, searchQuery)).slice(0, 16));
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setSearchResults(orders.filter(o => matchOrderSearch(o, searchQuery)).slice(0, 16));
+    }, 250);
+    return () => clearTimeout(timer);
   }, [searchQuery, orders]);
 
   const filteredInbound = useMemo(() => {

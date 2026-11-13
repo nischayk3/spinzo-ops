@@ -92,3 +92,26 @@
 ## R10: Premium Laundry 5-Step Pipeline
 
 - `premium_laundry` must follow `tagging → getting_washed → getting_dried → getting_ironed → packaging` (include `getting_ironed` in `stepsForServiceType` and `getProcessingSteps`, and auto-heal in-flight `premium_laundry` `ops_process` docs created before this fix).
+
+---
+
+## Phase 8: Lightweight & High-Performance Overhaul (R11–R14)
+
+### R11: Immediate Touch & Rider Stability Fixes
+- **R11.1 (GPS Write Loop)**: Break the circular GPS write-snapshot loop in `useRiderLocationSync.ts`. Depend only on a stable primitive key of task IDs (`activeTaskIdsKey`), enforce a 120s minimum write throttle guard, and avoid writing `riderLocation` onto collections monitored by the rider's active snapshot listeners.
+- **R11.2 (Touch Responder / Flatten RiderTaskCard)**: Flatten `RiderTaskCard.tsx`. Remove the outer `<Pressable>` wrapping the card to eliminate React Native touch responder contention. Provide dedicated, non-overlapping touch targets with `hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}` for Call, Directions, Edit, and the 52px Primary CTA button.
+- **R11.3 (Genuine FlatList Virtualization)**: Replace the fake `data={[0]}` / `ListHeaderComponent.map()` pattern in `PickupsScreen.tsx` and `DeliveriesScreen.tsx` with standard virtualized `FlatList` (`data={activeTasks}`, `renderItem`, `windowSize={5}`, `maxToRenderPerBatch={4}`).
+
+### R12: Decouple Riders from Global `orderFeedStore`
+- **R12.1 (Zero Order Feed Listener for Riders)**: In `RootNavigator.tsx`, riders must never mount `useOrderFeedStore`. Drop rider memory footprint from ~250MB to <25MB and eliminate cross-company snapshot re-renders.
+- **R12.2 (Self-Contained Task Operations)**: Refactor `PickupsScreen`, `DeliveriesScreen`, `GlobalAssignmentModal`, and `smartRoute.ts` to source customer, address, item, token, slot, and amount data directly from `OpsTask` and `DeliveryTask` without relying on `orders.find(...)`.
+
+### R13: Bounded & Paginated Firestore Queries for Floor Helpers & Supervisors
+- **R13.1 (Scoped Order Feed)**: Replace the unbounded `collectionGroup('orders')` query with a bounded query targeting only active statuses (`where('status', 'in', ACTIVE_STATUSES)`).
+- **R13.2 (Scoped Ops Process)**: Scope `ops_process` to incomplete stages (`where('status', 'in', ['pending', 'in_progress'])`) to prevent downloading historical records.
+- **R13.3 (Historical Orders On-Demand)**: Load delivered/cancelled historical records with pagination (`limit(50)` + `startAfter`).
+
+### R14: UI Thread & Timer Consolidation
+- **R14.1 (Role-Gated Notifications)**: Guard `useLifecycleNotifications.ts` so machine/washer checks never run on rider devices.
+- **R14.2 (Timer Consolidation & Debounced Search)**: Consolidate scattered `setInterval(1000)` timers and debounce text search inputs in `SupervisorDashboardScreen` and `FloorBoardScreen` (300ms debounce).
+

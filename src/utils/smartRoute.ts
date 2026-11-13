@@ -198,18 +198,20 @@ export const LOCALITY_COORDINATES: Record<string, LatLng> = {
 export function buildSmartRoute({
   myTasks,
   myDeliveries,
-  orders,
+  orders = [],
   currentLocation,
 }: {
   myTasks: OpsTask[];
   myDeliveries: DeliveryTask[];
-  orders: FeedOrder[];
+  orders?: FeedOrder[];
   currentLocation?: LatLng | null;
 }): SmartRouteStop[] {
   const stops: SmartRouteStop[] = [];
 
   const getOrder = (orderId: string): FeedOrder | undefined =>
-    orders.find(o => o.id === orderId || o.id === orderId.split('__')[0]);
+    orders && orders.length > 0
+      ? orders.find(o => o.id === orderId || o.id === orderId.split('__')[0])
+      : undefined;
 
   // 1. Process active Pickups (strictly uncollected live orders or orders in transit to store)
   myTasks.forEach(t => {

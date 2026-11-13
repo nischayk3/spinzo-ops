@@ -202,10 +202,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         await useOpsStaffStore.getState().goOffShift(uid);
       }
       await firebaseSignOut(auth);
-      // Drop the rider/helper live staff/task/process listeners and scheduled timers so nothing leaks past logout.
+      // Drop live staff/task/process/feed/roster listeners and scheduled timers so nothing leaks past logout.
       useOpsStaffStore.getState().reset();
       const { useOpsProcessStore } = await import('./opsProcessStore');
       useOpsProcessStore.getState().reset();
+      const { useOrderFeedStore } = await import('./orderFeedStore');
+      useOrderFeedStore.getState().reset();
+      const { useStaffRosterStore } = await import('./staffRosterStore');
+      useStaffRosterStore.getState().reset();
+      const { useStoreResourcesStore } = await import('./storeResourcesStore');
+      useStoreResourcesStore.getState().reset();
       clearAssignmentNotifications();
       set({ user: null, isLoggedIn: false, activeRole: null, currentStoreId: null });
     } catch (error) {

@@ -235,10 +235,8 @@ export function RootNavigator() {
     if (uid && role) {
       useOpsStaffStore.getState().initialize(uid);
       useStoreResourcesStore.getState().initialize();
-      if (role === 'helper' || role === 'iron' || role === 'rider') {
-        useOrderFeedStore.getState().initialize();
-      }
       if (role === 'helper' || role === 'iron') {
+        useOrderFeedStore.getState().initialize();
         useOpsProcessStore.getState().initialize(uid);
         useStaffRosterStore.getState().initialize();
       }

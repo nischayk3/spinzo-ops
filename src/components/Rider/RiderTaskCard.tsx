@@ -120,9 +120,8 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
   );
 
   return (
-    <Pressable
-      onPress={() => p.onPrimary?.()}
-      className={`bg-white rounded-3xl mb-5 border overflow-hidden shadow-md active:opacity-98 ${
+    <View
+      className={`bg-white rounded-3xl mb-5 border overflow-hidden shadow-md ${
         p.isExpress
           ? 'border-2 border-orange-500 shadow-lg shadow-orange-500/25'
           : isCurrentActive
@@ -241,13 +240,10 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         {/* Right Action: Direct Phone Call button or Store pill */}
         {p.customerPhone && !isInTransit ? (
           <Pressable
-            onPress={(e) => {
-              e?.stopPropagation?.();
-              Linking.openURL(`tel:${p.customerPhone}`);
-            }}
+            onPress={() => Linking.openURL(`tel:${p.customerPhone}`)}
             accessibilityLabel={`Call ${p.customerName || p.customerPhone}`}
             className="w-10 h-10 rounded-2xl bg-emerald-500 active:bg-emerald-600 items-center justify-center shadow-xs"
-            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
             <Phone size={16} color="#FFFFFF" />
           </Pressable>
@@ -309,16 +305,13 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
           {p.onToggleUrgent && !p.isExpress && (
             <Pressable
-              onPress={(e) => {
-                e?.stopPropagation?.();
-                p.onToggleUrgent?.();
-              }}
+              onPress={p.onToggleUrgent}
               className={`flex-row items-center px-2.5 py-1 rounded-lg border active:opacity-80 ${
                 p.isUrgent
                   ? 'bg-red-50 border-red-300'
                   : 'bg-slate-50 border-slate-200 active:bg-slate-100'
               }`}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Zap size={11} color={p.isUrgent ? '#DC2626' : '#64748B'} className="mr-1" />
               <Text className={`text-[10px] font-black uppercase ${
@@ -331,16 +324,13 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
           {p.onEditPickupNote && (
             <Pressable
-              onPress={(e) => {
-                e?.stopPropagation?.();
-                p.onEditPickupNote?.();
-              }}
+              onPress={p.onEditPickupNote}
               className={`flex-row items-center px-2.5 py-1 rounded-lg border active:opacity-80 ${
                 p.pickupNote
                   ? 'bg-amber-100 border-amber-300'
                   : 'bg-slate-50 border-slate-200 active:bg-slate-100'
               }`}
-              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Edit3 size={11} color={p.pickupNote ? '#B45309' : '#64748B'} className="mr-1" />
               <Text className={`text-[10px] font-black ${
@@ -355,10 +345,8 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         {/* Pickup Note Card (Amber callout with tap-to-edit) */}
         {p.pickupNote ? (
           <Pressable
-            onPress={(e) => {
-              e?.stopPropagation?.();
-              p.onEditPickupNote?.();
-            }}
+            onPress={p.onEditPickupNote}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
             className="bg-amber-50 border border-amber-300 p-3 rounded-2xl mb-3 active:bg-amber-100"
           >
             <View className="flex-row items-center justify-between mb-0.5">
@@ -407,11 +395,9 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
               </View>
             </View>
             <Pressable
-              onPress={(e) => {
-                e?.stopPropagation?.();
-                openDirections(targetAddress, targetLat, targetLng);
-              }}
+              onPress={() => openDirections(targetAddress, targetLat, targetLng)}
               className="bg-emerald-600 px-3 py-2 rounded-xl flex-row items-center active:bg-emerald-700 shadow-xs"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Navigation size={12} color="#FFFFFF" className="mr-1" />
               <Text className="text-white text-xs font-black">Directions</Text>
@@ -435,11 +421,9 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
                 </View>
               </View>
               <Pressable
-                onPress={(e) => {
-                  e?.stopPropagation?.();
-                  openDirections(targetAddress, targetLat, targetLng);
-                }}
+                onPress={() => openDirections(targetAddress, targetLat, targetLng)}
                 className="bg-blue-600 active:bg-blue-700 px-3 py-2 rounded-xl flex-row items-center shadow-xs self-start"
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
                 <Navigation size={12} color="#FFFFFF" className="mr-1" />
                 <Text className="text-white text-xs font-black">Directions</Text>
@@ -568,7 +552,8 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
           {p.onEdit ? (
             <Pressable
               onPress={p.onEdit}
-              className="bg-amber-50 active:bg-amber-100 border border-amber-300 rounded-2xl h-12 px-4 items-center justify-center"
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              className="bg-amber-50 active:bg-amber-100 border border-amber-300 rounded-2xl h-12 px-4 items-center justify-center active:opacity-80"
             >
               <Text className="text-amber-950 font-black text-xs uppercase tracking-wide">Edit</Text>
             </Pressable>
@@ -576,7 +561,8 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
           {p.onPrimary && p.primaryLabel ? (
             <Pressable
               onPress={p.onPrimary}
-              className={`flex-1 h-12 items-center justify-center rounded-2xl shadow-md ${
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              className={`flex-1 h-12 items-center justify-center rounded-2xl shadow-md active:opacity-80 ${
                 isInTransit
                   ? 'bg-emerald-600 active:bg-emerald-700 shadow-emerald-600/30'
                   : isPickup
@@ -591,7 +577,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
           ) : null}
         </View>
       </View>
-    </Pressable>
+    </View>
   );
 }
 

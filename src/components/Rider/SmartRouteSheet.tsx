@@ -10,7 +10,7 @@ import { SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from '../../utils/storeGe
 interface SmartRouteSheetProps {
   myTasks: OpsTask[];
   myDeliveries: DeliveryTask[];
-  orders: FeedOrder[];
+  orders?: FeedOrder[];
   onSelectTask?: (stop: SmartRouteStop) => void;
 }
 

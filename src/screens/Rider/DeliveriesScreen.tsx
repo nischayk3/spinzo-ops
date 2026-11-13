@@ -1,14 +1,13 @@
 import React, { useEffect, useState, useMemo } from 'react';
-import { View, Text, FlatList, ActivityIndicator, Alert, TouchableOpacity } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator, Alert, TouchableOpacity, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import { Package, Bike, ChevronRight } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsStaffStore, DeliveryTask } from '../../store/opsStaffStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
-import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { isPending } from '../../utils/opsTasks';
-import { timeAgo, orderTotal, FeedOrder, isExpressOrder } from '../../utils/orderFeed';
+import { timeAgo, isExpressOrder } from '../../utils/orderFeed';
 import { DeliveryVerification } from '../../components/DeliveryVerification';
 import { QRScanner } from '../../components/QRScanner';
 import { RiderTaskCard } from '../../components/Rider/RiderTaskCard';
@@ -31,7 +30,6 @@ export function DeliveriesScreen() {
   const user = useAuthStore(state => state.user);
   const activeRole = useAuthStore(state => state.activeRole);
   const { myDeliveries, myTasks, isLoading, initialize } = useOpsStaffStore();
-  const orders = useOrderFeedStore(state => state.orders);
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [showPickupScanner, setShowPickupScanner] = useState<string | null>(null);
@@ -39,7 +37,6 @@ export function DeliveriesScreen() {
   useEffect(() => {
     if (user?.id) {
       initialize(user.id);
-      useOrderFeedStore.getState().initialize();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
@@ -49,9 +46,8 @@ export function DeliveriesScreen() {
     return buildSmartRoute({
       myTasks,
       myDeliveries,
-      orders,
     });
-  }, [myTasks, myDeliveries, orders]);
+  }, [myTasks, myDeliveries]);
 
   const stopMap = useMemo(() => {
     const map = new Map<string, SmartRouteStop>();
@@ -64,29 +60,14 @@ export function DeliveriesScreen() {
 
   // Count live pickups to show quick switch banner if needed
   const livePickupsCount = useMemo(() => {
-    return myTasks.filter(t => {
-      if (!isPending(t)) return false;
-      const order = orders.find(o => o.id === t.orderId || o.id === t.id);
-      if (orders.length > 0) {
-        if (!order) return false;
-        if (order.status === 'cancelled') return false;
-        if (order.status !== 'placed' && order.status !== 'confirmed' && order.status !== 'in_transit_to_store') return false;
-      }
-      return true;
-    }).length;
-  }, [myTasks, orders]);
+    return myTasks.filter(t => isPending(t)).length;
+  }, [myTasks]);
 
   const activeDeliveries = useMemo(() => {
     const todayStr = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
     const list = myDeliveries.filter(d => {
       if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
       if (d.deliveryDate && d.deliveryDate > todayStr && d.status !== 'out_for_delivery') return false;
-      const order = orders.find(o => o.id === d.orderId);
-      if (orders.length > 0) {
-        if (!order) return false;
-        if (order.status === 'cancelled' || order.status === 'delivered') return false;
-        if (order.status !== 'ready' && order.status !== 'out_for_delivery') return false;
-      }
       return true;
     });
 
@@ -98,10 +79,9 @@ export function DeliveriesScreen() {
       if (numA !== numB) return numA - numB;
       return toMs(b.assignedAt || b.createdAt) - toMs(a.assignedAt || a.createdAt);
     });
-  }, [myDeliveries, orders, stopMap]);
+  }, [myDeliveries, stopMap]);
 
   const activeTask = activeTaskId ? myDeliveries.find(d => d.id === activeTaskId) : null;
-  const orderFor = (t: DeliveryTask): FeedOrder | undefined => orders.find(o => o.id === t.orderId);
   const isOverdue = (t: DeliveryTask) =>
     t.status === 'out_for_delivery' && toMs(t.pickedUpAt || t.assignedAt) && Date.now() - toMs(t.pickedUpAt || t.assignedAt) > OVERDUE_MS;
 
@@ -182,7 +162,6 @@ export function DeliveriesScreen() {
       <SmartRouteSheet
         myTasks={myTasks}
         myDeliveries={myDeliveries}
-        orders={orders}
         onSelectTask={(stop) => {
           if (stop.type === 'pickup') {
             navigation.navigate('Pickups');
@@ -222,72 +201,64 @@ export function DeliveriesScreen() {
       ) : null}
 
       <FlatList
-        data={activeDeliveries.length ? [0] : []}
-        keyExtractor={() => 'list'}
-        renderItem={() => null}
+        data={activeDeliveries}
+        keyExtractor={(item) => item.id}
+        renderItem={({ item: t }) => {
+          const overdue = isOverdue(t);
+          const stop = stopMap.get(t.orderId || t.id);
+          const rawAddr = t.deliveryAddress;
+          const locality = stop?.locality || extractLocality(rawAddr);
+          const total = typeof t.totalAmount === 'number' ? t.totalAmount : 0;
+          const isPaid = (t.paymentStatus || "").toLowerCase() === "paid";
+          const unpaidAmt = total > 0 && !isPaid ? total : undefined;
+
+          return (
+            <RiderTaskCard
+              key={t.id}
+              type="delivery"
+              orderNumber={safeShortId(t.orderId)}
+              customerName={t.customerName}
+              customerPhone={t.customerPhone}
+              status={t.status}
+              createdAt={t.createdAt}
+              items={t.items}
+              totalAmount={total}
+              paymentStatus={t.paymentStatus || undefined}
+              deliveryAddress={t.deliveryAddress}
+              deliveryDate={t.deliveryDate}
+              deliveryTime={t.deliveryTime}
+              tokenNumber={t.tokenNumber}
+              tokens={t.tokens}
+              bundleCount={t.bundleCount}
+              stopNumber={stop?.stopNumber}
+              locality={locality}
+              loadUnits={stop?.loadUnits}
+              isExpress={Boolean(t.isExpress || isExpressOrder(t))}
+              isOverdue={Boolean(overdue)}
+              unpaidAmount={unpaidAmt}
+              onPrimary={() => {
+                if (t.status === "assigned") {
+                  setShowPickupScanner(t.id);
+                } else {
+                  setActiveTaskId(t.id);
+                }
+              }}
+              primaryLabel={t.status === 'assigned' ? '🏬 Scan Store Handover' : '🔐 Verify Delivery OTP (4-Digit)'}
+            />
+          );
+        }}
         className="flex-1 px-4"
         contentContainerStyle={{ paddingBottom: 28 }}
+        initialNumToRender={4}
+        maxToRenderPerBatch={4}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === 'android'}
         ListEmptyComponent={
           <View className="items-center justify-center mt-20">
             <Package size={36} color="#64748B" />
             <Text className="text-textSecondary text-lg font-bold mt-3">No deliveries assigned yet</Text>
             <Text className="text-textMuted text-center mt-2">Assigned deliveries appear here instantly.</Text>
           </View>
-        }
-        ListHeaderComponent={
-          <>
-            {activeDeliveries.map(t => {
-              const order = orderFor(t);
-              const overdue = isOverdue(t);
-              const stop = stopMap.get(t.orderId || t.id);
-              const rawAddr = t.deliveryAddress || (order?.address?.formattedAddress || (typeof order?.address === 'string' ? order.address : undefined));
-              const locality = stop?.locality || extractLocality(rawAddr);
-              const total = order ? orderTotal(order) : (t.totalAmount || 0);
-              const isPaid = (order?.paymentStatus || "").toLowerCase() === "paid";
-              const isCredit = order?.paymentMode === "credit";
-              const unpaidAmt = total > 0 && !isPaid ? total : undefined;
-
-              return (
-                <RiderTaskCard
-                  key={t.id}
-                  type="delivery"
-                  orderNumber={safeShortId(t.orderId)}
-                  customerName={t.customerName || order?.customerName}
-                  customerPhone={t.customerPhone || order?.customerPhone}
-                  status={t.status}
-                  createdAt={t.createdAt || order?.createdAt}
-                  items={order?.items || t.items}
-                  totalAmount={order ? orderTotal(order) : t.totalAmount}
-                  paymentStatus={order?.paymentStatus}
-                  deliveryAddress={t.deliveryAddress}
-                  deliveryDate={t.deliveryDate}
-                  deliveryTime={t.deliveryTime}
-                  notes={order?.notes}
-                  tokenNumber={t.tokenNumber || order?.tokenNumber}
-                  tokens={t.tokens || order?.tokens}
-                  lat={order?.latitude}
-                  lng={order?.longitude}
-                  bundleCount={t.bundleCount}
-                  stopNumber={stop?.stopNumber}
-                  locality={locality}
-                  loadUnits={stop?.loadUnits}
-                  isUrgent={Boolean(order?.isUrgent || (t as any).isUrgent)}
-                  isExpress={Boolean(t.isExpress || isExpressOrder(order) || isExpressOrder(t))}
-                  pickupNote={order?.pickupNote || (t as any).pickupNote}
-                  isOverdue={Boolean(overdue)}
-                  unpaidAmount={unpaidAmt}
-                  onPrimary={() => {
-                    if (t.status === "assigned") {
-                      setShowPickupScanner(t.id);
-                    } else {
-                      setActiveTaskId(t.id);
-                    }
-                  }}
-                  primaryLabel={t.status === 'assigned' ? '🏬 Scan Store Handover' : '🔐 Verify Delivery OTP (4-Digit)'}
-                />
-              );
-            })}
-          </>
         }
       />
 
@@ -298,10 +269,10 @@ export function DeliveriesScreen() {
         expectedBundles={activeTask?.bundleCount || 1}
         expectedLabels={activeTask?.bundleLabels || []}
         onVerifyDelivery={handleVerifyDelivery}
-        totalAmount={activeTask ? (orderFor(activeTask) ? orderTotal(orderFor(activeTask)!) : (activeTask.totalAmount || 0)) : 0}
-        paymentStatus={activeTask ? orderFor(activeTask)?.paymentStatus : undefined}
-        paymentMode={activeTask ? orderFor(activeTask)?.paymentMode : undefined}
-        customerName={activeTask?.customerName || (activeTask ? orderFor(activeTask)?.customerName : undefined)}
+        totalAmount={activeTask?.totalAmount || 0}
+        paymentStatus={activeTask?.paymentStatus || undefined}
+        paymentMode={activeTask?.paymentMode || undefined}
+        customerName={activeTask?.customerName || undefined}
         isSupervisor={activeRole === 'supervisor' || activeRole === 'admin'}
       />
 

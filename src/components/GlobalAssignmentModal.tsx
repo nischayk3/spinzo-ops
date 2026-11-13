@@ -2,10 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
 import { BellRing, MapPin, Zap, Clock, X } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
-import { useOrderFeedStore } from '../store/orderFeedStore';
 import { acceptTask } from '../utils/opsPickup';
 import { isPending, pickupLabel, taskAlertKey } from '../utils/opsTasks';
-import { slotLabel } from '../utils/orderFeed';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
@@ -23,7 +21,6 @@ const safeAddress = (addr: any): string => {
 
 export function GlobalAssignmentModal() {
   const { staffDoc, myTasks, myDeliveries } = useOpsStaffStore();
-  const orders = useOrderFeedStore(state => state.orders);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [locallyAcceptedIds, setLocallyAcceptedIds] = useState<Set<string>>(new Set());
 
@@ -34,14 +31,6 @@ export function GlobalAssignmentModal() {
     staffDoc?.attendanceStatus === 'short_break'
   );
 
-  // Only alert for pickup tasks whose ORDER is still awaiting pickup
-  const isOrderAwaitingPickup = (orderId?: string) => {
-    if (!orderId) return true;
-    const order = orders.find(o => o.id === orderId);
-    if (!order) return true;
-    return order.status === 'placed' || order.status === 'confirmed' || order.status === 'in_transit_to_store';
-  };
-
   const unacceptedPickup = isOffShift
     ? undefined
     : myTasks.find(t => {
@@ -51,8 +40,7 @@ export function GlobalAssignmentModal() {
         return (
           (t.status === 'pending' || t.status === 'assigned') &&
           !t.acceptedAt &&
-          !locallyAcceptedIds.has(key) &&
-          isOrderAwaitingPickup(t.orderId)
+          !locallyAcceptedIds.has(key)
         );
       });
 
@@ -75,14 +63,11 @@ export function GlobalAssignmentModal() {
   const activeTaskKey = activeTask
     ? taskAlertKey(activeTask, isDelivery ? 'delivery' : 'pickup')
     : '';
-  const matchedOrder = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
-  const isInstant = !isDelivery && Boolean(
-    (activeTask as any)?.pickupSlot?.isInstant || matchedOrder?.pickupDetails?.isInstant
-  );
+  const isInstant = !isDelivery && Boolean((activeTask as any)?.pickupSlot?.isInstant);
   const deliverySlotText = isDelivery && activeTask
     ? [
-        (activeTask as any).deliveryDate || (matchedOrder as any)?.deliveryDate,
-        (activeTask as any).deliveryTime || (matchedOrder as any)?.deliveryTime,
+        (activeTask as any).deliveryDate,
+        (activeTask as any).deliveryTime,
       ]
         .filter(Boolean)
         .join(' • ')
@@ -90,7 +75,7 @@ export function GlobalAssignmentModal() {
   const slotText = activeTask
     ? isDelivery
       ? deliverySlotText
-      : (matchedOrder ? slotLabel(matchedOrder) : pickupLabel(activeTask as any))
+      : pickupLabel(activeTask as any)
     : '';
 
   const rawAddress = activeTask
@@ -117,7 +102,7 @@ export function GlobalAssignmentModal() {
           SpinzoOverlay.showOverlay({
             orderId,
             taskType: isDelivery ? 'delivery' : (isInstant ? 'instant_pickup' : 'pickup'),
-            customerName: (activeTask as any)?.customerName || matchedOrder?.customerName || '',
+            customerName: (activeTask as any)?.customerName || 'Customer',
             address,
             slot: slotText,
             isInstant: isInstant ? 'true' : 'false',

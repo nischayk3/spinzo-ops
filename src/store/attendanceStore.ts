@@ -48,7 +48,7 @@ interface AttendanceState {
   shortBreakOverdue: boolean;
   shortBreakCount: number;
 
-  initializeListener: () => void;
+  initializeListener: (force?: boolean) => void;
   clockIn: (storeId: string) => Promise<void>;
   lunchOut: () => Promise<void>;
   lunchIn: () => Promise<void>;
@@ -61,6 +61,7 @@ interface AttendanceState {
 let unsubShift: Unsubscribe | null = null;
 let lunchTicker: NodeJS.Timeout | null = null;
 let breakTicker: NodeJS.Timeout | null = null;
+let activeAttendanceKey: string | null = null;
 
 const getTodayStr = () => {
   const d = new Date();
@@ -77,18 +78,27 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
   shortBreakOverdue: false,
   shortBreakCount: 0,
 
-  initializeListener: () => {
-    unsubShift?.();
-    if (lunchTicker) clearInterval(lunchTicker);
-    if (breakTicker) clearInterval(breakTicker);
-
+  initializeListener: (force?: boolean) => {
     const user = useAuthStore.getState().user;
     if (!user) {
+      unsubShift?.();
+      unsubShift = null;
+      activeAttendanceKey = null;
+      if (lunchTicker) clearInterval(lunchTicker);
+      if (breakTicker) clearInterval(breakTicker);
       set({ currentShift: null, status: 'off' });
       return;
     }
 
     const today = getTodayStr();
+    const key = `${user.id}_${today}`;
+    if (activeAttendanceKey === key && unsubShift && !force) return;
+
+    unsubShift?.();
+    activeAttendanceKey = key;
+    if (lunchTicker) clearInterval(lunchTicker);
+    if (breakTicker) clearInterval(breakTicker);
+
     const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, today);
 
     unsubShift = onSnapshot(shiftRef, (snap) => {

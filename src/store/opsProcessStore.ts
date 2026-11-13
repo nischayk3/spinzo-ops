@@ -23,7 +23,7 @@ interface OpsProcessState {
   myProcesses: OpsProcess[];
   isLoading: boolean;
   error: string | null;
-  initialize: (uid: string) => void;
+  initialize: (uid: string, force?: boolean) => void;
   claim: (orderId: string, tokenNumber?: string, userId?: string, vendorId?: string, helperId?: string) => Promise<OpsProcessingResult>;
   acceptStep: (orderId: string, processId?: string, userId?: string, vendorId?: string) => Promise<OpsProcessingResult>;
   startStep: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
@@ -59,6 +59,7 @@ interface OpsProcessState {
 }
 
 let unsub: (() => void) | null = null;
+let activeUid: string | null = null;
 
 const callOps = () =>
   httpsCallable<{ orderId: string; processId?: string; action: string; garmentCount?: number; qr?: string; seq?: number; qualityMedia?: any; count?: number; garments?: any; userId?: string; vendorId?: string; tokenNumber?: string }, OpsProcessingResult>(
@@ -81,8 +82,10 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   isLoading: false,
   error: null,
 
-  initialize: (uid) => {
+  initialize: (uid, force) => {
+    if (unsub && activeUid === uid && !force) return;
     unsub?.();
+    activeUid = uid;
     set({ isLoading: true });
     unsub = onSnapshot(
       collection(db, 'ops_process'),
@@ -405,6 +408,7 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   reset: () => {
     unsub?.();
     unsub = null;
+    activeUid = null;
     set({ processes: [], myProcesses: [], isLoading: false, error: null });
   },
 }));

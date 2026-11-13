@@ -39,6 +39,13 @@ export function FloorBoardScreen() {
   const { isDesktop, isTablet, maxContainerStyle } = useResponsive();
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery), 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
   const [activeTab, setActiveTab] = useState('All');
   const [urgentOnly, setUrgentOnly] = useState(false);
 
@@ -117,7 +124,7 @@ export function FloorBoardScreen() {
     let result = orders;
 
     // Exclude cancelled. In All view, include active orders plus recent delivered orders from today
-    if (!searchQuery.trim() && activeTab !== 'Delivered' && activeTab !== 'Cancelled') {
+    if (!debouncedSearch.trim() && activeTab !== 'Delivered' && activeTab !== 'Cancelled') {
       result = result.filter(o => {
         if (o.status === 'cancelled') return false;
         if (o.status === 'delivered') {
@@ -133,8 +140,8 @@ export function FloorBoardScreen() {
     }
 
     // Apply Search
-    if (searchQuery.trim()) {
-      result = result.filter(o => matchOrderSearch(o, searchQuery));
+    if (debouncedSearch.trim()) {
+      result = result.filter(o => matchOrderSearch(o, debouncedSearch));
     }
 
     // Apply Tab Filter
@@ -172,7 +179,7 @@ export function FloorBoardScreen() {
     }
 
     return result;
-  }, [orders, searchQuery, activeTab, urgentOnly]);
+  }, [orders, debouncedSearch, activeTab, urgentOnly]);
 
   if (isLoading && orders.length === 0) {
     return (

@@ -11,7 +11,7 @@ interface OrderFeedState {
   orders: FeedOrder[];
   isLoading: boolean;
   error: string | null;
-  initialize: () => void;
+  initialize: (force?: boolean) => void;
   reset: () => void;
 }
 
@@ -103,7 +103,8 @@ export const useOrderFeedStore = create<OrderFeedState>((set) => ({
   isLoading: true,
   error: null,
 
-  initialize: () => {
+  initialize: (force?: boolean) => {
+    if (unsubscribe && !force) return;
     if (unsubscribe) unsubscribe();
 
     set({ isLoading: true, error: null });

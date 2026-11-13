@@ -433,12 +433,11 @@ function SupervisorFeed() {
             <Text className="text-gray-900 font-bold text-base mb-0.5">{order?.customerName || 'Unknown Customer'}</Text>
             {!!order?.customerPhone && (
               <TouchableOpacity
-                onPress={(e) => {
-                  e?.stopPropagation?.();
+                onPress={() => {
                   Linking.openURL(`tel:${order.customerPhone}`);
                 }}
                 className="flex-row items-center self-start py-0.5"
-                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
                 <Phone size={12} color="#64748B" className="mr-1" />
                 <Text className="text-gray-500 text-xs">{order.customerPhone}</Text>
@@ -467,8 +466,7 @@ function SupervisorFeed() {
               {curStage?.assignee ? (
                 <TouchableOpacity
                   disabled={role !== 'supervisor' && role !== 'admin'}
-                  onPress={(e) => {
-                    e?.stopPropagation?.();
+                  onPress={() => {
                     if (p) {
                       setAssignModalData({
                         visible: true,
@@ -479,6 +477,7 @@ function SupervisorFeed() {
                       });
                     }
                   }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   className="flex-row items-center bg-[#994bff]/10 px-2.5 py-1 rounded-full border border-[#994bff]/25 active:opacity-70"
                 >
                   <User size={12} color="#994bff" className="mr-1.5" />
@@ -490,8 +489,7 @@ function SupervisorFeed() {
               ) : p ? (
                 <TouchableOpacity
                   disabled={role !== 'supervisor' && role !== 'admin'}
-                  onPress={(e) => {
-                    e?.stopPropagation?.();
+                  onPress={() => {
                     setAssignModalData({
                       visible: true,
                       processId: p.id,
@@ -500,6 +498,7 @@ function SupervisorFeed() {
                       userId: order?.userId || '',
                     });
                   }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   className="flex-row items-center bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200 active:opacity-70"
                 >
                   <Clock size={12} color="#64748B" className="mr-1.5" />
@@ -510,8 +509,7 @@ function SupervisorFeed() {
               ) : (
                 <TouchableOpacity
                   disabled={role !== 'supervisor' && role !== 'admin'}
-                  onPress={(e) => {
-                    e?.stopPropagation?.();
+                  onPress={() => {
                     setAssignModalData({
                       visible: true,
                       processId: item.orderId,
@@ -520,6 +518,7 @@ function SupervisorFeed() {
                       userId: order?.userId || '',
                     });
                   }}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full border border-purple-200 active:opacity-70"
                 >
                   <AlertTriangle size={12} color="#994bff" className="mr-1.5" />
@@ -582,11 +581,9 @@ function SupervisorFeed() {
           {/* Actions / Timers */}
           {isCycleDone ? (
             <TouchableOpacity
-              onPress={(e) => {
-                e?.stopPropagation?.();
-                handleItemPress(item);
-              }}
-              className="bg-emerald-500 px-3.5 py-2 rounded-xl flex-row items-center gap-1.5 active:scale-95 shadow-sm"
+              onPress={() => handleItemPress(item)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              className="bg-emerald-500 px-3.5 py-2 rounded-xl flex-row items-center gap-1.5 active:opacity-80 shadow-sm"
             >
               <Check size={14} color="#ffffff" />
               <Text className="text-white font-extrabold text-xs">Unload</Text>

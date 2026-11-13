@@ -29,7 +29,7 @@ const DEFAULTS: StoreResources = {
 interface StoreResourcesState {
   resources: StoreResources;
   isLoaded: boolean;
-  initialize: () => void;
+  initialize: (force?: boolean) => void;
   reset: () => void;
 }
 
@@ -39,7 +39,8 @@ export const useStoreResourcesStore = create<StoreResourcesState>((set) => ({
   resources: DEFAULTS,
   isLoaded: false,
 
-  initialize: () => {
+  initialize: (force?: boolean) => {
+    if (unsub && !force) return;
     unsub?.();
     const ref = doc(db, 'config', 'storeResources');
     unsub = onSnapshot(

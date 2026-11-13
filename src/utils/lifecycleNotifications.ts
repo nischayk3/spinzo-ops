@@ -14,13 +14,17 @@ const seenStates: Record<string, number> = {};
 const seenOrders = new Set<string>();
 const announcedMilestones = new Set<string>();
 const announcedHelperTasks = new Set<string>();
+const EMPTY_PROCESSES: any[] = [];
+const EMPTY_ORDERS: any[] = [];
 
 export function useLifecycleNotifications() {
-  const processes = useOpsProcessStore(s => s.processes);
-  const orders = useOrderFeedStore(s => s.orders);
-  const isOrdersLoading = useOrderFeedStore(s => s.isLoading);
   const activeRole = useAuthStore(s => s.activeRole);
   const staffDoc = useOpsStaffStore(s => s.staffDoc);
+  const isRider = (activeRole || staffDoc?.role) === 'rider';
+
+  const processes = useOpsProcessStore(s => (isRider ? EMPTY_PROCESSES : s.processes));
+  const orders = useOrderFeedStore(s => (isRider ? EMPTY_ORDERS : s.orders));
+  const isOrdersLoading = useOrderFeedStore(s => (isRider ? false : s.isLoading));
   const myUid = staffDoc?.uid;
   const isSupervisorOrAdmin = activeRole === 'supervisor' || activeRole === 'admin' || staffDoc?.role === 'supervisor' || staffDoc?.role === 'admin';
 

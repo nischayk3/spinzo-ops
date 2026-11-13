@@ -25,7 +25,7 @@ export interface StaffRoster {
 interface StaffRosterState {
   roster: StaffRoster;
   isLoading: boolean;
-  initialize: () => void;
+  initialize: (force?: boolean) => void;
   reset: () => void;
 }
 
@@ -37,7 +37,8 @@ export const useStaffRosterStore = create<StaffRosterState>((set) => ({
   roster: emptyRoster(),
   isLoading: true,
 
-  initialize: () => {
+  initialize: (force?: boolean) => {
+    if (unsub && !force) return;
     unsub?.();
     set({ isLoading: true });
     const q = query(collection(db, 'ops_staff'), where('onShift', '==', true));
