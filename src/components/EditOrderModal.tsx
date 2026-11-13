@@ -8,8 +8,52 @@ import { SHOE_EDIT_CATEGORIES, EXPRESS_ELIGIBLE_SERVICES, calculateItemPrice, ca
 interface EditOrderModalProps {
   visible: boolean;
   onClose: () => void;
-  order: any; // FeedOrder with items
+  order: any; // FeedOrder or OpsTask with items
 }
+
+interface CounterRowProps {
+  label: string;
+  value: string | number;
+  onDecrement: () => void;
+  onIncrement: () => void;
+  disableDecrement?: boolean;
+}
+
+const CounterRow = React.memo(function CounterRow({
+  label,
+  value,
+  onDecrement,
+  onIncrement,
+  disableDecrement,
+}: CounterRowProps) {
+  return (
+    <View>
+      <Text className="text-xs text-gray-500 font-medium mb-2">{label}</Text>
+      <View className="flex-row items-center gap-3">
+        <TouchableOpacity
+          onPress={onDecrement}
+          disabled={disableDecrement}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          activeOpacity={0.6}
+          className={`w-11 h-11 rounded-xl items-center justify-center ${
+            disableDecrement ? 'bg-gray-100 opacity-50' : 'bg-gray-200 active:bg-gray-300'
+          }`}
+        >
+          <Minus size={18} color={disableDecrement ? '#9ca3af' : '#1f2937'} />
+        </TouchableOpacity>
+        <Text className="text-lg font-bold text-gray-900 min-w-[48px] text-center">{value}</Text>
+        <TouchableOpacity
+          onPress={onIncrement}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          activeOpacity={0.6}
+          className="w-11 h-11 rounded-xl bg-gray-200 active:bg-gray-300 items-center justify-center"
+        >
+          <Plus size={18} color="#1f2937" />
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+});
 
 export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps) {
   const [items, setItems] = useState<any[]>([]);
@@ -39,7 +83,7 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
           isExpress: Boolean(orderIsExpress || it.isExpress),
           serviceId: sid,
           serviceType: it.serviceType || sid,
-          weight: it.weight ?? (it.unit === 'kg' && it.quantity ? it.quantity : ((isWF || isWI) ? 5 : undefined)),
+          weight: it.weight ?? (it.unit === 'kg' && it.quantity ? it.quantity : ((isWF || isWI || sid === 'premium_laundry') ? 5 : undefined)),
           ironingEnabled: isWF ? Boolean(it.ironingEnabled) : undefined,
           ironingCount: isWF && it.ironingEnabled ? (it.ironingCount || 0) : (isIroningOnly ? (it.ironingCount || it.clothesCount || it.quantity || 1) : 0),
           clothesCount: (isWF || isWI) ? undefined : (it.clothesCount || it.ironingCount || it.quantity || 1),
@@ -220,12 +264,12 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
     if (!order) return;
     setProcessing(true);
     try {
-      const rawOrderId = order.id || '';
+      const rawOrderId = order.orderId || order.id || '';
       const orderId = rawOrderId.includes('__') ? rawOrderId.split('__')[0] : rawOrderId;
       const callable = httpsCallable(functions, 'opsProcessing');
       const res: any = await callable({
         orderId,
-        userId: order.userId,
+        userId: order.userId || '',
         vendorId: order.vendorId || 'vendor_1',
         action: 'editOrder',
         items,
@@ -262,28 +306,6 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
   };
 
   if (!visible) return null;
-
-  const CounterRow = ({ label, value, onDecrement, onIncrement, disableDecrement }: any) => (
-    <View>
-      <Text className="text-xs text-gray-500 font-medium mb-2">{label}</Text>
-      <View className="flex-row items-center gap-3">
-        <TouchableOpacity
-          onPress={onDecrement}
-          disabled={disableDecrement}
-          className={`w-10 h-10 rounded-lg items-center justify-center ${disableDecrement ? 'bg-gray-100' : 'bg-gray-200'}`}
-        >
-          <Minus size={16} color={disableDecrement ? '#d1d5db' : '#1f2937'} />
-        </TouchableOpacity>
-        <Text className="text-lg font-bold text-gray-900 min-w-[40px] text-center">{value}</Text>
-        <TouchableOpacity
-          onPress={onIncrement}
-          className="w-10 h-10 rounded-lg bg-gray-200 items-center justify-center"
-        >
-          <Plus size={16} color="#1f2937" />
-        </TouchableOpacity>
-      </View>
-    </View>
-  );
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
@@ -504,19 +526,23 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
                             <TouchableOpacity
                               onPress={() => handleTierChange(index, 'medium', -1)}
                               disabled={bd.medium <= 0}
-                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.medium <= 0 ? 'bg-gray-100' : 'bg-gray-200'}`}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                              activeOpacity={0.6}
+                              className={`w-10 h-10 rounded-xl items-center justify-center ${bd.medium <= 0 ? 'bg-gray-100 opacity-50' : 'bg-gray-200 active:bg-gray-300'}`}
                             >
-                              <Minus size={14} color={bd.medium <= 0 ? '#d1d5db' : '#1f2937'} />
+                              <Minus size={16} color={bd.medium <= 0 ? '#9ca3af' : '#1f2937'} />
                             </TouchableOpacity>
-                            <Text className="text-base font-bold text-gray-900 min-w-[28px] text-center">
+                            <Text className="text-base font-bold text-gray-900 min-w-[32px] text-center">
                               {bd.medium}
                             </Text>
                             <TouchableOpacity
                               onPress={() => handleTierChange(index, 'medium', 1)}
                               disabled={bd.medium + bd.heavy >= bd.total}
-                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.medium + bd.heavy >= bd.total ? 'bg-gray-100' : 'bg-gray-200'}`}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                              activeOpacity={0.6}
+                              className={`w-10 h-10 rounded-xl items-center justify-center ${bd.medium + bd.heavy >= bd.total ? 'bg-gray-100 opacity-50' : 'bg-gray-200 active:bg-gray-300'}`}
                             >
-                              <Plus size={14} color={bd.medium + bd.heavy >= bd.total ? '#d1d5db' : '#1f2937'} />
+                              <Plus size={16} color={bd.medium + bd.heavy >= bd.total ? '#9ca3af' : '#1f2937'} />
                             </TouchableOpacity>
                           </View>
                         </View>
@@ -546,19 +572,23 @@ export function EditOrderModal({ visible, onClose, order }: EditOrderModalProps)
                             <TouchableOpacity
                               onPress={() => handleTierChange(index, 'heavy', -1)}
                               disabled={bd.heavy <= 0}
-                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.heavy <= 0 ? 'bg-gray-100' : 'bg-gray-200'}`}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                              activeOpacity={0.6}
+                              className={`w-10 h-10 rounded-xl items-center justify-center ${bd.heavy <= 0 ? 'bg-gray-100 opacity-50' : 'bg-gray-200 active:bg-gray-300'}`}
                             >
-                              <Minus size={14} color={bd.heavy <= 0 ? '#d1d5db' : '#1f2937'} />
+                              <Minus size={16} color={bd.heavy <= 0 ? '#9ca3af' : '#1f2937'} />
                             </TouchableOpacity>
-                            <Text className="text-base font-bold text-gray-900 min-w-[28px] text-center">
+                            <Text className="text-base font-bold text-gray-900 min-w-[32px] text-center">
                               {bd.heavy}
                             </Text>
                             <TouchableOpacity
                               onPress={() => handleTierChange(index, 'heavy', 1)}
                               disabled={bd.medium + bd.heavy >= bd.total}
-                              className={`w-8 h-8 rounded-lg items-center justify-center ${bd.medium + bd.heavy >= bd.total ? 'bg-gray-100' : 'bg-gray-200'}`}
+                              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                              activeOpacity={0.6}
+                              className={`w-10 h-10 rounded-xl items-center justify-center ${bd.medium + bd.heavy >= bd.total ? 'bg-gray-100 opacity-50' : 'bg-gray-200 active:bg-gray-300'}`}
                             >
-                              <Plus size={14} color={bd.medium + bd.heavy >= bd.total ? '#d1d5db' : '#1f2937'} />
+                              <Plus size={16} color={bd.medium + bd.heavy >= bd.total ? '#9ca3af' : '#1f2937'} />
                             </TouchableOpacity>
                           </View>
                         </View>
