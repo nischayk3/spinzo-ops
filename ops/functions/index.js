@@ -33,6 +33,45 @@ function pickupAddressFromOrder(order) {
   return a.formattedAddress || a.address || a.fullAddress || a.line1 || [a.houseNumber, a.building, a.street, a.area, a.city].filter(Boolean).join(', ') || '';
 }
 
+function toValidCoordNum(val) {
+  if (typeof val === 'number' && Number.isFinite(val) && Math.abs(val) > 0.0001) return val;
+  if (typeof val === 'string' && val.trim() !== '') {
+    const n = Number(val);
+    if (Number.isFinite(n) && Math.abs(n) > 0.0001) return n;
+  }
+  return null;
+}
+
+function extractLatitudeFromOrder(order) {
+  if (!order) return null;
+  const a = order.address && typeof order.address === 'object' ? order.address : null;
+  const loc = order.location && typeof order.location === 'object' ? order.location : null;
+  const candidates = [order.latitude, order.lat, a && a.latitude, a && a.lat, loc && loc.latitude, loc && loc.lat];
+  for (const c of candidates) {
+    const n = toValidCoordNum(c);
+    if (n !== null && n >= -90 && n <= 90) return n;
+  }
+  return null;
+}
+
+function extractLongitudeFromOrder(order) {
+  if (!order) return null;
+  const a = order.address && typeof order.address === 'object' ? order.address : null;
+  const loc = order.location && typeof order.location === 'object' ? order.location : null;
+  const candidates = [order.longitude, order.lng, a && a.longitude, a && a.lng, loc && loc.longitude, loc && loc.lng];
+  for (const c of candidates) {
+    const n = toValidCoordNum(c);
+    if (n !== null && n >= -180 && n <= 180) return n;
+  }
+  return null;
+}
+
+function nonEmptyItems(primary, fallback) {
+  if (Array.isArray(primary) && primary.length > 0) return primary;
+  if (Array.isArray(fallback) && fallback.length > 0) return fallback;
+  return [];
+}
+
 function isOrderExpress(order) {
   if (!order) return false;
   if (order.isExpress === true || order.turnaroundMode === 'express_6_8h') return true;
@@ -218,13 +257,14 @@ function taskPayload(orderId, order, assignee, userId, vendorId) {
     tokenNumber: (order && order.tokenNumber) || null,
     tokens: (order && order.tokens) || null,
     pickupOTP: (order && order.pickupOTP) || null,
-    items: (order && order.items) || [],
+    items: (order && Array.isArray(order.items) && order.items) || [],
     totalAmount: total,
+    billDetails: (order && order.billDetails) || null,
     paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
     paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
     notes: (order && (order.notes || order.instruction)) || '',
-    latitude: (order && (order.latitude || (order.address && order.address.latitude))) || null,
-    longitude: (order && (order.longitude || (order.address && order.address.longitude))) || null,
+    latitude: extractLatitudeFromOrder(order),
+    longitude: extractLongitudeFromOrder(order),
     assignedAt: TS(),
     createdAt: TS(),
   };
@@ -260,13 +300,14 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
         tokenNumber: (order && order.tokenNumber) || null,
         tokens: (order && order.tokens) || null,
         pickupOTP: (order && order.pickupOTP) || null,
-        items: (order && order.items) || [],
+        items: (order && Array.isArray(order.items) && order.items) || [],
         totalAmount: total,
+        billDetails: (order && order.billDetails) || null,
         paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
         paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
         notes: (order && (order.notes || order.instruction)) || '',
-        latitude: (order && (order.latitude || (order.address && order.address.latitude))) || null,
-        longitude: (order && (order.longitude || (order.address && order.address.longitude))) || null,
+        latitude: extractLatitudeFromOrder(order),
+        longitude: extractLongitudeFromOrder(order),
         createdAt: TS(),
       };
 
@@ -1816,11 +1857,18 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         assignedAt: null,
         acceptedAt: admin.firestore.FieldValue.delete(),
         deliveryAddress,
+        latitude: extractLatitudeFromOrder(after) || (existingTask && extractLatitudeFromOrder(existingTask)) || null,
+        longitude: extractLongitudeFromOrder(after) || (existingTask && extractLongitudeFromOrder(existingTask)) || null,
         deliveryDate: null,
         deliveryTime: null,
         deliveryOTP: after.deliveryOTP || null,
         customerName: after.customerName || after.userName || '',
         customerPhone: after.customerPhone || after.userPhone || '',
+        items: nonEmptyItems(after.items, existingTask && existingTask.items),
+        totalAmount: (after.totalAmount || (after.billDetails && after.billDetails.total) || after.cartTotal || (existingTask && existingTask.totalAmount)) || 0,
+        billDetails: after.billDetails || (existingTask && existingTask.billDetails) || null,
+        paymentStatus: after.paymentStatus || after.paymentMethod || 'pending',
+        paymentMode: after.paymentMode || after.paymentMethod || '',
         bundleCount,
         bundleLabels,
         tokenNumber: after.tokenNumber || null,
@@ -1847,11 +1895,18 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         assignedAt: null,
         acceptedAt: admin.firestore.FieldValue.delete(),
         deliveryAddress,
+        latitude: extractLatitudeFromOrder(after) || (existingTask && extractLatitudeFromOrder(existingTask)) || null,
+        longitude: extractLongitudeFromOrder(after) || (existingTask && extractLongitudeFromOrder(existingTask)) || null,
         deliveryDate,
         deliveryTime,
         deliveryOTP: after.deliveryOTP || null,
         customerName: after.customerName || after.userName || '',
         customerPhone: after.customerPhone || after.userPhone || '',
+        items: nonEmptyItems(after.items, existingTask && existingTask.items),
+        totalAmount: (after.totalAmount || (after.billDetails && after.billDetails.total) || after.cartTotal || (existingTask && existingTask.totalAmount)) || 0,
+        billDetails: after.billDetails || (existingTask && existingTask.billDetails) || null,
+        paymentStatus: after.paymentStatus || after.paymentMethod || 'pending',
+        paymentMode: after.paymentMode || after.paymentMethod || '',
         bundleCount,
         bundleLabels,
         tokenNumber: after.tokenNumber || null,
@@ -1889,11 +1944,18 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       assignedAt: riderUid ? (isNewlyAssignedRider ? TS() : (existingTask.assignedAt || TS())) : null,
       ...(isNewlyAssignedRider || !riderUid ? { acceptedAt: admin.firestore.FieldValue.delete() } : {}),
       deliveryAddress,
+      latitude: extractLatitudeFromOrder(after) || (existingTask && extractLatitudeFromOrder(existingTask)) || null,
+      longitude: extractLongitudeFromOrder(after) || (existingTask && extractLongitudeFromOrder(existingTask)) || null,
       deliveryDate,
       deliveryTime,
       deliveryOTP: after.deliveryOTP || null,
       customerName: after.customerName || after.userName || '',
       customerPhone: after.customerPhone || after.userPhone || '',
+      items: nonEmptyItems(after.items, existingTask && existingTask.items),
+      totalAmount: (after.totalAmount || (after.billDetails && after.billDetails.total) || after.cartTotal || (existingTask && existingTask.totalAmount)) || 0,
+      billDetails: after.billDetails || (existingTask && existingTask.billDetails) || null,
+      paymentStatus: after.paymentStatus || after.paymentMethod || 'pending',
+      paymentMode: after.paymentMode || after.paymentMethod || '',
       bundleCount,
       bundleLabels,
       tokenNumber: after.tokenNumber || null,
@@ -3388,7 +3450,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         // Do not change order status yet, keep it 'ready' until pickup
         // Update delivery task to 'assigned'
         const isExpress = isOrderExpress(order);
+        const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
         if (delTaskSnap.exists) {
+          const existingDel = delTaskSnap.data() || {};
           tx.update(delTaskRef, {
             assignee,
             status: 'assigned',
@@ -3396,6 +3460,13 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             assignedAt: now,
             deliveryDate,
             deliveryTime,
+            latitude: extractLatitudeFromOrder(order) || extractLatitudeFromOrder(existingDel) || null,
+            longitude: extractLongitudeFromOrder(order) || extractLongitudeFromOrder(existingDel) || null,
+            items: nonEmptyItems(order.items, existingDel.items),
+            totalAmount: total || existingDel.totalAmount || 0,
+            billDetails: order.billDetails || existingDel.billDetails || null,
+            paymentStatus: order.paymentStatus || order.paymentMethod || existingDel.paymentStatus || 'pending',
+            paymentMode: order.paymentMode || order.paymentMethod || existingDel.paymentMode || '',
           });
         } else {
           tx.set(delTaskRef, {
@@ -3407,11 +3478,18 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             isExpress,
             assignee,
             deliveryAddress: pickupAddressFromOrder(order),
+            latitude: extractLatitudeFromOrder(order),
+            longitude: extractLongitudeFromOrder(order),
             deliveryDate,
             deliveryTime,
             deliveryOTP: order.deliveryOTP || null,
             customerName: order.customerName || order.userName || '',
             customerPhone: order.customerPhone || order.userPhone || '',
+            items: nonEmptyItems(order.items, []),
+            totalAmount: total,
+            billDetails: order.billDetails || null,
+            paymentStatus: order.paymentStatus || order.paymentMethod || 'pending',
+            paymentMode: order.paymentMode || order.paymentMethod || '',
             assignedAt: now,
             createdAt: now,
           });
@@ -3510,6 +3588,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           const isExpress = isOrderExpress(order);
 
           if (delTaskSnap.exists) {
+            const existingDel = delTaskSnap.data() || {};
             tx.update(delTaskRef, {
               assignee: riderId,
               assignedBy: auth.uid,
@@ -3519,25 +3598,35 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               deliveryDate,
               deliveryTime,
               acceptedAt: admin.firestore.FieldValue.delete(),
-              customerName: order.customerName || order.userName || delTaskSnap.data().customerName || '',
-              customerPhone: order.customerPhone || order.userPhone || delTaskSnap.data().customerPhone || '',
-              deliveryAddress: pickupAddressFromOrder(order) || delTaskSnap.data().deliveryAddress || '',
-              totalAmount: total || delTaskSnap.data().totalAmount || 0,
-              items: (order && order.items) || delTaskSnap.data().items || [],
-              tokenNumber: order.tokenNumber || delTaskSnap.data().tokenNumber || null,
-              tokens: order.tokens || delTaskSnap.data().tokens || null,
+              customerName: order.customerName || order.userName || existingDel.customerName || '',
+              customerPhone: order.customerPhone || order.userPhone || existingDel.customerPhone || '',
+              deliveryAddress: pickupAddressFromOrder(order) || existingDel.deliveryAddress || '',
+              latitude: extractLatitudeFromOrder(order) || extractLatitudeFromOrder(existingDel) || null,
+              longitude: extractLongitudeFromOrder(order) || extractLongitudeFromOrder(existingDel) || null,
+              totalAmount: total || existingDel.totalAmount || 0,
+              billDetails: (order && order.billDetails) || existingDel.billDetails || null,
+              items: nonEmptyItems(order && order.items, existingDel.items),
+              paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || existingDel.paymentStatus || 'pending',
+              paymentMode: (order && (order.paymentMode || order.paymentMethod)) || existingDel.paymentMode || '',
+              tokenNumber: order.tokenNumber || existingDel.tokenNumber || null,
+              tokens: order.tokens || existingDel.tokens || null,
             });
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
               isExpress,
               assignee: riderId, assignedBy: auth.uid, deliveryAddress: pickupAddressFromOrder(order),
+              latitude: extractLatitudeFromOrder(order),
+              longitude: extractLongitudeFromOrder(order),
               deliveryDate, deliveryTime,
               deliveryOTP: order.deliveryOTP || null,
               customerName: order.customerName || order.userName || '',
               customerPhone: order.customerPhone || order.userPhone || '',
               totalAmount: total,
-              items: (order && order.items) || [],
+              billDetails: (order && order.billDetails) || null,
+              items: nonEmptyItems(order && order.items, []),
+              paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
+              paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
               tokenNumber: order.tokenNumber || null,
               tokens: order.tokens || null,
               assignedAt: now, createdAt: now,
@@ -3580,8 +3669,11 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               customerPhone: qData.customerPhone || (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: qData.pickupAddress || pickupAddressFromOrder(order),
               pickupSlot: qData.pickupSlot || order.pickupDetails || null,
-              items: qData.items || (order && order.items) || [],
-              totalAmount: typeof qData.totalAmount === 'number' ? qData.totalAmount : total,
+              items: nonEmptyItems(qData.items, order && order.items),
+              totalAmount: (typeof qData.totalAmount === 'number' && qData.totalAmount > 0) ? qData.totalAmount : total,
+              billDetails: qData.billDetails || (order && order.billDetails) || null,
+              latitude: extractLatitudeFromOrder(qData) || extractLatitudeFromOrder(order) || null,
+              longitude: extractLongitudeFromOrder(qData) || extractLongitudeFromOrder(order) || null,
             });
             tx.delete(db.doc(`ops_queue/${orderId}`));
           } else {
@@ -3596,13 +3688,14 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               tokenNumber: order.tokenNumber || null,
               tokens: order.tokens || null,
               pickupOTP: order.pickupOTP || null,
-              items: (order && order.items) || [],
+              items: nonEmptyItems(order && order.items, []),
               totalAmount: total,
+              billDetails: (order && order.billDetails) || null,
               paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
               paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
               notes: (order && (order.notes || order.instruction)) || '',
-              latitude: (order && (order.latitude || (order.address && order.address.latitude))) || null,
-              longitude: (order && (order.longitude || (order.address && order.address.longitude))) || null,
+              latitude: extractLatitudeFromOrder(order),
+              longitude: extractLongitudeFromOrder(order),
               assignedAt: now, createdAt: now,
             });
           }
@@ -3618,16 +3711,25 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         tx.set(vendorRef, { riderId: admin.firestore.FieldValue.delete(), updatedAt: now }, { merge: true });
 
         // Move the pickup out of a rider's queue and park it for later assignment.
+        const prevTask = taskSnap.exists ? (taskSnap.data() || {}) : {};
         if (taskSnap.exists) {
           tx.delete(db.doc(`ops_tasks/${orderId}`));
         }
         if (!queueSnap.exists) {
           tx.set(db.doc(`ops_queue/${orderId}`), {
             orderId, userId, vendorId, status: 'pending',
-            pickupAddress: pickupAddressFromOrder(order),
-            pickupSlot: order.pickupDetails || null,
-            tokenNumber: order.tokenNumber || null,
-            pickupOTP: order.pickupOTP || null,
+            customerName: (order && (order.customerName || order.userName)) || prevTask.customerName || '',
+            customerPhone: (order && (order.customerPhone || order.userPhone)) || prevTask.customerPhone || '',
+            pickupAddress: pickupAddressFromOrder(order) || prevTask.pickupAddress || '',
+            pickupSlot: order.pickupDetails || prevTask.pickupSlot || null,
+            tokenNumber: order.tokenNumber || prevTask.tokenNumber || null,
+            tokens: order.tokens || prevTask.tokens || null,
+            pickupOTP: order.pickupOTP || prevTask.pickupOTP || null,
+            items: nonEmptyItems(order && order.items, prevTask.items),
+            totalAmount: (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || prevTask.totalAmount || 0,
+            billDetails: (order && order.billDetails) || prevTask.billDetails || null,
+            latitude: extractLatitudeFromOrder(order) || extractLatitudeFromOrder(prevTask) || null,
+            longitude: extractLongitudeFromOrder(order) || extractLongitudeFromOrder(prevTask) || null,
             createdAt: now,
           });
         }
@@ -3855,7 +3957,8 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
   let enrichedAfter = after;
 
   // Auto-heal missing customer details directly onto ops_tasks WITHOUT suppressing FCM:
-  if (!after.customerName || !after.customerPhone || !after.pickupAddress || !after.items) {
+  const hasItems = Array.isArray(after.items) && after.items.length > 0;
+  if (!after.customerName || !after.customerPhone || !after.pickupAddress || !hasItems || !after.latitude || !after.longitude || !after.totalAmount || !after.billDetails) {
     try {
       const orderId = event.params.orderId;
       let userId = after.userId;
@@ -3877,17 +3980,20 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
         if (!after.customerName) patch.customerName = order.customerName || order.userName || '';
         if (!after.customerPhone) patch.customerPhone = order.customerPhone || order.userPhone || '';
         if (!after.pickupAddress) patch.pickupAddress = pickupAddressFromOrder(order);
-        if (!after.items && order.items) patch.items = order.items;
-        if (typeof after.totalAmount !== 'number') patch.totalAmount = total;
+        if (!hasItems && Array.isArray(order.items) && order.items.length > 0) patch.items = order.items;
+        if ((!after.totalAmount || typeof after.totalAmount !== 'number') && total > 0) patch.totalAmount = total;
+        if (!after.billDetails && order.billDetails) patch.billDetails = order.billDetails;
         if (!after.paymentStatus) patch.paymentStatus = order.paymentStatus || order.paymentMethod || 'pending';
         if (!after.paymentMode) patch.paymentMode = order.paymentMode || order.paymentMethod || '';
         if (!after.notes && (order.notes || order.instruction)) patch.notes = order.notes || order.instruction || '';
         if (!after.tokens && order.tokens) patch.tokens = order.tokens;
-        if (!after.latitude && (order.latitude || (order.address && order.address.latitude))) {
-          patch.latitude = order.latitude || (order.address && order.address.latitude);
+        const lat = extractLatitudeFromOrder(order);
+        const lng = extractLongitudeFromOrder(order);
+        if (!after.latitude && lat !== null) {
+          patch.latitude = lat;
         }
-        if (!after.longitude && (order.longitude || (order.address && order.address.longitude))) {
-          patch.longitude = order.longitude || (order.address && order.address.longitude);
+        if (!after.longitude && lng !== null) {
+          patch.longitude = lng;
         }
         if (userId && !after.userId) patch.userId = userId;
 

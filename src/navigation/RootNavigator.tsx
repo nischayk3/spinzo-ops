@@ -57,11 +57,12 @@ const ComingSoonScreen = () => (
 
 const AppTabs = () => {
   const activeRole = useAuthStore(state => state.activeRole);
-  const myTasks = useOpsStaffStore(state => state.myTasks);
-  const myDeliveries = useOpsStaffStore(state => state.myDeliveries);
-
-  const pendingPickupsCount = myTasks.filter(t => t.status === 'pending' || t.status === 'assigned' || t.status === 'in_transit_to_store').length;
-  const activeDeliveriesCount = myDeliveries.filter(d => d.status === 'out_for_delivery' || d.status === 'assigned').length;
+  const pendingPickupsCount = useOpsStaffStore(
+    state => state.myTasks.filter(t => t.status === 'pending' || t.status === 'assigned' || t.status === 'in_transit_to_store').length
+  );
+  const activeDeliveriesCount = useOpsStaffStore(
+    state => state.myDeliveries.filter(d => d.status === 'out_for_delivery' || d.status === 'assigned').length
+  );
 
   return (
     <Tab.Navigator

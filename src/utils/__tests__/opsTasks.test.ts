@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { slotLabel } from '../orderFeed';
-import { parseOpsTask, isPending, shouldAnnounce, taskAlertKey, pickupLabel } from '../opsTasks';
+import {
+  parseOpsTask,
+  isPending,
+  shouldAnnounce,
+  taskAlertKey,
+  pickupLabel,
+  formatRiderDateLabel,
+  buildRiderSlotDisplay,
+} from '../opsTasks';
 
 describe('parseOpsTask', () => {
   it('maps id + fields onto an OpsTask', () => {
@@ -84,5 +92,83 @@ describe('pickupLabel', () => {
   });
   it('falls back to a dash when no slot', () => {
     expect(pickupLabel({} as any)).toBe('—');
+  });
+});
+
+describe('formatRiderDateLabel & buildRiderSlotDisplay', () => {
+  const fixedNow = new Date(2026, 10, 14, 12, 0, 0); // 14 Nov 2026
+
+  it('formats ISO date with Today / Tomorrow and short calendar date', () => {
+    expect(formatRiderDateLabel('2026-11-14', fixedNow)).toBe('Today, 14 Nov');
+    expect(formatRiderDateLabel('2026-11-15', fixedNow)).toBe('Tomorrow, 15 Nov');
+    expect(formatRiderDateLabel('2026-11-17', fixedNow)).toBe('Tue, 17 Nov');
+  });
+
+  it('shows date AND time window for instant pickups with scheduledDate & scheduledTime', () => {
+    const res = buildRiderSlotDisplay(
+      {
+        type: 'pickup',
+        pickupSlot: 'Instant • 13:00 - 14:00',
+        pickupDate: '2026-11-14',
+        pickupTime: '13:00 - 14:00',
+        isInstantPickup: true,
+        createdAt: fixedNow,
+      },
+      fixedNow
+    );
+    expect(res).toEqual({
+      isInstant: true,
+      label: '⚡ Instant',
+      text: 'Today, 14 Nov • 13:00 - 14:00',
+    });
+  });
+
+  it('falls back to createdAt date and rich time window when pickupTime is generic "instant"', () => {
+    const res = buildRiderSlotDisplay(
+      {
+        type: 'pickup',
+        pickupSlot: 'Instant • Within 30–45 mins (by 12:45 PM)',
+        pickupTime: 'instant',
+        isInstantPickup: true,
+        createdAt: fixedNow,
+      },
+      fixedNow
+    );
+    expect(res).toEqual({
+      isInstant: true,
+      label: '⚡ Instant',
+      text: 'Today, 14 Nov • Within 30–45 mins (by 12:45 PM)',
+    });
+  });
+
+  it('formats scheduled pickup slot with friendly date and window', () => {
+    const res = buildRiderSlotDisplay(
+      {
+        type: 'pickup',
+        pickupSlot: '2026-11-14 14:00 - 15:00',
+      },
+      fixedNow
+    );
+    expect(res).toEqual({
+      isInstant: false,
+      label: 'Pickup Window',
+      text: 'Today, 14 Nov • 14:00 - 15:00',
+    });
+  });
+
+  it('formats delivery window with friendly date and time', () => {
+    const res = buildRiderSlotDisplay(
+      {
+        type: 'delivery',
+        deliveryDate: '2026-11-15',
+        deliveryTime: '17:00 - 18:00',
+      },
+      fixedNow
+    );
+    expect(res).toEqual({
+      isInstant: false,
+      label: 'Delivery Window',
+      text: 'Tomorrow, 15 Nov • 17:00 - 18:00',
+    });
   });
 });

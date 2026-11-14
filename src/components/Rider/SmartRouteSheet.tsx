@@ -5,7 +5,7 @@ import { buildSmartRoute, SmartRouteStop, safeShortId } from '../../utils/smartR
 import { DeliveryTask } from '../../store/opsStaffStore';
 import { OpsTask } from '../../utils/opsTasks';
 import { FeedOrder, formatDisplayPhone } from '../../utils/orderFeed';
-import { SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from '../../utils/storeGeo';
+import { buildDirectionsDestination, SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from '../../utils/storeGeo';
 
 interface SmartRouteSheetProps {
   myTasks: OpsTask[];
@@ -15,10 +15,7 @@ interface SmartRouteSheetProps {
 }
 
 const openMaps = (address: string, lat?: number, lng?: number) => {
-  let dest = address;
-  if (lat && lng) {
-    dest = `${lat},${lng}`;
-  }
+  const dest = buildDirectionsDestination(address, lat, lng);
   if (!dest) return;
   const url = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dest)}`;
   Linking.openURL(url).catch(() => {

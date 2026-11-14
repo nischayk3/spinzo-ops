@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { extractLocality, parseSlotTimeWeight, safeShortId, buildSmartRoute } from '../smartRoute';
+import { isValidCoord, resolveCustomerCoordinates, buildDirectionsDestination } from '../storeGeo';
 
 describe('smartRoute utility', () => {
   it('extractLocality extracts known Bangalore localities accurately', () => {
@@ -152,6 +153,126 @@ describe('smartRoute utility', () => {
     expect(route[2].type).toBe('store_dropoff');
     expect(route[2].customerName).toBe('Shamala V');
     expect(route[2].stopNumber).toBe(3);
+  });
+
+  it('leaves stop.latitude and stop.longitude undefined when no explicit GPS coordinates exist (never synthesizes LOCALITY_COORDINATES)', () => {
+    const route = buildSmartRoute({
+      myTasks: [
+        {
+          id: 'p1',
+          orderId: 'p1',
+          userId: 'u1',
+          vendorId: 'v1',
+          assignee: 'r1',
+          status: 'assigned',
+          customerName: 'Ungeocoded Customer',
+          customerPhone: '9999999999',
+          pickupAddress: '14th Main, HSR Layout Sector 2',
+          items: [],
+          totalAmount: 200,
+          paymentStatus: 'pending',
+          paymentMode: 'cod',
+          assignedAt: null,
+        } as any,
+      ],
+      myDeliveries: [],
+      orders: [],
+    });
+
+    expect(route).toHaveLength(1);
+    expect(route[0].latitude).toBeUndefined();
+    expect(route[0].longitude).toBeUndefined();
+    expect(route[0].address).toBe('14th Main, HSR Layout Sector 2');
+  });
+
+  it('preserves exact customer coordinates and address on assigned deliveries instead of overwriting with store location', () => {
+    const route = buildSmartRoute({
+      myTasks: [],
+      myDeliveries: [
+        {
+          id: 'del-1',
+          orderId: 'del-1',
+          userId: 'u2',
+          status: 'assigned',
+          customerName: 'Delivery Customer',
+          customerPhone: '8888888888',
+          deliveryAddress: '777 Koramangala 4th Block',
+          latitude: 12.9352,
+          longitude: 77.6245,
+        } as any,
+      ],
+      orders: [],
+    });
+
+    const delStop = route.find(s => s.orderId === 'del-1');
+    expect(delStop).toBeDefined();
+    expect(delStop!.latitude).toBe(12.9352);
+    expect(delStop!.longitude).toBe(77.6245);
+    expect(delStop!.address).toBe('777 Koramangala 4th Block');
+  });
+
+  it('hydrates customer coordinates from matching order when task lacks coordinates', () => {
+    const route = buildSmartRoute({
+      myTasks: [
+        {
+          id: 'p-order-coords',
+          orderId: 'p-order-coords',
+          userId: 'u3',
+          vendorId: 'v1',
+          assignee: 'r1',
+          status: 'pending',
+          customerName: 'Order Hydrated Customer',
+          customerPhone: '7777777777',
+          pickupAddress: 'Some Address in BTM',
+          items: [],
+          totalAmount: 300,
+          paymentStatus: 'pending',
+          paymentMode: 'upi',
+          assignedAt: null,
+        } as any,
+      ],
+      myDeliveries: [],
+      orders: [
+        {
+          id: 'p-order-coords',
+          status: 'confirmed',
+          address: {
+            location: { latitude: 12.9279, longitude: 77.6271 },
+          },
+        } as any,
+      ],
+    });
+
+    expect(route).toHaveLength(1);
+    expect(route[0].latitude).toBe(12.9279);
+    expect(route[0].longitude).toBe(77.6271);
+  });
+});
+
+describe('storeGeo coordinate & destination helpers', () => {
+  it('validates finite non-zero coordinates with isValidCoord', () => {
+    expect(isValidCoord(12.9352, 77.6245)).toBe(true);
+    expect(isValidCoord(0, 0)).toBe(false);
+    expect(isValidCoord(undefined, 77.6245)).toBe(false);
+    expect(isValidCoord(NaN, 77.6245)).toBe(false);
+    expect(isValidCoord('12.9352' as any, '77.6245' as any)).toBe(false);
+  });
+
+  it('resolves exact coordinates across nested sources in priority order', () => {
+    const resolved = resolveCustomerCoordinates([
+      { latitude: undefined, longitude: undefined },
+      { address: { location: { latitude: 12.9121, longitude: 77.6446 } } },
+      { latitude: 12.95, longitude: 77.7 },
+    ]);
+    expect(resolved).toEqual({ latitude: 12.9121, longitude: 77.6446 });
+
+    expect(resolveCustomerCoordinates([null, { latitude: 0, longitude: 0 }])).toBeUndefined();
+  });
+
+  it('builds deterministic Google Maps destinations preferring exact lat,lng over text fallback', () => {
+    expect(buildDirectionsDestination('  123 Main Rd, HSR  ', 12.9121, 77.6446)).toBe('12.9121,77.6446');
+    expect(buildDirectionsDestination('  123 Main Rd, HSR  ', undefined, undefined)).toBe('123 Main Rd, HSR');
+    expect(buildDirectionsDestination('  123 Main Rd, HSR  ', 0, 0)).toBe('123 Main Rd, HSR');
   });
 });
 

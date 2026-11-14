@@ -29,7 +29,10 @@ export function DeliveriesScreen() {
   const navigation = useNavigation<any>();
   const user = useAuthStore(state => state.user);
   const activeRole = useAuthStore(state => state.activeRole);
-  const { myDeliveries, myTasks, isLoading, initialize } = useOpsStaffStore();
+  const myDeliveries = useOpsStaffStore(s => s.myDeliveries);
+  const myTasks = useOpsStaffStore(s => s.myTasks);
+  const isLoading = useOpsStaffStore(s => s.isLoading);
+  const initialize = useOpsStaffStore(s => s.initialize);
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [showPickupScanner, setShowPickupScanner] = useState<string | null>(null);
@@ -60,13 +63,21 @@ export function DeliveriesScreen() {
 
   // Count live pickups to show quick switch banner if needed
   const livePickupsCount = useMemo(() => {
-    return myTasks.filter(t => isPending(t)).length;
+    return myTasks.filter(t => {
+      if (!isPending(t)) return false;
+      if (t.orderStatus && t.orderStatus !== 'placed' && t.orderStatus !== 'confirmed' && t.orderStatus !== 'in_transit_to_store') return false;
+      return true;
+    }).length;
   }, [myTasks]);
 
   const activeDeliveries = useMemo(() => {
     const todayStr = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().split('T')[0];
     const list = myDeliveries.filter(d => {
       if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
+      if (d.orderStatus) {
+        if (d.orderStatus === 'cancelled' || d.orderStatus === 'delivered') return false;
+        if (d.orderStatus !== 'ready' && d.orderStatus !== 'out_for_delivery') return false;
+      }
       if (d.deliveryDate && d.deliveryDate > todayStr && d.status !== 'out_for_delivery') return false;
       return true;
     });
@@ -221,19 +232,27 @@ export function DeliveriesScreen() {
               customerPhone={t.customerPhone}
               status={t.status}
               createdAt={t.createdAt}
+              assignedAt={t.assignedAt}
               items={t.items}
               totalAmount={total}
               paymentStatus={t.paymentStatus || undefined}
+              paymentMode={t.paymentMode}
               deliveryAddress={t.deliveryAddress}
               deliveryDate={t.deliveryDate}
               deliveryTime={t.deliveryTime}
+              notes={t.notes}
               tokenNumber={t.tokenNumber}
               tokens={t.tokens}
+              lat={t.latitude}
+              lng={t.longitude}
               bundleCount={t.bundleCount}
+              bundleLabels={t.bundleLabels}
               stopNumber={stop?.stopNumber}
               locality={locality}
               loadUnits={stop?.loadUnits}
+              isUrgent={Boolean(t.isUrgent)}
               isExpress={Boolean(t.isExpress || isExpressOrder(t))}
+              pickupNote={t.pickupNote}
               isOverdue={Boolean(overdue)}
               unpaidAmount={unpaidAmt}
               onPrimary={() => {

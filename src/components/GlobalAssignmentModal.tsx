@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
-import { BellRing, MapPin, Zap, Clock, X } from 'lucide-react-native';
+import { BellRing, MapPin, Zap, Clock, X, User, Phone } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { acceptTask } from '../utils/opsPickup';
-import { isPending, pickupLabel, taskAlertKey } from '../utils/opsTasks';
+import { isPending, pickupLabel, formatRiderDateLabel, taskAlertKey } from '../utils/opsTasks';
+import { formatDisplayPhone } from '../utils/orderFeed';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
@@ -66,7 +67,7 @@ export function GlobalAssignmentModal() {
   const isInstant = !isDelivery && Boolean((activeTask as any)?.pickupSlot?.isInstant);
   const deliverySlotText = isDelivery && activeTask
     ? [
-        (activeTask as any).deliveryDate,
+        formatRiderDateLabel((activeTask as any).deliveryDate),
         (activeTask as any).deliveryTime,
       ]
         .filter(Boolean)
@@ -78,6 +79,8 @@ export function GlobalAssignmentModal() {
       : pickupLabel(activeTask as any)
     : '';
 
+  const customerName = (activeTask as any)?.customerName || '';
+  const customerPhone = (activeTask as any)?.customerPhone || '';
   const rawAddress = activeTask
     ? (isDelivery ? (activeTask as any).deliveryAddress : (activeTask as any).pickupAddress)
     : '';
@@ -199,11 +202,31 @@ export function GlobalAssignmentModal() {
           </Text>
 
           <View className="w-full bg-bgDark rounded-2xl p-5 mb-6 border border-bgSurfaceLight">
+            {(customerName || customerPhone) ? (
+              <View className="mb-3 pb-3 border-b border-bgSurfaceLight">
+                {customerName ? (
+                  <View className="flex-row items-center mb-1">
+                    <User size={16} color="#E2E8F0" className="mr-2.5" />
+                    <Text className="text-textPrimary font-extrabold text-base flex-1" numberOfLines={1}>
+                      {customerName}
+                    </Text>
+                  </View>
+                ) : null}
+                {customerPhone ? (
+                  <View className="flex-row items-center">
+                    <Phone size={15} color="#34D399" className="mr-2.5" />
+                    <Text className="text-emerald-400 font-bold text-sm">
+                      {formatDisplayPhone(customerPhone)}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            ) : null}
             <View className="flex-row items-start mb-4">
               <MapPin size={20} color="#94A3B8" className="mr-3 mt-0.5" />
               <Text className="flex-1 text-textSecondary font-medium leading-relaxed">{address}</Text>
             </View>
-            {!isDelivery && !!slotText && (
+            {!!slotText && slotText !== '—' && (
               <View className={`self-start px-3.5 py-2 rounded-xl border flex-row items-center gap-2 ${isInstant ? 'bg-amber-500/15 border-amber-500/40' : 'bg-primary/10 border-primary/20'}`}>
                 {isInstant ? <Zap size={16} color="#f59e0b" /> : <Clock size={16} color="#994BFF" />}
                 <Text className={`font-bold text-sm ${isInstant ? 'text-amber-400' : 'text-primary'}`}>

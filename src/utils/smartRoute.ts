@@ -1,7 +1,7 @@
-import { OpsTask } from './opsTasks';
+import { OpsTask, pickupLabel, formatRiderDateLabel, buildRiderSlotDisplay } from './opsTasks';
 import { DeliveryTask } from '../store/opsStaffStore';
 import { FeedOrder, isExpressOrder, orderTotal, slotLabel } from './orderFeed';
-import { haversineMeters, LatLng, SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from './storeGeo';
+import { haversineMeters, isValidCoord, LatLng, resolveCustomerCoordinates, SPINZO_STORE_ADDRESS, SPINZO_STORE_LOCATION } from './storeGeo';
 
 export interface SmartRouteStop {
   id: string;
@@ -241,10 +241,18 @@ export function buildSmartRoute({
 
     const addr = safeAddressText(t.pickupAddress || order?.address);
     const locality = isInTransit ? 'STORE' : extractLocality(addr);
-    const locCoord = LOCALITY_COORDINATES[locality];
-    const slot = order ? slotLabel(order) : (t.pickupSlot?.type || '');
-    const lat = isInTransit ? SPINZO_STORE_LOCATION.latitude : (t.latitude || order?.latitude || (order?.address as any)?.latitude || locCoord?.latitude);
-    const lng = isInTransit ? SPINZO_STORE_LOCATION.longitude : (t.longitude || order?.longitude || (order?.address as any)?.longitude || locCoord?.longitude);
+    const slotInfo = buildRiderSlotDisplay({
+      type: 'pickup',
+      pickupSlot: order ? slotLabel(order) : (pickupLabel(t) !== '—' ? pickupLabel(t) : (t.pickupSlot?.type || '')),
+      pickupDate: (t.pickupSlot as any)?.scheduledDate || order?.pickupDetails?.scheduledDate || null,
+      pickupTime: (t.pickupSlot as any)?.scheduledTime || order?.pickupDetails?.scheduledTime || null,
+      isInstantPickup: isInstant,
+      createdAt: t.createdAt || order?.createdAt,
+    });
+    const slot = slotInfo.text || (order ? slotLabel(order) : (t.pickupSlot?.type || ''));
+    const realCoords = resolveCustomerCoordinates([order, t]);
+    const lat = isInTransit ? SPINZO_STORE_LOCATION.latitude : realCoords?.latitude;
+    const lng = isInTransit ? SPINZO_STORE_LOCATION.longitude : realCoords?.longitude;
 
     stops.push({
       id: `pickup_${t.id}`,
@@ -296,11 +304,12 @@ export function buildSmartRoute({
     const isPickupFromStore = d.status === 'assigned';
     const isDelExpress = Boolean(d.isExpress || isExpressOrder(order) || isExpressOrder(d));
     const addr = safeAddressText(d.deliveryAddress || order?.address);
-    const locality = isPickupFromStore ? 'STORE' : extractLocality(addr);
-    const locCoord = LOCALITY_COORDINATES[locality];
-    const slot = d.deliveryDate && d.deliveryTime ? `${d.deliveryDate} • ${d.deliveryTime}` : (d.deliveryTime || 'Immediate');
-    const lat = isPickupFromStore ? SPINZO_STORE_LOCATION.latitude : (order?.latitude || (order?.address as any)?.latitude || locCoord?.latitude);
-    const lng = isPickupFromStore ? SPINZO_STORE_LOCATION.longitude : (order?.longitude || (order?.address as any)?.longitude || locCoord?.longitude);
+    const locality = extractLocality(addr);
+    const dDateLabel = d.deliveryDate ? formatRiderDateLabel(d.deliveryDate) : '';
+    const slot = dDateLabel && d.deliveryTime ? `${dDateLabel} • ${d.deliveryTime}` : (d.deliveryTime || dDateLabel || 'Immediate');
+    const realCoords = resolveCustomerCoordinates([order, d]);
+    const lat = realCoords?.latitude;
+    const lng = realCoords?.longitude;
 
     stops.push({
       id: `delivery_${d.id}`,
@@ -311,7 +320,7 @@ export function buildSmartRoute({
       orderNumber: safeShortId(d.orderId || d.id),
       customerName: d.customerName || order?.customerName,
       customerPhone: d.customerPhone || order?.customerPhone,
-      address: isPickupFromStore ? SPINZO_STORE_ADDRESS : addr,
+      address: addr,
       locality,
       slotText: slot,
       slot,
@@ -320,7 +329,7 @@ export function buildSmartRoute({
       ...(isDelExpress ? { isExpress: true } : {}),
       status: d.status,
       totalAmount: order ? orderTotal(order) : (d.totalAmount || 0),
-      paymentStatus: order?.paymentStatus,
+      paymentStatus: order?.paymentStatus || d.paymentStatus || undefined,
       latitude: lat,
       longitude: lng,
       loadUnits: estimateLoadUnits(order, d),
@@ -331,12 +340,14 @@ export function buildSmartRoute({
 
   if (stops.length === 0) return [];
 
-  // Calculate distance from rider position or store hub
+  // Calculate distance from rider position or store hub (for sorting only; never mutate stop coordinates)
   const origin = currentLocation || SPINZO_STORE_LOCATION;
   stops.forEach(s => {
-    if (s.latitude && s.longitude) {
+    const sortLat = s.latitude ?? LOCALITY_COORDINATES[s.locality]?.latitude;
+    const sortLng = s.longitude ?? LOCALITY_COORDINATES[s.locality]?.longitude;
+    if (isValidCoord(sortLat, sortLng)) {
       s.distanceMeters = Math.round(
-        haversineMeters(origin, { latitude: s.latitude, longitude: s.longitude })
+        haversineMeters(origin, { latitude: sortLat!, longitude: sortLng! })
       );
     }
   });

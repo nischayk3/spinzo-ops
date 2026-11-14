@@ -171,3 +171,58 @@ export const getServiceZoneName = (location?: Coordinate | null): string => {
 
   return 'Out of Geofence';
 };
+
+/**
+ * Validates that lat/lng are finite non-zero coordinates.
+ */
+export function isValidCoord(lat?: unknown, lng?: unknown): boolean {
+  return (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    Math.abs(lat) > 0.1 &&
+    Math.abs(lng) > 0.1
+  );
+}
+
+/**
+ * Resolves exact customer coordinates from a priority-ordered list of sources
+ * (e.g. `[order, task]`). Returns undefined if no valid coordinate pair exists,
+ * never synthesizing fake neighborhood coordinates.
+ */
+export function resolveCustomerCoordinates(
+  sources: Array<{ latitude?: any; longitude?: any; address?: any; location?: any } | null | undefined>
+): LatLng | undefined {
+  for (const s of sources) {
+    if (!s) continue;
+    const candidates: Array<[unknown, unknown]> = [
+      [s.latitude, s.longitude],
+      [s.address?.latitude, s.address?.longitude],
+      [s.address?.location?.latitude, s.address?.location?.longitude],
+      [s.address?.coords?.latitude, s.address?.coords?.longitude],
+      [s.location?.latitude, s.location?.longitude],
+    ];
+    for (const [lat, lng] of candidates) {
+      if (isValidCoord(lat, lng)) {
+        return { latitude: Number(lat), longitude: Number(lng) };
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Builds the deterministic Google Maps destination string.
+ * Uses exact `lat,lng` when valid coordinates exist; otherwise falls back to the trimmed address.
+ */
+export function buildDirectionsDestination(
+  address?: string | null,
+  lat?: number | null,
+  lng?: number | null
+): string {
+  if (isValidCoord(lat, lng)) {
+    return `${lat},${lng}`;
+  }
+  return (address || '').trim();
+}

@@ -23,8 +23,10 @@ const isPickupOrderLive = (status?: string): boolean =>
 export function PickupsScreen() {
   const navigation = useNavigation<any>();
   const user = useAuthStore(state => state.user);
-  const { myTasks, isLoading, initialize } = useOpsStaffStore();
-  const myDeliveries = useOpsStaffStore(state => state.myDeliveries);
+  const myTasks = useOpsStaffStore(s => s.myTasks);
+  const myDeliveries = useOpsStaffStore(s => s.myDeliveries);
+  const isLoading = useOpsStaffStore(s => s.isLoading);
+  const initialize = useOpsStaffStore(s => s.initialize);
 
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeStoreTaskId, setActiveStoreTaskId] = useState<string | null>(null);
@@ -44,7 +46,11 @@ export function PickupsScreen() {
   }, []);
 
   const pending = useMemo(() => {
-    return myTasks.filter(t => isPending(t));
+    return myTasks.filter(t => {
+      if (!isPending(t)) return false;
+      if (t.orderStatus && !isPickupOrderLive(t.orderStatus)) return false;
+      return true;
+    });
   }, [myTasks]);
 
   // Compute live smart route sequence
@@ -66,7 +72,11 @@ export function PickupsScreen() {
 
   // Only count live deliveries (ready / out_for_delivery)
   const activeDeliveriesCount = useMemo(() => {
-    return myDeliveries.filter(d => d.status === 'out_for_delivery' || d.status === 'assigned').length;
+    return myDeliveries.filter(d => {
+      if (d.status !== 'out_for_delivery' && d.status !== 'assigned') return false;
+      if (d.orderStatus && d.orderStatus !== 'ready' && d.orderStatus !== 'out_for_delivery') return false;
+      return true;
+    }).length;
   }, [myDeliveries]);
 
   // Group and sort pickups by Smart Route stop sequence
@@ -296,6 +306,11 @@ export function PickupsScreen() {
     const items = t.items;
     const totalAmount = typeof t.totalAmount === 'number' ? t.totalAmount : undefined;
     const paymentStatus = t.paymentStatus;
+    const isPaid = (paymentStatus || '').toLowerCase() === 'paid';
+    const unpaidAmt =
+      typeof totalAmount === 'number' && totalAmount > 0 && paymentStatus && !isPaid
+        ? totalAmount
+        : undefined;
     const notes = t.notes;
     const rawAddr = t.pickupAddress;
     const locality = isInTransit ? 'STORE DROP' : (stop?.locality || extractLocality(rawAddr));
@@ -308,11 +323,17 @@ export function PickupsScreen() {
         customerPhone={t.customerPhone}
         status={t.status}
         createdAt={t.createdAt}
+        assignedAt={t.assignedAt}
         items={items}
         totalAmount={totalAmount}
         paymentStatus={paymentStatus}
+        paymentMode={t.paymentMode}
+        unpaidAmount={unpaidAmt}
         pickupAddress={rawAddr}
         pickupSlot={pickupSlotText}
+        pickupDate={(t.pickupSlot as any)?.scheduledDate || null}
+        pickupTime={(t.pickupSlot as any)?.scheduledTime || null}
+        isInstantPickup={Boolean((t.pickupSlot as any)?.isInstant)}
         notes={notes}
         tokenNumber={t.tokenNumber}
         tokens={t.tokens}
@@ -347,7 +368,7 @@ export function PickupsScreen() {
         }
         primaryLabel={isInTransit ? 'Handover to Store' : 'Verify pickup OTP'}
         onEdit={
-          !isInTransit && items && items.length > 0
+          !isInTransit
             ? () => setEditOrderId(t.orderId)
             : undefined
         }
