@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, isWashRequiringService, getOccupiedMachines, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, isHandsOnStageNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -64,6 +64,14 @@ function extractLongitudeFromOrder(order) {
     if (n !== null && n >= -180 && n <= 180) return n;
   }
   return null;
+}
+
+function extractGeoFromOrder(order) {
+  if (!order) return null;
+  const lat = extractLatitudeFromOrder(order);
+  const lng = extractLongitudeFromOrder(order);
+  if (lat === null || lng === null) return null;
+  return { lat, lng };
 }
 
 function nonEmptyItems(primary, fallback) {
@@ -135,7 +143,11 @@ async function sendFCMOrderAssignment({
       },
       android: {
         priority: 'high',
-        ttl: 60 * 1000,
+        ttl: 300 * 1000,
+      },
+      apns: {
+        headers: { 'apns-priority': '10' },
+        payload: { aps: { 'content-available': 1, sound: 'default' } },
       },
     };
 
@@ -143,6 +155,14 @@ async function sendFCMOrderAssignment({
     console.log(`[FCM] Sent assignment push to ${staffId} for #${orderId}:`, response);
   } catch (err) {
     console.error(`[FCM] Failed to send assignment push to ${staffId}:`, err);
+    if (
+      err?.code === 'messaging/registration-token-not-registered' ||
+      err?.code === 'messaging/invalid-registration-token'
+    ) {
+      db.doc(`ops_staff/${staffId}`)
+        .update({ fcmToken: admin.firestore.FieldValue.delete() })
+        .catch(() => {});
+    }
   }
 }
 
@@ -192,7 +212,11 @@ async function sendFCMStageNudge({
       },
       android: {
         priority: 'high',
-        ttl: 60 * 1000,
+        ttl: 300 * 1000,
+      },
+      apns: {
+        headers: { 'apns-priority': '10' },
+        payload: { aps: { 'content-available': 1, sound: 'default' } },
       },
     };
 
@@ -200,10 +224,18 @@ async function sendFCMStageNudge({
     console.log(`[FCM] Sent stage nudge push to ${staffId} for #${orderId} (${step}_${phase}):`, response);
   } catch (err) {
     console.error(`[FCM] Failed to send stage nudge push to ${staffId}:`, err);
+    if (
+      err?.code === 'messaging/registration-token-not-registered' ||
+      err?.code === 'messaging/invalid-registration-token'
+    ) {
+      db.doc(`ops_staff/${staffId}`)
+        .update({ fcmToken: admin.firestore.FieldValue.delete() })
+        .catch(() => {});
+    }
   }
 }
 
-async function selectRider() {
+async function selectRider(orderGeo = null) {
   // Authorized rider phones from the roster.
   let rosterPhones = {};
   const rosterSnap = await db.doc('config/opsStaff').get();
@@ -222,20 +254,43 @@ async function selectRider() {
       onBreak: d.onBreak === true,
       attendanceStatus: d.attendanceStatus || 'working',
       shiftStartAt: d.shiftStartAt && typeof d.shiftStartAt.toMillis === 'function' ? d.shiftStartAt.toMillis() : 0,
+      lastLocation: d.lastLocation || null,
+      location: d.location || null,
     });
   }
   if (candidates.length === 0) return null;
 
-  // Pending task count per candidate (single-field query, filter status in code).
+  // Pending task count + active stop coordinates per candidate (single-field queries, filter status in code).
   const taskCounts = {};
+  const riderStopCoords = {};
   for (const c of candidates) {
-    const tasks = await db.collection('ops_tasks').where('assignee', '==', c.uid).get();
+    const [pickupTasks, deliveryTasks] = await Promise.all([
+      db.collection('ops_tasks').where('assignee', '==', c.uid).get(),
+      db.collection('ops_delivery_tasks').where('assignee', '==', c.uid).get(),
+    ]);
     let pending = 0;
-    tasks.forEach((t) => { if (t.data().status === 'pending') pending += 1; });
+    const coords = [];
+    pickupTasks.forEach((t) => {
+      const td = t.data();
+      if (td.status === 'pending') {
+        pending += 1;
+        const geo = extractGeoFromOrder(td);
+        if (geo) coords.push(geo);
+      }
+    });
+    deliveryTasks.forEach((t) => {
+      const td = t.data();
+      if (td.status === 'pending' || td.status === 'assigned' || td.status === 'out_for_delivery') {
+        pending += 1;
+        const geo = extractGeoFromOrder(td);
+        if (geo) coords.push(geo);
+      }
+    });
     taskCounts[c.uid] = pending;
+    riderStopCoords[c.uid] = coords;
   }
 
-  return pickRider(candidates, taskCounts, rosterPhones);
+  return pickRider(candidates, taskCounts, rosterPhones, orderGeo, riderStopCoords);
 }
 
 function taskPayload(orderId, order, assignee, userId, vendorId) {
@@ -280,12 +335,12 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
   const rawPickupSlot = (order && (order.pickupDetails || order.pickup)) || null;
   const pickupSlot = rawPickupSlot && isExpress ? { ...rawPickupSlot, isExpress: true } : rawPickupSlot;
   const isDueForDispatch = isSlotDueForDispatch(pickupSlot || (isExpress ? { isExpress: true } : null), 20);
-  const assignee = isDueForDispatch ? await selectRider() : null;
+  const assignee = isDueForDispatch ? await selectRider(extractGeoFromOrder(order)) : null;
   const userId = event.params.userId;
   const vendorId = order.vendorId || 'default';
   const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
   const payload = assignee
-    ? taskPayload(orderId, order, assignee, userId, vendorId)
+    ? { ...taskPayload(orderId, order, assignee, userId, vendorId), fcmSent: true }
     : {
         orderId,
         userId,
@@ -417,8 +472,26 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
     try {
       await db.doc(`ops_tasks/${taskDoc.id}`).update({
         assignee: newRiderUid,
+        assignedBy: admin.firestore.FieldValue.delete(),
+        fcmSent: true,
         assignedAt: TS(),
         acceptedAt: admin.firestore.FieldValue.delete(),
+      });
+      const isExp = isOrderExpress(td);
+      const isInstant = Boolean(td.pickupSlot && td.pickupSlot.isInstant);
+      const slot = isExp
+        ? `⚡ Express 6-8h${td.pickupSlot && td.pickupSlot.scheduledTime ? ` • ${td.pickupSlot.scheduledTime}` : ''}`
+        : (td.pickupSlot && td.pickupSlot.type === 'instant')
+        ? 'Instant Pickup'
+        : (td.pickupSlot && td.pickupSlot.scheduledTime) || '';
+      await sendFCMOrderAssignment({
+        staffId: newRiderUid,
+        orderId: taskDoc.id,
+        taskType: isExp ? '⚡ Express Pickup (6-8h)' : (isInstant ? 'Instant Pickup' : 'Pickup'),
+        customerName: td.customerName || '',
+        address: td.pickupAddress || '',
+        slot,
+        isInstant: isInstant || isExp,
       });
     } catch (err) {
       console.error(`onShiftCatchUp: reassign ${taskDoc.id} failed`, err);
@@ -429,6 +502,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   const queue = await db.collection('ops_queue').orderBy('createdAt', 'asc').limit(50).get();
   const pending = queue.docs.filter((d) => {
     const entryData = d.data();
+    if (entryData.manualHold === true || entryData.status === 'manual_hold') return false;
     if (entryData.status !== 'pending' && entryData.status !== 'scheduled') return false;
     const isExp = isOrderExpress(entryData);
     const slotForCheck = entryData.pickupSlot && isExp
@@ -454,7 +528,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
           continue;
         }
       }
-      const assignee = await selectRider();
+      const assignee = await selectRider(extractGeoFromOrder(data));
       if (!assignee) continue; // still no eligible rider; leave parked
       const isExp = isOrderExpress(data);
       await db.runTransaction(async (tx) => {
@@ -505,15 +579,41 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
 
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
+      if (delData.manualHold === true || delData.status === 'manual_hold') continue;
+      if (delData.userId) {
+        const orderSnap = await db.doc(`users/${delData.userId}/orders/${delDoc.id}`).get();
+        if (orderSnap.exists && orderSnap.data().manualDeliveryHold === true) continue;
+      }
       const isExp = isOrderExpress(delData);
       // Only assign if the customer HAS picked a slot (or Express order) AND that slot is due NOW
       if (!delData.assignee && (delData.deliveryDate || isExp) && isSlotDueForDispatch({ deliveryDate: delData.deliveryDate, deliveryTime: delData.deliveryTime, isExpress: isExp }, 20)) {
+        const nowTs = TS();
+        const rName = after.name || 'SpinZo Delivery Partner';
+        const rPhone = after.phone || '';
         await delDoc.ref.update({
           assignee: newRiderUid,
-          status: 'assigned',
-          assignedAt: TS(),
+          status: 'out_for_delivery',
+          fcmSent: true,
+          assignedAt: nowTs,
           acceptedAt: admin.firestore.FieldValue.delete(),
+          updatedAt: nowTs,
         });
+        if (delData.userId) {
+          const orderPatch = {
+            status: 'out_for_delivery',
+            outForDeliveryAt: nowTs,
+            deliveryRiderId: newRiderUid,
+            deliveryRiderName: rName,
+            deliveryRiderPhone: rPhone,
+            deliveryRider: { id: newRiderUid, name: rName, phone: rPhone },
+            riderId: newRiderUid,
+            riderName: rName,
+            updatedAt: nowTs,
+          };
+          await db.doc(`users/${delData.userId}/orders/${delDoc.id}`).set(orderPatch, { merge: true });
+          const vId = delData.vendorId || 'default';
+          await db.doc(`vendors/${vId}/orders/${delDoc.id}`).set(orderPatch, { merge: true });
+        }
         await sendFCMOrderAssignment({
           staffId: newRiderUid,
           orderId: delDoc.id,
@@ -860,6 +960,152 @@ exports.opsStatusSync = onCall({ cors: true, invoker: 'public' }, async (request
   }
 });
 
+/**
+ * Aggregate garments, bundles, packaging media, stageTimings, and per-load loadTimings
+ * across all sibling `ops_process` docs for a parent order so multi-load (>8kg) orders
+ * never overwrite Load 1 with Load 2.
+ */
+function buildAggregatedOrderOpsFields(siblingDocs, now = TS()) {
+  let combinedGarmentCount = 0;
+  let combinedRegisteredGarments = [];
+  let totalBundles = 0;
+  const photoSet = new Set();
+  const packagingVideos = [];
+  const videoSeen = new Set();
+  const stageTimings = {};
+  const loadTimings = {};
+  let latestPackagingProof = null;
+
+  (siblingDocs || []).forEach((d) => {
+    const p = typeof d.data === 'function' ? d.data() : d;
+    if (!p) return;
+    const processId = d.id || p.id || `${p.orderId || 'order'}__${p.serviceType || 'load'}`;
+
+    if (p.garments) {
+      if (p.garments.count) combinedGarmentCount += Number(p.garments.count) || 0;
+      if (Array.isArray(p.garments.registered)) {
+        combinedRegisteredGarments.push(...p.garments.registered);
+      }
+    }
+
+    const loadLabel = p.serviceLabel || SERVICE_LABELS[p.serviceType] || p.serviceType || 'Load';
+    const perLoadStages = {};
+
+    if (p.stages && typeof p.stages === 'object') {
+      Object.keys(p.stages).forEach((step) => {
+        const s = p.stages[step];
+        if (!s) return;
+
+        // Preserve full per-load stage timing details
+        const cleanStage = {
+          ...(s.assignedAt ? { assignedAt: s.assignedAt } : {}),
+          ...(s.acceptedAt ? { acceptedAt: s.acceptedAt } : {}),
+          ...(s.startedAt ? { startedAt: s.startedAt } : {}),
+          ...(s.completedAt ? { completedAt: s.completedAt } : {}),
+          ...(s.assignee ? { assignee: s.assignee } : {}),
+          ...(s.assigneeName ? { assigneeName: s.assigneeName } : {}),
+          ...(s.machineName ? { machineName: s.machineName } : {}),
+          ...(typeof s.durationMs === 'number' ? { durationMs: s.durationMs } : {}),
+          ...(typeof s.acceptToCompleteMin === 'number' ? { acceptToCompleteMin: s.acceptToCompleteMin } : {}),
+          ...(typeof s.startToCompleteMin === 'number' ? { startToCompleteMin: s.startToCompleteMin } : {}),
+          ...(s.detergentAddedAt ? { detergentAddedAt: s.detergentAddedAt } : {}),
+          ...(s.softenerAddedAt ? { softenerAddedAt: s.softenerAddedAt } : {}),
+          ...(s.qualityProof?.bundles ? { bundles: s.qualityProof.bundles } : {}),
+        };
+        if (Object.keys(cleanStage).length > 0) {
+          perLoadStages[step] = cleanStage;
+        }
+
+        stageTimings[step] = {
+          ...(stageTimings[step] || {}),
+          ...cleanStage,
+        };
+
+        if (step === 'packaging' && s.qualityProof) {
+          latestPackagingProof = s.qualityProof;
+          if (s.qualityProof.bundles) {
+            totalBundles += Number(s.qualityProof.bundles) || 0;
+          }
+          if (Array.isArray(s.qualityProof.photos)) {
+            s.qualityProof.photos.forEach((url) => {
+              if (url && typeof url === 'string') photoSet.add(url);
+            });
+          }
+          const pushVideo = (url) => {
+            if (!url || typeof url !== 'string') return;
+            const key = `${processId}::${url}`;
+            if (videoSeen.has(key)) return;
+            videoSeen.add(key);
+            packagingVideos.push({ url, processId, label: loadLabel });
+          };
+          if (s.qualityProof.videoUrl) pushVideo(s.qualityProof.videoUrl);
+          if (Array.isArray(s.qualityProof.videos)) {
+            s.qualityProof.videos.forEach((v) => pushVideo(typeof v === 'string' ? v : v && v.url));
+          }
+        }
+      });
+    }
+
+    loadTimings[processId] = {
+      label: loadLabel,
+      loadIndex: p.loadIndex || 1,
+      loadCount: p.loadCount || 1,
+      stages: perLoadStages,
+    };
+  });
+
+  const packagingPhotos = Array.from(photoSet);
+  const aggregatedPackagingProof = latestPackagingProof
+    ? {
+        ...latestPackagingProof,
+        photos: packagingPhotos,
+        ...(totalBundles > 0 ? { bundles: totalBundles } : {}),
+        ...(packagingVideos.length > 0 ? { videoUrl: packagingVideos[0].url, videos: packagingVideos } : {}),
+      }
+    : null;
+
+  const opsUpdate = {
+    updatedAt: now,
+  };
+  if (combinedGarmentCount > 0) {
+    opsUpdate.garmentCount = combinedGarmentCount;
+    opsUpdate.registeredGarmentsCount = combinedRegisteredGarments.length;
+  }
+  if (combinedRegisteredGarments.length > 0) {
+    opsUpdate.opsGarments = combinedRegisteredGarments;
+  }
+  if (packagingPhotos.length > 0) {
+    opsUpdate.qualityPhotos = packagingPhotos;
+    opsUpdate.packagingPhotos = packagingPhotos;
+    opsUpdate.proofUrl = packagingPhotos[0];
+  }
+  if (packagingVideos.length > 0) {
+    opsUpdate.packagingVideos = packagingVideos;
+  }
+  if (aggregatedPackagingProof) {
+    opsUpdate.packagingProof = aggregatedPackagingProof;
+  }
+  if (Object.keys(stageTimings).length > 0) {
+    opsUpdate.stageTimings = stageTimings;
+  }
+  if (Object.keys(loadTimings).length > 0) {
+    opsUpdate.loadTimings = loadTimings;
+  }
+  opsUpdate.opsDetails = {
+    garmentCount: combinedGarmentCount,
+    registeredGarmentsCount: combinedRegisteredGarments.length,
+    qualityPhotos: packagingPhotos,
+    packagingPhotos,
+    packagingVideos,
+    packagingProof: aggregatedPackagingProof || null,
+    stageTimings,
+    loadTimings,
+    ...(totalBundles > 0 ? { bundles: totalBundles } : {}),
+  };
+
+  return opsUpdate;
+}
+
 async function persistOpsDetailsToOrder(orderId, optUserId, optVendorId) {
   try {
     const processDocs = await db.collection('ops_process')
@@ -868,40 +1114,10 @@ async function persistOpsDetailsToOrder(orderId, optUserId, optVendorId) {
 
     let userId = optUserId;
     let vendorId = optVendorId;
-    let combinedGarmentCount = 0;
-    let combinedRegisteredGarments = [];
-    const allQualityPhotos = [];
-    const stageTimings = {};
-    let packagingProof = null;
-
-    processDocs.forEach(d => {
+    processDocs.forEach((d) => {
       const p = d.data();
       if (!userId && p.userId) userId = p.userId;
       if (!vendorId && p.vendorId) vendorId = p.vendorId;
-
-      if (p.garments) {
-        if (p.garments.count) combinedGarmentCount += (p.garments.count || 0);
-        if (Array.isArray(p.garments.registered)) {
-          combinedRegisteredGarments.push(...p.garments.registered);
-        }
-      }
-
-      if (p.stages) {
-        Object.keys(p.stages).forEach(step => {
-          const s = p.stages[step];
-          if (!s) return;
-          stageTimings[step] = {
-            ...(stageTimings[step] || {}),
-            ...s,
-          };
-          if (step === 'packaging' && s.qualityProof) {
-            packagingProof = s.qualityProof;
-            if (Array.isArray(s.qualityProof.photos)) {
-              allQualityPhotos.push(...s.qualityProof.photos);
-            }
-          }
-        });
-      }
     });
 
     if (!userId) {
@@ -933,36 +1149,7 @@ async function persistOpsDetailsToOrder(orderId, optUserId, optVendorId) {
     }
 
     if (userId) {
-      const opsUpdate = {
-        updatedAt: TS(),
-      };
-      if (combinedGarmentCount > 0) {
-        opsUpdate.garmentCount = combinedGarmentCount;
-        opsUpdate.registeredGarmentsCount = combinedRegisteredGarments.length;
-      }
-      if (combinedRegisteredGarments.length > 0) {
-        opsUpdate.opsGarments = combinedRegisteredGarments;
-      }
-      if (allQualityPhotos.length > 0) {
-        opsUpdate.qualityPhotos = allQualityPhotos;
-        opsUpdate.packagingPhotos = allQualityPhotos;
-        opsUpdate.proofUrl = allQualityPhotos[0];
-      }
-      if (packagingProof) {
-        opsUpdate.packagingProof = packagingProof;
-      }
-      if (Object.keys(stageTimings).length > 0) {
-        opsUpdate.stageTimings = stageTimings;
-      }
-      opsUpdate.opsDetails = {
-        garmentCount: combinedGarmentCount,
-        registeredGarmentsCount: combinedRegisteredGarments.length,
-        qualityPhotos: allQualityPhotos,
-        packagingPhotos: allQualityPhotos,
-        packagingProof: packagingProof || null,
-        stageTimings,
-      };
-
+      const opsUpdate = buildAggregatedOrderOpsFields(processDocs.docs, TS());
       const uOrderRef = db.doc(`users/${userId}/orders/${orderId}`);
       await uOrderRef.set(opsUpdate, { merge: true });
       if (vendorId) {
@@ -1055,8 +1242,21 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
       }
     }
 
-    // Select helper using balanced, workload-aware dispatch rules
-    const decision = selectHelperForStage('tagging', onShiftHelpers, liveProcesses, resources);
+    // Select helper using balanced, workload-aware dispatch rules + dynamic config/helperAssignmentRules
+    const rulesSnap = await db.doc('config/helperAssignmentRules').get();
+    const helperRules = rulesSnap.exists ? (rulesSnap.data().rules || null) : null;
+    const primaryWashGroup = serviceGroups.find((g) => isWashRequiringService(g.serviceType));
+    const taggingServiceType = primaryWashGroup
+      ? primaryWashGroup.serviceType
+      : (serviceGroups[0]?.serviceType || order.serviceType || null);
+    const decision = selectHelperForStage(
+      'tagging',
+      onShiftHelpers,
+      liveProcesses,
+      resources,
+      { serviceType: taggingServiceType },
+      helperRules
+    );
     const selectedHelper = (decision && decision.ok && decision.helper) ? decision.helper : null;
 
     const now = TS();
@@ -1225,12 +1425,15 @@ async function autoAssignStage(processId, targetStage, options = {}) {
       }
     }
 
-    // 4. Select helper using pure dispatch rules
+    // 4. Select helper using pure dispatch rules + dynamic config/helperAssignmentRules
+    const rulesSnap = await db.doc('config/helperAssignmentRules').get();
+    const helperRules = rulesSnap.exists ? (rulesSnap.data().rules || null) : null;
     const effectiveOptions = {
       ...options,
+      serviceType: options.serviceType || pData.serviceType || null,
       previousAssignee: options.previousAssignee || pData.stages?.getting_washed?.assignee,
     };
-    const decision = selectHelperForStage(targetStage, onShiftHelpers, liveProcesses, resources, effectiveOptions);
+    const decision = selectHelperForStage(targetStage, onShiftHelpers, liveProcesses, resources, effectiveOptions, helperRules);
     if (!decision.ok || !decision.helper) {
       console.log(`[AutoAssignStage] Could not auto-assign ${processId} (${targetStage}): ${decision.error || 'queued'}`);
       return decision;
@@ -1255,7 +1458,7 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     batch.update(procRef, stageUpdate);
 
     // Update staff activeHelperTask for hands-on tasks or active loading when helper was free
-    if (!decision.isMicroTask) {
+    if (!decision.isMicroTask && !decision.isStarvationOverride) {
       batch.update(db.doc(`ops_staff/${selectedHelper.uid}`), {
         activeHelperTask: { orderId: pData.orderId || processId, step: targetStage }
       });
@@ -1288,68 +1491,89 @@ async function autoAssignStage(processId, targetStage, options = {}) {
  */
 async function drainWaitingOpsQueues(stageList = null, options = {}) {
   try {
-    let stagesToCheck = stageList;
-    if (!stagesToCheck) {
-      // Determine if washers are starving or wash queue buffer is low (< 2 orders)
-      try {
-        const resSnap = await db.doc('config/storeResources').get();
-        const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
-        const maxWashers = resources.washers || 2;
+    const defaultStages = ['getting_washed', 'getting_dried', 'tagging', 'getting_ironed', 'packaging'];
+    const targetStages = Array.isArray(stageList) && stageList.length > 0 ? stageList : defaultStages;
+    const allowedStages = new Set(targetStages);
 
-        const washSnap = await db.collection('ops_process')
-          .where('status', '==', 'getting_washed')
-          .get();
-        let runningWashers = 0;
-        let pendingWash = 0;
-        washSnap.forEach(d => {
-          const p = d.data();
-          const stg = p.stages?.getting_washed;
-          if (stg && !stg.completedAt) {
-            pendingWash += 1;
-            if (stg.startedAt) runningWashers += 1;
-          }
-        });
-        const waitingToWash = Math.max(0, pendingWash - runningWashers);
-        const washerNeedsFeeding = runningWashers < maxWashers || waitingToWash < 2;
+    const [resSnap, activeSnap] = await Promise.all([
+      db.doc('config/storeResources').get(),
+      db.collection('ops_process')
+        .where('status', 'in', defaultStages)
+        .get(),
+    ]);
 
-        stagesToCheck = washerNeedsFeeding
-          ? ['getting_washed', 'getting_dried', 'tagging', 'packaging', 'getting_ironed']
-          : ['getting_washed', 'getting_dried', 'packaging', 'getting_ironed', 'tagging'];
-      } catch (checkErr) {
-        stagesToCheck = ['getting_washed', 'getting_dried', 'tagging', 'packaging', 'getting_ironed'];
+    if (activeSnap.empty) return;
+
+    const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2, ironingStations: 2 };
+    const maxWashers = resources.washers || 2;
+
+    const allActiveProcs = [];
+    activeSnap.forEach((d) => allActiveProcs.push({ id: d.id, ...d.data() }));
+
+    const occupiedWashers = getOccupiedMachines('getting_washed', allActiveProcs);
+    const hasEmptyWasher = occupiedWashers.length < maxWashers;
+
+    const toMs = (t) => (!t ? 0 : typeof t.toMillis === 'function' ? t.toMillis() : typeof t === 'number' ? t : new Date(t).getTime());
+
+    // Strict Drum-Buffer-Rope priority ordering:
+    // 1. getting_washed
+    // 2. getting_dried
+    // 3. tagging (wash-requiring orders when a washer is empty)
+    // 4. getting_ironed
+    // 5. tagging (all other orders)
+    // 6. packaging
+    // Within each priority tier: Express orders first, then oldest createdAt / pickedUpAt (FIFO).
+    const candidates = [];
+    for (const p of allActiveProcs) {
+      const stg = p.status;
+      if (!allowedStages.has(stg)) continue;
+      const s = p.stages?.[stg];
+      if (s?.assignee) continue;
+      if (s?.heldInQueue && !options.force) continue;
+
+      let priority = 6;
+      if (stg === 'getting_washed') {
+        priority = 1;
+      } else if (stg === 'getting_dried') {
+        priority = 2;
+      } else if (stg === 'tagging' && hasEmptyWasher && isWashRequiringService(p.serviceType)) {
+        priority = 3;
+      } else if (stg === 'getting_ironed') {
+        priority = 4;
+      } else if (stg === 'tagging') {
+        priority = 5;
+      } else if (stg === 'packaging') {
+        priority = 6;
       }
+
+      const isExp = isOrderExpress(p) ? 1 : 0;
+      const fifoMs = toMs(p.pickedUpAt) || toMs(p.createdAt) || toMs(s?.queuedAt) || 0;
+      candidates.push({
+        id: p.id,
+        stage: stg,
+        serviceType: p.serviceType || null,
+        priority,
+        isExp,
+        fifoMs,
+      });
     }
 
-    for (const stg of stagesToCheck) {
-      const queuedSnap = await db.collection('ops_process')
-        .where('status', '==', stg)
-        .limit(20)
-        .get();
+    candidates.sort((a, b) => {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      if (a.isExp !== b.isExp) return b.isExp - a.isExp;
+      return a.fifoMs - b.fifoMs;
+    });
 
-      if (!queuedSnap.empty) {
-        // Filter in memory to avoid needing composite Firestore indexes
-        const unassigned = [];
-        queuedSnap.forEach(d => {
-          const data = d.data();
-          const s = data.stages?.[stg];
-          if (!s?.assignee) {
-            // Respect supervisor queue hold
-            if (s?.heldInQueue && !options.force) return;
-            const queuedAt = s?.queuedAt;
-            const qMs = queuedAt ? (typeof queuedAt.toMillis === 'function' ? queuedAt.toMillis() : new Date(queuedAt).getTime()) : 0;
-            unassigned.push({ id: d.id, qMs });
-          }
-        });
-
-        unassigned.sort((a, b) => a.qMs - b.qMs);
-
-        for (const item of unassigned) {
-          const res = await autoAssignStage(item.id, stg, options);
-          if (!res.ok) {
-            // Machine capacity reached or specialists busy, stop trying further in this stage queue
-            break;
-          }
-        }
+    const failedTiers = new Set();
+    for (const item of candidates) {
+      if (failedTiers.has(item.priority)) continue;
+      const res = await autoAssignStage(item.id, item.stage, {
+        ...options,
+        serviceType: item.serviceType,
+      });
+      if (!res.ok) {
+        // Capacity reached or helpers busy for this priority tier; skip remaining items in the same tier
+        failedTiers.add(item.priority);
       }
     }
   } catch (err) {
@@ -1372,6 +1596,7 @@ async function drainScheduledRiderTasks() {
     for (const entry of queueSnap.docs) {
       const data = entry.data();
       const orderId = entry.id;
+      if (data.manualHold === true || data.status === 'manual_hold') continue;
 
       // Check if order is still awaiting pickup
       if (data.userId) {
@@ -1391,7 +1616,7 @@ async function drainScheduledRiderTasks() {
         continue; // not due yet, keep parked
       }
 
-      const assignee = await selectRider();
+      const assignee = await selectRider(extractGeoFromOrder(data));
       if (!assignee) continue; // no rider on shift right now
 
       let assignedSuccessfully = false;
@@ -1424,6 +1649,7 @@ async function drainScheduledRiderTasks() {
           notes: data.notes || '',
           latitude: data.latitude || null,
           longitude: data.longitude || null,
+          fcmSent: true,
           assignedAt: TS(),
           createdAt: data.createdAt || TS(),
         });
@@ -1460,6 +1686,11 @@ async function drainScheduledRiderTasks() {
     for (const delDoc of pendingDelSnap.docs) {
       const delData = delDoc.data();
       if (delData.assignee) continue; // already assigned
+      if (delData.manualHold === true || delData.status === 'manual_hold') continue;
+      if (delData.userId) {
+        const orderSnap = await db.doc(`users/${delData.userId}/orders/${delDoc.id}`).get();
+        if (orderSnap.exists && orderSnap.data().manualDeliveryHold === true) continue;
+      }
       const isExp = isOrderExpress(delData);
       if (!delData.deliveryDate && !isExp) continue; // customer hasn't selected a date yet (awaiting_slot)
 
@@ -1468,16 +1699,40 @@ async function drainScheduledRiderTasks() {
         continue; // not due yet, keep holding on store shelf
       }
 
-      const riderUid = await selectRider();
+      const riderUid = await selectRider(extractGeoFromOrder(delData));
       if (!riderUid) continue; // no rider on shift right now
+
+      const nowTs = TS();
+      const riderStaffSnap = await db.doc(`ops_staff/${riderUid}`).get();
+      const riderStaffData = riderStaffSnap.exists ? riderStaffSnap.data() : null;
+      const rName = riderStaffData?.name || 'SpinZo Delivery Partner';
+      const rPhone = riderStaffData?.phone || '';
 
       await delDoc.ref.update({
         assignee: riderUid,
-        status: 'assigned',
-        assignedAt: TS(),
+        status: 'out_for_delivery',
+        fcmSent: true,
+        assignedAt: nowTs,
         acceptedAt: admin.firestore.FieldValue.delete(),
-        updatedAt: TS(),
+        updatedAt: nowTs,
       });
+
+      if (delData.userId) {
+        const orderPatch = {
+          status: 'out_for_delivery',
+          outForDeliveryAt: nowTs,
+          deliveryRiderId: riderUid,
+          deliveryRiderName: rName,
+          deliveryRiderPhone: rPhone,
+          deliveryRider: { id: riderUid, name: rName, phone: rPhone },
+          riderId: riderUid,
+          riderName: rName,
+          updatedAt: nowTs,
+        };
+        await db.doc(`users/${delData.userId}/orders/${delDoc.id}`).set(orderPatch, { merge: true });
+        const vId = delData.vendorId || 'default';
+        await db.doc(`vendors/${vId}/orders/${delDoc.id}`).set(orderPatch, { merge: true });
+      }
 
       await sendFCMOrderAssignment({
         staffId: riderUid,
@@ -1510,11 +1765,14 @@ async function checkUnstartedMachineNudges() {
 
     const staffMap = new Map();
     const workingFloorHelpers = [];
+    const onShiftSupervisors = [];
     onShiftSnap.forEach((sDoc) => {
       const sd = sDoc.data();
       staffMap.set(sDoc.id, sd);
       if ((sd.role === 'helper' || sd.role === 'iron') && isStaffAvailableForAutoAssign(sd)) {
         workingFloorHelpers.push({ uid: sDoc.id, ...sd });
+      } else if ((sd.role === 'supervisor' || sd.role === 'admin') && isStaffAvailableForAutoAssign(sd)) {
+        onShiftSupervisors.push({ uid: sDoc.id, ...sd });
       }
     });
 
@@ -1536,19 +1794,34 @@ async function checkUnstartedMachineNudges() {
       return fallback ? fallback.uid : null;
     };
 
+    // Urgent machine actions (detergent @ 3m, softener @ 21m, unload @ 36m/40m):
+    // Alert the assigned working helper directly even if doing hands-on work;
+    // fall back to a working floor helper only if the assignee is on break/off-shift.
+    const resolveUrgentRecipient = (assigneeId) => {
+      const sd = staffMap.get(assigneeId);
+      if (sd && isStaffAvailableForAutoAssign(sd)) {
+        return assigneeId;
+      }
+      const freeFallback = workingFloorHelpers.find((h) => !isDoingHandsOn(h));
+      if (freeFallback) return freeFallback.uid;
+      return workingFloorHelpers.length > 0 ? workingFloorHelpers[0].uid : null;
+    };
+
     const stages = ['getting_washed', 'getting_dried'];
     const now = Date.now();
+    const activeProcs = [];
 
     for (const step of stages) {
       const snap = await db.collection('ops_process')
         .where('status', '==', step)
-        .limit(25)
+        .limit(100)
         .get();
 
       if (snap.empty) continue;
 
       for (const doc of snap.docs) {
         const p = doc.data();
+        activeProcs.push({ id: doc.id, ...p });
         const stageData = p.stages?.[step];
         if (!stageData || !stageData.assignee) continue;
 
@@ -1590,17 +1863,17 @@ async function checkUnstartedMachineNudges() {
             }
           }, { merge: true });
         }
-        // 2. Unloaded Machine Nudge (Wash cycle 35m / Dry cycle 45m elapsed, but not unloaded)
+        // 2. Unloaded Machine Nudge (Wash cycle 36m / Dry cycle 40m elapsed, but not unloaded)
         else if (isMachineUnloadNudgeDue(stageData, step, now)) {
-          const targetStaffId = resolveRecipient(stageData.assignee);
+          const targetStaffId = resolveUrgentRecipient(stageData.assignee);
           if (!targetStaffId) continue;
 
           const isWash = step === 'getting_washed';
           const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
           const title = isWash ? 'Washing Cycle Complete' : 'Drying Cycle Complete';
           const message = isWash
-            ? `The 35-minute wash cycle has finished for Order #${shortId}. Please unload the washing machine and transfer load to dryer.`
-            : `The 45-minute dry cycle has finished for Order #${shortId}. Please unload the dryer and transfer load to iron/packaging.`;
+            ? `The 36-minute wash cycle has finished for Order #${shortId}. Please unload the washing machine and transfer load to dryer.`
+            : `The 40-minute dry cycle has finished for Order #${shortId}. Please unload the dryer and transfer load to iron/packaging.`;
           const actionLabel = 'COMPLETE & UNLOAD';
 
           console.log(`[StageNudge] Dispatching FCM unload machine nudge to helper ${targetStaffId} for order #${shortId} (${step})`);
@@ -1629,10 +1902,11 @@ async function checkUnstartedMachineNudges() {
             }
           }, { merge: true });
         }
-        // 3. Washer chemical milestones (13m detergent / 21m softener) — mirrors in-app WasherReminderModal
-        else if (step === 'getting_washed' && washerChemicalNudgeDue(stageData, now)) {
+        // 3. Washer chemical milestones (3m detergent / 21m softener) — mirrors in-app WasherReminderModal
+        else if (step === 'getting_washed') {
           const chemical = washerChemicalNudgeDue(stageData, now);
-          const targetStaffId = resolveRecipient(stageData.assignee);
+          if (!chemical) continue;
+          const targetStaffId = resolveUrgentRecipient(stageData.assignee);
           if (!targetStaffId) continue;
 
           const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
@@ -1643,9 +1917,9 @@ async function checkUnstartedMachineNudges() {
           await sendFCMStageNudge({
             staffId: targetStaffId,
             orderId: p.orderId || doc.id,
-            title: isDetergent ? 'Add Detergent (13 Min)' : 'Add Softener (21 Min)',
+            title: isDetergent ? 'Add Detergent (3 Min)' : 'Add Softener (21 Min)',
             message: isDetergent
-              ? `Order #${shortId} has reached 13 minutes in the wash cycle. Please add detergent to Washer now.`
+              ? `Order #${shortId} has reached 3 minutes in the wash cycle. Please add detergent to Washer now.`
               : `Order #${shortId} has reached 21 minutes (rinse cycle started). Please add fabric softener now.`,
             step,
             phase: chemical,
@@ -1660,6 +1934,152 @@ async function checkUnstartedMachineNudges() {
           }, { merge: true });
         }
       }
+    }
+
+    // 4. Hands-on stage reminders for Tagging & Packaging (10m initial, then every 5m)
+    // Do NOT suppress the helper's own tagging/packaging reminder via isDoingHandsOn!
+    const handsOnStages = ['tagging', 'packaging'];
+    for (const step of handsOnStages) {
+      const snap = await db.collection('ops_process')
+        .where('status', '==', step)
+        .limit(100)
+        .get();
+
+      if (snap.empty) continue;
+
+      for (const doc of snap.docs) {
+        const p = doc.data();
+        activeProcs.push({ id: doc.id, ...p });
+        const stageData = p.stages?.[step];
+        if (!stageData || !stageData.assignee) continue;
+
+        if (!isHandsOnStageNudgeDue(stageData, step, now)) continue;
+
+        // Respect onShift and !onBreak for the assigned helper (no off-shift/night reminders)
+        const sd = staffMap.get(stageData.assignee);
+        if (!sd || !isStaffAvailableForAutoAssign(sd)) continue;
+
+        const targetStaffId = stageData.assignee;
+        const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
+        const isTagging = step === 'tagging';
+        const title = isTagging ? 'Tagging Reminder' : 'Packaging Reminder';
+        const message = isTagging
+          ? `Order #${shortId} has been in Tagging for 10+ minutes. Please finish tagging and submit to move it to the washer.`
+          : `Order #${shortId} has been in Packaging for 10+ minutes. Please complete packaging and quality photos.`;
+        const actionLabel = isTagging ? 'OPEN TAGGING' : 'COMPLETE PACKAGING';
+
+        console.log(`[StageNudge] Dispatching FCM hands_on (${step}) reminder to helper ${targetStaffId} for order #${shortId}`);
+
+        await sendFCMStageNudge({
+          staffId: targetStaffId,
+          orderId: p.orderId || doc.id,
+          title,
+          message,
+          step,
+          phase: 'hands_on',
+          actionLabel,
+        });
+
+        await doc.ref.set({
+          stages: {
+            [step]: {
+              nudge: {
+                hands_on: {
+                  lastSentAt: admin.firestore.Timestamp.now(),
+                  sendCount: admin.firestore.FieldValue.increment(1),
+                }
+              }
+            }
+          }
+        }, { merge: true });
+      }
+    }
+
+    // 5. Idle Machine Autopilot Alert (10-minute throttle per machine type via config/autopilotAlerts)
+    const [resSnap, alertSnap] = await Promise.all([
+      db.doc('config/storeResources').get(),
+      db.doc('config/autopilotAlerts').get(),
+    ]);
+    const resources = resSnap.exists ? resSnap.data() : { washers: 2, dryers: 2 };
+    const maxWashers = resources.washers || 2;
+    const maxDryers = resources.dryers || 2;
+    const alertData = alertSnap.exists ? alertSnap.data() : {};
+
+    const occupiedWashers = getOccupiedMachines('getting_washed', activeProcs).length;
+    const occupiedDryers = getOccupiedMachines('getting_dried', activeProcs).length;
+
+    let waitingWashCount = 0;
+    let waitingDryCount = 0;
+    for (const p of activeProcs) {
+      const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+      if (!cur || p.status === 'done' || p.status === 'cancelled') continue;
+      const stg = p.stages?.[cur];
+      if (stg?.completedAt) continue;
+
+      if (cur === 'getting_washed' && !stg?.assignee) {
+        waitingWashCount += 1;
+      } else if (cur === 'tagging' && isWashRequiringService(p.serviceType) && (!stg?.assignee || !stg?.startedAt)) {
+        waitingWashCount += 1;
+      } else if (cur === 'getting_dried' && (!stg?.assignee || !stg?.startedAt)) {
+        waitingDryCount += 1;
+      }
+    }
+
+    const toMs = (t) => (!t ? 0 : typeof t.toMillis === 'function' ? t.toMillis() : typeof t === 'number' ? t : new Date(t).getTime());
+    const IDLE_ALERT_COOLDOWN_MS = 10 * 60 * 1000;
+    const lastWasherAlertMs = toMs(alertData.lastWasherIdleAlertAt);
+    const lastDryerAlertMs = toMs(alertData.lastDryerIdleAlertAt);
+
+    const availableFloorHelpers = workingFloorHelpers.filter((h) => !isDoingHandsOn(h));
+    const recipientIds = Array.from(new Set([
+      ...onShiftSupervisors.map((s) => s.uid),
+      ...(availableFloorHelpers.length > 0 ? availableFloorHelpers : workingFloorHelpers).map((h) => h.uid),
+    ]));
+
+    const alertPatch = {};
+
+    if (occupiedWashers < maxWashers && waitingWashCount > 0 && now - lastWasherAlertMs >= IDLE_ALERT_COOLDOWN_MS) {
+      const emptyWashers = maxWashers - occupiedWashers;
+      const msg = `⚡ Washer Idle! ${emptyWashers}/${maxWashers} washers empty with ${waitingWashCount} wash ${waitingWashCount === 1 ? 'order' : 'orders'} waiting on floor — tag & load now.`;
+      console.log(`[AutopilotAlert] ${msg} (recipients: ${recipientIds.length})`);
+      await Promise.allSettled(
+        recipientIds.map((staffId) =>
+          sendFCMStageNudge({
+            staffId,
+            orderId: 'autopilot_washer_idle',
+            title: '⚡ Washer Idle!',
+            message: msg,
+            step: 'getting_washed',
+            phase: 'idle_alert',
+            actionLabel: 'LOAD WASHER',
+          })
+        )
+      );
+      alertPatch.lastWasherIdleAlertAt = admin.firestore.Timestamp.now();
+    }
+
+    if (occupiedDryers < maxDryers && waitingDryCount > 0 && now - lastDryerAlertMs >= IDLE_ALERT_COOLDOWN_MS) {
+      const emptyDryers = maxDryers - occupiedDryers;
+      const msg = `⚡ Dryer Idle! ${emptyDryers}/${maxDryers} dryers empty with ${waitingDryCount} ${waitingDryCount === 1 ? 'order' : 'orders'} ready to dry.`;
+      console.log(`[AutopilotAlert] ${msg} (recipients: ${recipientIds.length})`);
+      await Promise.allSettled(
+        recipientIds.map((staffId) =>
+          sendFCMStageNudge({
+            staffId,
+            orderId: 'autopilot_dryer_idle',
+            title: '⚡ Dryer Idle!',
+            message: msg,
+            step: 'getting_dried',
+            phase: 'idle_alert',
+            actionLabel: 'LOAD DRYER',
+          })
+        )
+      );
+      alertPatch.lastDryerIdleAlertAt = admin.firestore.Timestamp.now();
+    }
+
+    if (Object.keys(alertPatch).length > 0) {
+      await db.doc('config/autopilotAlerts').set(alertPatch, { merge: true });
     }
   } catch (err) {
     console.error('[checkUnstartedMachineNudges] Error checking unstarted/unloaded machine nudges:', err);
@@ -1679,8 +2099,8 @@ exports.scheduleDrainWaitingQueues = onSchedule({
   await Promise.allSettled([
     drainWaitingOpsQueues(),
     drainScheduledRiderTasks(),
-    checkUnstartedMachineNudges(),
   ]);
+  await checkUnstartedMachineNudges();
 });
 
 // Keep the rider's task/queue in sync when an order's status changes elsewhere
@@ -1829,6 +2249,15 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     const taskSnap = await deliveryTaskRef.get();
     const existingTask = taskSnap.exists ? taskSnap.data() : null;
 
+    // R15: Never auto-assign orders placed on manual hold by a supervisor
+    if (
+      after.manualDeliveryHold === true ||
+      (existingTask && (existingTask.manualHold === true || existingTask.status === 'manual_hold'))
+    ) {
+      console.log(`[syncDeliveryTask] Order ${orderId} is on manual delivery hold. Skipping auto-assign.`);
+      return;
+    }
+
     const deliveryAddress = pickupAddressFromOrder(after); // reuse same address helper
     const processSnap = await db.doc(`ops_process/${orderId}`).get();
     const bundleCount = processSnap.exists ? processSnap.data().stages?.packaging?.bundleCount || 1 : 1;
@@ -1929,19 +2358,21 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       }
     }
     if (!riderUid) {
-      riderUid = await selectRider();
+      riderUid = await selectRider(extractGeoFromOrder(after) || extractGeoFromOrder(existingTask));
     }
 
     const isNewlyAssignedRider = Boolean(riderUid && (!existingTask || existingTask.assignee !== riderUid));
+    const nowTs = TS();
     const payload = {
       orderId,
       userId,
       vendorId: after.vendorId || 'default',
       type: 'delivery',
-      status: riderUid ? 'assigned' : 'pending',
+      status: riderUid ? 'out_for_delivery' : 'pending',
       isExpress,
       assignee: riderUid || null,
-      assignedAt: riderUid ? (isNewlyAssignedRider ? TS() : (existingTask.assignedAt || TS())) : null,
+      ...(isNewlyAssignedRider ? { fcmSent: true } : {}),
+      assignedAt: riderUid ? (isNewlyAssignedRider ? nowTs : (existingTask.assignedAt || nowTs)) : null,
       ...(isNewlyAssignedRider || !riderUid ? { acceptedAt: admin.firestore.FieldValue.delete() } : {}),
       deliveryAddress,
       latitude: extractLatitudeFromOrder(after) || (existingTask && extractLatitudeFromOrder(existingTask)) || null,
@@ -1960,11 +2391,32 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
       bundleLabels,
       tokenNumber: after.tokenNumber || null,
       tokens: after.tokens || null,
-      updatedAt: TS(),
-      ...(!existingTask ? { createdAt: TS() } : {}),
+      updatedAt: nowTs,
+      ...(!existingTask ? { createdAt: nowTs } : {}),
     };
 
     await deliveryTaskRef.set(payload, { merge: true });
+
+    if (riderUid) {
+      const rStaffSnap = await db.doc(`ops_staff/${riderUid}`).get();
+      const rStaffData = rStaffSnap.exists ? rStaffSnap.data() : null;
+      const rName = rStaffData?.name || 'SpinZo Delivery Partner';
+      const rPhone = rStaffData?.phone || '';
+      const orderPatch = {
+        status: 'out_for_delivery',
+        outForDeliveryAt: nowTs,
+        deliveryRiderId: riderUid,
+        deliveryRiderName: rName,
+        deliveryRiderPhone: rPhone,
+        deliveryRider: { id: riderUid, name: rName, phone: rPhone },
+        riderId: riderUid,
+        riderName: rName,
+        updatedAt: nowTs,
+      };
+      await db.doc(`users/${userId}/orders/${orderId}`).set(orderPatch, { merge: true });
+      const vId = after.vendorId || 'default';
+      await db.doc(`vendors/${vId}/orders/${orderId}`).set(orderPatch, { merge: true });
+    }
 
     if (riderUid && (!existingTask || existingTask.assignee !== riderUid)) {
       await sendFCMOrderAssignment({
@@ -2007,7 +2459,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const orderId = data.orderId;
     const action = data.action;
     if (!orderId || typeof orderId !== 'string') return { ok: false, error: 'invalid_input' };
-    if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'tagAllGarments', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded', 'snoozeNudge'].includes(action)) {
+    if (!['claim', 'acceptStep', 'startStep', 'completeStep', 'completePackaging', 'printLabels', 'scanGarment', 'tagAllGarments', 'unregisterGarment', 'submitTagging', 'printBundleLabels', 'editOrder', 'markChemicalAdded', 'snoozeNudge', 'reportDamage'].includes(action)) {
       return { ok: false, error: 'invalid_input' };
     }
 
@@ -2552,35 +3004,36 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const nextStatus = nextIndex < steps.length ? steps[nextIndex] : 'done';
 
         // NOTE: In Firestore transactions, ALL READS MUST EXECUTE BEFORE ANY WRITES.
-        // If this order has split processes and is completing to 'done', read all sibling processes now.
+        // Read all sibling processes when siblingCount > 1 for multi-load aggregation & completion check.
         const siblingCount = process.siblingCount || 1;
         const parentId = process.parentOrderId || realOrderId;
         let allProcessesSnap = null;
-        if (nextStatus === 'done' && siblingCount > 1) {
+        if (siblingCount > 1) {
           allProcessesSnap = await tx.get(
             db.collection('ops_process').where('parentOrderId', '==', parentId)
           );
         }
 
         // --- BEGIN WRITES ---
+        const updatedStages = {
+          ...(process.stages || {}),
+          [step]: {
+            ...stage,
+            completedAt,
+            durationMs,
+            acceptToCompleteMin,
+            startToCompleteMin,
+          },
+          ...(nextStatus !== 'done' ? {
+            [nextStatus]: {
+              ...(process.stages?.[nextStatus] || {}),
+              queuedAt: completedAt,
+            }
+          } : {})
+        };
         tx.update(processRef, {
           steps,
-          stages: { 
-            ...(process.stages || {}), 
-            [step]: { 
-              ...stage, 
-              completedAt, 
-              durationMs,
-              acceptToCompleteMin,
-              startToCompleteMin,
-            },
-            ...(nextStatus !== 'done' ? {
-              [nextStatus]: {
-                ...(process.stages?.[nextStatus] || {}),
-                queuedAt: completedAt,
-              }
-            } : {})
-          },
+          stages: updatedStages,
           currentIndex: nextIndex,
           status: nextStatus,
         });
@@ -2618,26 +3071,21 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           createdAt: completedAt,
         }, { merge: true });
 
-        // Attach step timing directly to the customer & vendor order docs
-        const stepTiming = {
-          assignee: stage.assignee || auth.uid,
-          assigneeName: stage.assigneeName || name,
-          acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
-          startedAt: stage.startedAt || completedAt,
-          completedAt,
-          acceptToCompleteMin,
-          startToCompleteMin,
-          durationMs,
-          ...(stage.detergentAddedAt ? { detergentAddedAt: stage.detergentAddedAt } : {}),
-          ...(stage.softenerAddedAt ? { softenerAddedAt: stage.softenerAddedAt } : {}),
+        // Aggregate across all sibling loads so multi-load (>8kg) orders never overwrite each other
+        const updatedSelfDoc = {
+          id: processRef.id,
+          ...process,
+          steps,
+          stages: updatedStages,
+          currentIndex: nextIndex,
+          status: nextStatus,
         };
-        const orderOpsStepUpdate = {
-          [`opsDetails.stageTimings.${step}`]: stepTiming,
-          [`stageTimings.${step}`]: stepTiming,
-          updatedAt: now,
-        };
-        tx.set(orderRef, orderOpsStepUpdate, { merge: true });
-        tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), orderOpsStepUpdate, { merge: true });
+        const siblingList = allProcessesSnap
+          ? allProcessesSnap.docs.map((d) => (d.id === processRef.id ? updatedSelfDoc : { id: d.id, ...d.data() }))
+          : [updatedSelfDoc];
+        const aggregatedOpsUpdate = buildAggregatedOrderOpsFields(siblingList, now);
+        tx.set(orderRef, aggregatedOpsUpdate, { merge: true });
+        tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), aggregatedOpsUpdate, { merge: true });
 
         // Mirror to production order if needed
         if (nextStatus === 'done') {
@@ -2862,25 +3310,38 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const nextIndex = p.currentIndex + 1;
         const nextStatus = nextIndex < healedSteps.length ? healedSteps[nextIndex] : 'done';
 
+        // Read all sibling processes BEFORE any writes for multi-load aggregation & completion check
+        const siblingCount = p.siblingCount || 1;
+        const parentId = p.parentOrderId || realOrderId;
+        let allProcessesSnap = null;
+        if (siblingCount > 1) {
+          allProcessesSnap = await tx.get(
+            db.collection('ops_process').where('parentOrderId', '==', parentId)
+          );
+        }
+
+        const updatedStages = {
+          ...(p.stages || {}),
+          tagging: {
+            ...tagStage,
+            completedAt,
+            durationMs,
+            acceptToCompleteMin,
+            startToCompleteMin,
+          },
+          ...(nextStatus !== 'done' ? {
+            [nextStatus]: {
+              ...(p.stages?.[nextStatus] || {}),
+              queuedAt: completedAt,
+            }
+          } : {})
+        };
+        const updatedGarments = { ...garments, submittedAt: now };
+
         tx.update(processRef, {
           steps: healedSteps,
-          garments: { ...garments, submittedAt: now },
-          stages: { 
-            ...(p.stages || {}), 
-            tagging: { 
-              ...tagStage, 
-              completedAt, 
-              durationMs,
-              acceptToCompleteMin,
-              startToCompleteMin,
-            },
-            ...(nextStatus !== 'done' ? {
-              [nextStatus]: {
-                ...(p.stages?.[nextStatus] || {}),
-                queuedAt: completedAt,
-              }
-            } : {})
-          },
+          garments: updatedGarments,
+          stages: updatedStages,
           currentIndex: nextIndex,
           status: nextStatus,
         });
@@ -2901,8 +3362,8 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__tagging`);
         tx.set(metricRef, {
           processId: processRef.id,
-          orderId: p.orderId || orderId,
-          parentOrderId: p.parentOrderId || orderId,
+          orderId: p.orderId || realOrderId,
+          parentOrderId: p.parentOrderId || realOrderId,
           step: 'tagging',
           serviceType: p.serviceType || 'wash_fold',
           serviceLabel: p.serviceLabel || '',
@@ -2918,45 +3379,32 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           createdAt: completedAt,
         }, { merge: true });
 
-        // Attach garment count and tagging stage timing directly to customer & vendor order docs
-        const taggingTiming = {
-          assignee: tagStage.assignee || auth.uid,
-          assigneeName: tagStage.assigneeName || name,
-          acceptedAt: tagStage.acceptedAt || tagStage.startedAt || completedAt,
-          startedAt: tagStage.startedAt || completedAt,
-          completedAt,
-          acceptToCompleteMin,
-          startToCompleteMin,
-          durationMs,
+        // Aggregate garment count & per-load stage timings across all sibling loads
+        const updatedSelfDoc = {
+          id: processRef.id,
+          ...p,
+          steps: healedSteps,
+          garments: updatedGarments,
+          stages: updatedStages,
+          currentIndex: nextIndex,
+          status: nextStatus,
         };
-        const orderOpsTaggingUpdate = {
-          garmentCount: expected,
-          registeredGarmentsCount: got,
-          'opsDetails.garmentCount': expected,
-          'opsDetails.registeredGarmentsCount': got,
-          'opsDetails.stageTimings.tagging': taggingTiming,
-          'stageTimings.tagging': taggingTiming,
-          updatedAt: now,
-        };
-        tx.set(orderRef, orderOpsTaggingUpdate, { merge: true });
-        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), orderOpsTaggingUpdate, { merge: true });
+        const siblingList = allProcessesSnap
+          ? allProcessesSnap.docs.map((d) => (d.id === processRef.id ? updatedSelfDoc : { id: d.id, ...d.data() }))
+          : [updatedSelfDoc];
+        const aggregatedOpsUpdate = buildAggregatedOrderOpsFields(siblingList, now);
+        tx.set(orderRef, aggregatedOpsUpdate, { merge: true });
+        tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), aggregatedOpsUpdate, { merge: true });
 
         // Mirror to production order if needed
         if (nextStatus === 'done') {
-          const siblingCount = p.siblingCount || 1;
-          
           if (siblingCount <= 1) {
             const deliveryOTP = generateOTP();
             const updateData = { status: 'ready', readyAt: now, deliveryOTP };
             tx.update(orderRef, updateData);
-            tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
+            tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), updateData, { merge: true });
           } else {
-            const parentId = p.parentOrderId || orderId;
-            const allProcesses = await tx.get(
-              db.collection('ops_process').where('parentOrderId', '==', parentId)
-            );
-            
-            const allDone = allProcesses.docs.every(d => {
+            const allDone = (allProcessesSnap ? allProcessesSnap.docs : []).every(d => {
               if (d.id === processRef.id) return true;
               return d.data().status === 'done';
             });
@@ -2965,13 +3413,13 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
               const deliveryOTP = generateOTP();
               const updateData = { status: 'ready', readyAt: now, deliveryOTP };
               tx.update(orderRef, updateData);
-              tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
+              tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), updateData, { merge: true });
             }
           }
         } else if (isProductionStep(nextStatus)) {
           const updateData = { processingStep: nextStatus, updatedAt: now };
           tx.update(orderRef, updateData);
-          tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
+          tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), updateData, { merge: true });
         }
 
         return { ok: true, currentIndex: nextIndex, status: nextStatus };
@@ -3031,35 +3479,36 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const nextStatus = nextIndex < process.steps.length ? process.steps[nextIndex] : 'done';
 
         const qualityMedia = data.qualityMedia || {};
-        
+        const siblingCount = process.siblingCount || 1;
+        const parentId = process.parentOrderId || realOrderId;
+        let allProcessesSnap = null;
         let allDone = false;
-        if (nextStatus === 'done') {
-          const siblingCount = process.siblingCount || 1;
-          if (siblingCount > 1) {
-            const parentId = process.parentOrderId || orderId;
-            const allProcesses = await tx.get(
-              db.collection('ops_process').where('parentOrderId', '==', parentId)
-            );
-            
-            allDone = allProcesses.docs.every(d => {
+        if (siblingCount > 1) {
+          allProcessesSnap = await tx.get(
+            db.collection('ops_process').where('parentOrderId', '==', parentId)
+          );
+          if (nextStatus === 'done') {
+            allDone = allProcessesSnap.docs.every(d => {
               if (d.id === processRef.id) return true;
               return d.data().status === 'done';
             });
           }
         }
+
+        const updatedStages = {
+          ...(process.stages || {}),
+          packaging: {
+            ...stage,
+            completedAt,
+            durationMs,
+            acceptToCompleteMin,
+            startToCompleteMin,
+            qualityProof: qualityMedia,
+          },
+        };
         
         tx.update(processRef, {
-          stages: {
-            ...(process.stages || {}),
-            packaging: { 
-              ...stage, 
-              completedAt, 
-              durationMs, 
-              acceptToCompleteMin,
-              startToCompleteMin,
-              qualityProof: qualityMedia 
-            },
-          },
+          stages: updatedStages,
           currentIndex: nextIndex,
           status: nextStatus,
         });
@@ -3080,8 +3529,8 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__packaging`);
         tx.set(metricRef, {
           processId: processRef.id,
-          orderId: process.orderId || orderId,
-          parentOrderId: process.parentOrderId || orderId,
+          orderId: process.orderId || realOrderId,
+          parentOrderId: process.parentOrderId || realOrderId,
           step: 'packaging',
           serviceType: process.serviceType || 'wash_fold',
           serviceLabel: process.serviceLabel || '',
@@ -3097,42 +3546,27 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           createdAt: completedAt,
         }, { merge: true });
 
-        // Attach packaging photos, packagingProof, and stage timing directly to customer & vendor order docs
-        const packagingPhotosList = Array.isArray(qualityMedia.photos) ? qualityMedia.photos : [];
-        const packagingTiming = {
-          assignee: stage.assignee || auth.uid,
-          assigneeName: stage.assigneeName || name,
-          acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
-          startedAt: stage.startedAt || completedAt,
-          completedAt,
-          acceptToCompleteMin,
-          startToCompleteMin,
-          durationMs,
-          ...(qualityMedia.bundles ? { bundles: qualityMedia.bundles } : {}),
+        // Aggregate packaging photos, videos, bundles, and per-load stage timings across all sibling loads
+        const updatedSelfDoc = {
+          id: processRef.id,
+          ...process,
+          stages: updatedStages,
+          currentIndex: nextIndex,
+          status: nextStatus,
         };
-
-        const orderOpsPackagingUpdate = {
-          qualityPhotos: packagingPhotosList,
-          packagingPhotos: packagingPhotosList,
-          ...(packagingPhotosList.length > 0 ? { proofUrl: packagingPhotosList[0] } : {}),
-          packagingProof: qualityMedia,
-          'opsDetails.qualityPhotos': packagingPhotosList,
-          'opsDetails.packagingPhotos': packagingPhotosList,
-          'opsDetails.packagingProof': qualityMedia,
-          'opsDetails.stageTimings.packaging': packagingTiming,
-          'stageTimings.packaging': packagingTiming,
-          updatedAt: now,
-        };
-        tx.set(orderRef, orderOpsPackagingUpdate, { merge: true });
-        tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), orderOpsPackagingUpdate, { merge: true });
+        const siblingList = allProcessesSnap
+          ? allProcessesSnap.docs.map((d) => (d.id === processRef.id ? updatedSelfDoc : { id: d.id, ...d.data() }))
+          : [updatedSelfDoc];
+        const aggregatedOpsUpdate = buildAggregatedOrderOpsFields(siblingList, now);
+        tx.set(orderRef, aggregatedOpsUpdate, { merge: true });
+        tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), aggregatedOpsUpdate, { merge: true });
 
         if (nextStatus === 'done') {
-          const siblingCount = process.siblingCount || 1;
           if (siblingCount <= 1 || allDone) {
             const deliveryOTP = generateOTP();
             const updateData = { status: 'ready', readyAt: now, deliveryOTP };
             tx.update(orderRef, updateData);
-            tx.set(db.doc(`vendors/${vendorId}/orders/${orderId}`), updateData, { merge: true });
+            tx.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), updateData, { merge: true });
           }
         }
 
@@ -3168,8 +3602,11 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
   }
 
   if (action === 'snoozeNudge') {
-    const { phase, step } = data; // phase: 'accepted' | 'started'
+    const { phase, step } = data; // phase: 'accepted' | 'started' | 'hands_on'
     if (!phase || !step) return { ok: false, error: 'invalid_input' };
+    if (phase === 'hands_on' && step !== 'tagging' && step !== 'packaging') {
+      return { ok: false, error: 'invalid_input' };
+    }
     const ps = await processRef.get();
     if (!ps.exists) return { ok: true, status: 'not_found', phase, step };
     const p = ps.data();
@@ -3183,9 +3620,16 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const stageData = (p.stages && p.stages[step]) || {};
     if (stageData.assignee && stageData.assignee !== auth.uid && role !== 'supervisor' && role !== 'admin') {
       let canCoverBreak = false;
-      if (step === 'getting_washed' || step === 'getting_dried') {
-        const ownerSnap = await db.doc(`ops_staff/${stageData.assignee}`).get();
-        if (!ownerSnap.exists || !isStaffAvailableForAutoAssign(ownerSnap.data())) {
+      if (step === 'getting_washed' || step === 'getting_dried' || step === 'tagging' || step === 'packaging') {
+        const [ownerSnap, callerSnap] = await Promise.all([
+          db.doc(`ops_staff/${stageData.assignee}`).get(),
+          db.doc(`ops_staff/${auth.uid}`).get(),
+        ]);
+        const callerData = callerSnap.exists ? callerSnap.data() : null;
+        const callerIsOnShiftHelper =
+          (role === 'helper' || role === 'iron') &&
+          Boolean(callerData && callerData.onShift === true);
+        if (callerIsOnShiftHelper && (!ownerSnap.exists || !isStaffAvailableForAutoAssign(ownerSnap.data()))) {
           canCoverBreak = true;
         }
       }
@@ -3195,23 +3639,72 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     if (phase === 'accepted' && stageData.startedAt) {
       return { ok: true, status: 'already_started', phase, step };
     }
-    if (phase === 'started' && stageData.completedAt) {
+    if ((phase === 'started' || phase === 'hands_on') && stageData.completedAt) {
       return { ok: true, status: 'already_completed', phase, step };
     }
+
+    const nudgePatch = {
+      lastSnoozedAt: now,
+      snoozeCount: admin.firestore.FieldValue.increment(1),
+      ...(phase === 'hands_on' ? { snoozedUntil: admin.firestore.Timestamp.fromMillis(now.toMillis() + 5 * 60 * 1000) } : {}),
+    };
 
     await processRef.set({
       stages: {
         [step]: {
           nudge: {
-            [phase]: {
-              lastSnoozedAt: now,
-              snoozeCount: admin.firestore.FieldValue.increment(1),
-            }
+            [phase]: nudgePatch
           }
         }
       }
     }, { merge: true });
     return { ok: true, phase, step };
+  }
+
+  if (action === 'reportDamage') {
+    const cleanPhotos = Array.isArray(data.photos)
+      ? data.photos.filter((u) => typeof u === 'string' && u.trim().length > 0)
+      : [];
+    const cleanVideos = Array.isArray(data.videos)
+      ? data.videos.filter((u) => typeof u === 'string' && u.trim().length > 0)
+      : [];
+    if (cleanPhotos.length === 0 && cleanVideos.length === 0) {
+      return { ok: false, error: 'invalid_input', message: 'At least one photo or video is required.' };
+    }
+
+    const ps = processSnap.exists ? processSnap : await processRef.get();
+    if (!ps.exists) return { ok: false, error: 'not_found' };
+    const proc = ps.data();
+
+    const staffSnap = await db.doc(`ops_staff/${auth.uid}`).get();
+    const staffName = staffSnap.exists ? (staffSnap.data().name || '') : '';
+
+    const report = {
+      id: 'dmg_' + Date.now(),
+      processId,
+      loadLabel: proc.serviceLabel || proc.serviceType || 'Load',
+      photos: cleanPhotos,
+      videos: cleanVideos,
+      note: (typeof data.note === 'string' ? data.note : '').trim(),
+      reportedBy: auth.uid,
+      reportedByName: staffName,
+      reportedAt: now,
+    };
+
+    const damageUnion = admin.firestore.FieldValue.arrayUnion(report);
+    const batch = db.batch();
+    batch.set(processRef, { damageReports: damageUnion, updatedAt: now }, { merge: true });
+    const orderDamagePatch = {
+      damageReports: damageUnion,
+      opsDetails: { damageReports: damageUnion },
+      updatedAt: now,
+    };
+    batch.set(orderRef, orderDamagePatch, { merge: true });
+    if (vendorId) {
+      batch.set(db.doc(`vendors/${vendorId}/orders/${realOrderId}`), orderDamagePatch, { merge: true });
+    }
+    await batch.commit();
+    return { ok: true, report };
   }
 
   return { ok: false, error: 'invalid_input' };
@@ -3403,11 +3896,16 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         tx.update(orderRef, updateData);
         tx.set(vendorRef, updateData, { merge: true });
         
-        // Also update ops task if it exists
+        // Also update ops task if it exists, and clear manualHold on reschedule
         if (taskSnap.exists) {
           tx.update(db.doc(`ops_tasks/${orderId}`), { pickupSlot: updateData.pickupDetails });
         } else if (queueSnap.exists) {
-          tx.update(db.doc(`ops_queue/${orderId}`), { pickupSlot: updateData.pickupDetails });
+          const qData = queueSnap.data() || {};
+          tx.update(db.doc(`ops_queue/${orderId}`), {
+            pickupSlot: updateData.pickupDetails,
+            manualHold: false,
+            ...(qData.status === 'manual_hold' ? { status: 'scheduled' } : {}),
+          });
         }
 
         return { ok: true };
@@ -3421,14 +3919,21 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           deliveryDate: date,
           deliveryTime: time,
           deliveryScheduledAt: now,
+          manualDeliveryHold: admin.firestore.FieldValue.delete(),
           updatedAt: now,
         };
         tx.update(orderRef, updateData);
         tx.set(vendorRef, updateData, { merge: true });
 
-        // Also update the delivery task if it exists (delTaskSnap read at top)
+        // Also update the delivery task if it exists (delTaskSnap read at top) and clear manualHold
         if (delTaskSnap.exists) {
-          tx.update(delTaskRef, { deliveryDate: date, deliveryTime: time });
+          const dData = delTaskSnap.data() || {};
+          tx.update(delTaskRef, {
+            deliveryDate: date,
+            deliveryTime: time,
+            manualHold: false,
+            ...(dData.status === 'manual_hold' ? { status: 'scheduled' } : {}),
+          });
         }
 
         return { ok: true };
@@ -3438,25 +3943,43 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (order.status !== 'ready') return { ok: false, error: 'invalid_state' };
         const deliveryDate = order.deliveryDate || new Date().toISOString().split('T')[0];
         const deliveryTime = order.deliveryTime || 'Immediate';
-        if (!order.deliveryDate || !order.deliveryTime) {
-          tx.update(orderRef, { deliveryDate, deliveryTime, deliveryScheduledAt: now, updatedAt: now });
-          tx.set(vendorRef, { deliveryDate, deliveryTime, deliveryScheduledAt: now, updatedAt: now }, { merge: true });
-        }
 
-        // Assign a rider
-        const assignee = await selectRider();
+        // Assign a rider & read rider details BEFORE any transaction writes
+        const orderGeo = extractGeoFromOrder(order) || (delTaskSnap.exists ? extractGeoFromOrder(delTaskSnap.data()) : null);
+        const assignee = await selectRider(orderGeo);
         if (!assignee) return { ok: false, error: 'no_rider_available' };
+        const rStaffSnap = await tx.get(db.doc(`ops_staff/${assignee}`));
+        const rStaffData = rStaffSnap.exists ? rStaffSnap.data() : null;
+        const rName = rStaffData?.name || 'SpinZo Delivery Partner';
+        const rPhone = rStaffData?.phone || '';
 
-        // Do not change order status yet, keep it 'ready' until pickup
-        // Update delivery task to 'assigned'
+        const orderUpdate = {
+          status: 'out_for_delivery',
+          outForDeliveryAt: now,
+          deliveryRiderId: assignee,
+          deliveryRiderName: rName,
+          deliveryRiderPhone: rPhone,
+          deliveryRider: { id: assignee, name: rName, phone: rPhone },
+          riderId: assignee,
+          riderName: rName,
+          manualDeliveryHold: admin.firestore.FieldValue.delete(),
+          updatedAt: now,
+          ...(!order.deliveryDate || !order.deliveryTime ? { deliveryDate, deliveryTime, deliveryScheduledAt: now } : {}),
+        };
+        tx.update(orderRef, orderUpdate);
+        tx.set(vendorRef, orderUpdate, { merge: true });
+
+        // Update delivery task to 'out_for_delivery' (parity with assignTaskToRider)
         const isExpress = isOrderExpress(order);
         const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
         if (delTaskSnap.exists) {
           const existingDel = delTaskSnap.data() || {};
           tx.update(delTaskRef, {
             assignee,
-            status: 'assigned',
+            status: 'out_for_delivery',
+            manualHold: false,
             isExpress,
+            fcmSent: true,
             assignedAt: now,
             deliveryDate,
             deliveryTime,
@@ -3474,8 +3997,10 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             userId,
             vendorId,
             type: 'delivery',
-            status: 'assigned',
+            status: 'out_for_delivery',
+            manualHold: false,
             isExpress,
+            fcmSent: true,
             assignee,
             deliveryAddress: pickupAddressFromOrder(order),
             latitude: extractLatitudeFromOrder(order),
@@ -3495,7 +4020,17 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           });
         }
 
-        return { ok: true, status: 'assigned' };
+        return {
+          ok: true,
+          status: 'out_for_delivery',
+          _markOutFcm: {
+            staffId: assignee,
+            isExpress,
+            customerName: order.customerName || order.userName || '',
+            address: pickupAddressFromOrder(order),
+            slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
+          },
+        };
       }
 
       if (action === 'pickupDelivery') {
@@ -3579,6 +4114,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             updatedAt: now,
             deliveryRiderId: riderId,
             riderId: riderId,
+            manualDeliveryHold: admin.firestore.FieldValue.delete(),
             ...(!order.deliveryDate || !order.deliveryTime ? { deliveryDate, deliveryTime, deliveryScheduledAt: now } : {}),
           };
           tx.update(orderRef, updateData);
@@ -3593,7 +4129,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               assignee: riderId,
               assignedBy: auth.uid,
               status: 'out_for_delivery',
+              manualHold: false,
               isExpress,
+              fcmSent: true,
               assignedAt: now,
               deliveryDate,
               deliveryTime,
@@ -3614,7 +4152,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           } else {
             tx.set(delTaskRef, {
               orderId, userId, vendorId, type: 'delivery', status: 'out_for_delivery',
+              manualHold: false,
               isExpress,
+              fcmSent: true,
               assignee: riderId, assignedBy: auth.uid, deliveryAddress: pickupAddressFromOrder(order),
               latitude: extractLatitudeFromOrder(order),
               longitude: extractLongitudeFromOrder(order),
@@ -3639,8 +4179,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             return { ok: false, error: 'invalid_state' };
           }
           
-          tx.update(orderRef, { riderId: riderId, updatedAt: now });
-          tx.set(vendorRef, { riderId: riderId, updatedAt: now }, { merge: true });
+          tx.update(orderRef, { riderId: riderId, manualHold: admin.firestore.FieldValue.delete(), updatedAt: now });
+          tx.set(vendorRef, { riderId: riderId, manualHold: admin.firestore.FieldValue.delete(), updatedAt: now }, { merge: true });
 
           const total = (order && (order.totalAmount || (order.billDetails && order.billDetails.total) || order.cartTotal)) || 0;
           const isExpress = isOrderExpress(order);
@@ -3650,7 +4190,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               assignedBy: auth.uid,
               assignedAt: now,
               status: 'assigned',
+              manualHold: false,
               isExpress,
+              fcmSent: true,
               acceptedAt: admin.firestore.FieldValue.delete(),
             });
           } else if (queueSnap.exists) {
@@ -3664,7 +4206,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               assignedBy: auth.uid,
               assignedAt: now,
               status: 'assigned',
+              manualHold: false,
               isExpress: isExpress || isOrderExpress(qData),
+              fcmSent: true,
               customerName: qData.customerName || (order && (order.customerName || order.userName)) || '',
               customerPhone: qData.customerPhone || (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: qData.pickupAddress || pickupAddressFromOrder(order),
@@ -3680,7 +4224,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             // Manual pickup assignment with no existing task/queue — create one.
             tx.set(db.doc(`ops_tasks/${orderId}`), {
               orderId, userId, vendorId, assignee: riderId, assignedBy: auth.uid, status: 'assigned',
+              manualHold: false,
               isExpress,
+              fcmSent: true,
               customerName: (order && (order.customerName || order.userName)) || '',
               customerPhone: (order && (order.customerPhone || order.userPhone)) || '',
               pickupAddress: pickupAddressFromOrder(order),
@@ -3707,17 +4253,33 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (order.status !== 'placed' && order.status !== 'confirmed') {
           return { ok: false, error: 'invalid_state' };
         }
-        tx.update(orderRef, { riderId: admin.firestore.FieldValue.delete(), updatedAt: now });
-        tx.set(vendorRef, { riderId: admin.firestore.FieldValue.delete(), updatedAt: now }, { merge: true });
+        const clearPickupRiderFields = {
+          riderId: admin.firestore.FieldValue.delete(),
+          riderName: admin.firestore.FieldValue.delete(),
+          pickupRider: admin.firestore.FieldValue.delete(),
+          updatedAt: now,
+        };
+        tx.update(orderRef, clearPickupRiderFields);
+        tx.set(vendorRef, clearPickupRiderFields, { merge: true });
 
-        // Move the pickup out of a rider's queue and park it for later assignment.
+        // Move the pickup out of a rider's queue and hold it from auto-assignment until supervisor assigns/reschedules.
         const prevTask = taskSnap.exists ? (taskSnap.data() || {}) : {};
         if (taskSnap.exists) {
           tx.delete(db.doc(`ops_tasks/${orderId}`));
         }
-        if (!queueSnap.exists) {
+        if (queueSnap.exists) {
+          tx.update(db.doc(`ops_queue/${orderId}`), {
+            status: 'manual_hold',
+            manualHold: true,
+            unassignedAt: now,
+            unassignedBy: auth.uid,
+          });
+        } else {
           tx.set(db.doc(`ops_queue/${orderId}`), {
-            orderId, userId, vendorId, status: 'pending',
+            orderId, userId, vendorId, status: 'manual_hold',
+            manualHold: true,
+            unassignedAt: now,
+            unassignedBy: auth.uid,
             customerName: (order && (order.customerName || order.userName)) || prevTask.customerName || '',
             customerPhone: (order && (order.customerPhone || order.userPhone)) || prevTask.customerPhone || '',
             pickupAddress: pickupAddressFromOrder(order) || prevTask.pickupAddress || '',
@@ -3733,7 +4295,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             createdAt: now,
           });
         }
-        return { ok: true, status: 'parked' };
+        return { ok: true, status: 'manual_hold' };
       }
 
       if (action === 'unassignDelivery') {
@@ -3741,13 +4303,18 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           return { ok: false, error: 'invalid_state' };
         }
         const { resetSlot, reason, note } = data;
-        // Move the delivery out of the rider's queue and return order to 'ready'
+        // Move the delivery out of the rider's queue, return order to 'ready', and hold from auto-assign
         const updateData = {
           status: 'ready',
           updatedAt: now,
+          manualDeliveryHold: true,
           outForDeliveryAt: admin.firestore.FieldValue.delete(),
           deliveryRiderId: admin.firestore.FieldValue.delete(),
+          deliveryRiderName: admin.firestore.FieldValue.delete(),
+          deliveryRiderPhone: admin.firestore.FieldValue.delete(),
+          deliveryRider: admin.firestore.FieldValue.delete(),
           riderId: admin.firestore.FieldValue.delete(),
+          riderName: admin.firestore.FieldValue.delete(),
           ...(resetSlot ? {
             deliveryDate: admin.firestore.FieldValue.delete(),
             deliveryTime: admin.firestore.FieldValue.delete(),
@@ -3760,7 +4327,10 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         if (delTaskSnap.exists) {
           tx.update(delTaskRef, {
             assignee: null,
-            status: resetSlot ? 'awaiting_slot' : 'pending',
+            status: resetSlot ? 'awaiting_slot' : 'manual_hold',
+            manualHold: true,
+            unassignedAt: now,
+            unassignedBy: auth.uid,
             assignedAt: admin.firestore.FieldValue.delete(),
             acceptedAt: admin.firestore.FieldValue.delete(),
             pickedUpAt: admin.firestore.FieldValue.delete(),
@@ -3893,6 +4463,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
                 deliveryRiderName: rName,
                 deliveryRiderPhone: rPhone,
                 deliveryRider: { id: riderId, name: rName, phone: rPhone },
+                riderName: rName,
               }
             : {
                 riderId: riderId,
@@ -3927,6 +4498,24 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         });
       } catch (err) {
         console.error('assignTaskToRider FCM push error', err);
+      }
+    }
+
+    if (result.ok && action === 'markOutForDelivery' && result._markOutFcm) {
+      const fcmInfo = result._markOutFcm;
+      delete result._markOutFcm;
+      try {
+        await sendFCMOrderAssignment({
+          staffId: fcmInfo.staffId,
+          orderId,
+          taskType: fcmInfo.isExpress ? '⚡ Express Delivery (6-8h)' : 'delivery',
+          customerName: fcmInfo.customerName,
+          address: fcmInfo.address,
+          slot: fcmInfo.slot || (fcmInfo.isExpress ? '⚡ Express 6-8h Priority' : ''),
+          isInstant: fcmInfo.isExpress,
+        });
+      } catch (err) {
+        console.error('markOutForDelivery FCM push error', err);
       }
     }
 
@@ -4012,20 +4601,29 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
   const isSupervisorManual = Boolean(enrichedAfter.assignedBy && enrichedAfter.assignedBy !== 'system_auto');
 
   // Only trigger if assignee was newly set or changed, and task is pending/assigned
-  // (Supervisor manual assignments already send FCM directly in assignTaskToRider)
-  if (newAssignee && newAssignee !== oldAssignee && !isSupervisorManual && (enrichedAfter.status === 'pending' || enrichedAfter.status === 'assigned')) {
+  // (Paths that already send FCM directly stamp fcmSent: true; supervisor manual assignments also send directly)
+  if (
+    newAssignee &&
+    newAssignee !== oldAssignee &&
+    !isSupervisorManual &&
+    enrichedAfter.fcmSent !== true &&
+    (enrichedAfter.status === 'pending' || enrichedAfter.status === 'assigned')
+  ) {
+    const isExp = isOrderExpress(enrichedAfter);
     const isInstant = Boolean(enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.isInstant);
-    const slot = (enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.type === 'instant')
+    const slot = isExp
+      ? `⚡ Express 6-8h${enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.scheduledTime ? ` • ${enrichedAfter.pickupSlot.scheduledTime}` : ''}`
+      : (enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.type === 'instant')
       ? 'Instant Pickup'
       : (enrichedAfter.pickupSlot && enrichedAfter.pickupSlot.scheduledTime) || '';
     await sendFCMOrderAssignment({
       staffId: newAssignee,
       orderId: event.params.orderId,
-      taskType: isInstant ? 'Instant Pickup' : 'Pickup',
+      taskType: isExp ? '⚡ Express Pickup (6-8h)' : (isInstant ? 'Instant Pickup' : 'Pickup'),
       customerName: enrichedAfter.customerName || '',
       address: enrichedAfter.pickupAddress || '',
       slot,
-      isInstant,
+      isInstant: isInstant || isExp,
     });
   }
 
@@ -4161,16 +4759,24 @@ exports.onDeliveryTaskWritten = onDocumentWritten('ops_delivery_tasks/{orderId}'
 
   const newAssignee = after.assignee;
   const oldAssignee = before ? before.assignee : null;
+  const isSupervisorManual = Boolean(after.assignedBy && after.assignedBy !== 'system_auto');
 
-  if (newAssignee && newAssignee !== oldAssignee && (after.status === 'assigned' || after.status === 'out_for_delivery')) {
+  if (
+    newAssignee &&
+    newAssignee !== oldAssignee &&
+    !isSupervisorManual &&
+    after.fcmSent !== true &&
+    (after.status === 'assigned' || after.status === 'out_for_delivery')
+  ) {
+    const isExp = isOrderExpress(after);
     await sendFCMOrderAssignment({
       staffId: newAssignee,
       orderId: event.params.orderId,
-      taskType: 'delivery',
+      taskType: isExp ? '⚡ Express Delivery (6-8h)' : 'delivery',
       customerName: after.customerName || '',
       address: after.deliveryAddress || '',
-      slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim(),
-      isInstant: false,
+      slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
+      isInstant: isExp,
     });
   }
 

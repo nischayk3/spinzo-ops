@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform, AppState } from 'react-native';
 import { BellRing, CheckCircle2, MapPin, Package, Hash, User, Layers, X, WashingMachine } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
@@ -7,6 +7,7 @@ import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useAuthStore } from '../store/authStore';
 import { getTopEligibleTask } from '../utils/helperEligibility';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
+import { useHelperRulesStore } from '../store/helperRulesStore';
 import { stopAlarm, dramaticChime } from '../utils/alerts';
 import { stepLabel, currentStep, isMachineStep, isHelperDoingHandsOn } from '../utils/opsProcess';
 import { serviceSummary, orderTotal } from '../utils/orderFeed';
@@ -21,10 +22,20 @@ export function HelperAssignmentModal() {
   const { orders, isLoading: isOrdersLoading } = useOrderFeedStore();
   const authRole = useAuthStore(s => s.activeRole);
   const resources = useStoreResourcesStore(s => s.resources);
+  const helperRules = useHelperRulesStore(s => s.rules);
+  const subscribeHelperRules = useHelperRulesStore(s => s.subscribe);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [localSnoozeMap, setLocalSnoozeMap] = useState<Record<string, number>>({});
+  const wasAlertingRef = useRef(false);
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
+
+  useEffect(() => {
+    if (effectiveRole === 'helper' || effectiveRole === 'iron') {
+      subscribeHelperRules();
+    }
+  }, [effectiveRole, subscribeHelperRules]);
+
   const isOnBreak = Boolean(
     staffDoc?.onBreak ||
     staffDoc?.attendanceStatus === 'lunch' ||
@@ -40,7 +51,8 @@ export function HelperAssignmentModal() {
         resources,
         staffDoc.onShift === true,
         staffDoc.phone,
-        isOnBreak
+        isOnBreak,
+        helperRules
       )
     : null;
 
@@ -61,6 +73,7 @@ export function HelperAssignmentModal() {
 
   useEffect(() => {
     if (activeTask && !acceptingId) {
+      wasAlertingRef.current = true;
       // Loop alarm sound until helper accepts (continuous siren)
       if (!showAsBanner) {
         dramaticChime(true);
@@ -74,7 +87,7 @@ export function HelperAssignmentModal() {
         isInstant: Boolean(order?.pickupDetails?.isInstant),
       });
 
-      if (Platform.OS === 'android' && !showAsBanner) {
+      if (Platform.OS === 'android' && !showAsBanner && AppState.currentState !== 'active') {
         SpinzoOverlay.showOverlay({
           orderId: activeTask.orderId || activeTask.id,
           taskType: 'helper_step',
@@ -84,19 +97,25 @@ export function HelperAssignmentModal() {
         });
       }
     } else {
-      stopAlarm();
-      clearAssignmentNotifications();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        clearAssignmentNotifications();
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.dismissOverlay();
+        }
       }
     }
     return () => {
-      stopAlarm();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.dismissOverlay();
+        }
       }
     };
-  }, [activeTask?.id, acceptingId, showAsBanner]);
+  }, [activeTask?.id, curStep, acceptingId, showAsBanner]);
 
   // Auto-clear active task if the order was cancelled, completed, or deleted
   useEffect(() => {
@@ -123,6 +142,7 @@ export function HelperAssignmentModal() {
   }, [staffDoc?.activeHelperTask, processes, orders, isOrdersLoading, isProcessesLoading, clearActiveHelperTask]);
 
   const handleDismiss = () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -136,6 +156,7 @@ export function HelperAssignmentModal() {
 
   const handleAccept = async () => {
     if (!activeTask || !staffDoc) return;
+    wasAlertingRef.current = false;
     setAcceptingId(activeTask.id);
     stopAlarm();
     clearAssignmentNotifications();
@@ -236,124 +257,126 @@ export function HelperAssignmentModal() {
   // 2. FULL MODAL: Rendered when helper is completely free
   return (
     <Modal visible={true} animationType="fade" transparent onRequestClose={handleDismiss}>
-      <View className="flex-1 bg-black/80 justify-center p-5">
+      <View className="flex-1 bg-black/80 justify-center p-4">
         <View className="bg-bgSurface rounded-3xl border border-bgSurfaceLight shadow-lg max-h-[88%]">
           {/* Header */}
-          <View className="items-center pt-6 px-5 pb-4 border-b border-bgSurfaceLight relative">
-            <TouchableOpacity 
+          <View className="items-center pt-5 px-4 pb-3.5 border-b border-bgSurfaceLight relative">
+            <TouchableOpacity
               onPress={handleDismiss}
-              className="absolute top-4 right-4 w-9 h-9 rounded-full bg-bgSurfaceLight items-center justify-center z-10"
+              className="absolute top-3.5 right-3.5 w-8 h-8 rounded-full bg-bgSurfaceLight items-center justify-center z-10"
             >
-              <X size={18} color="#9ca3af" />
+              <X size={16} color="#9ca3af" />
             </TouchableOpacity>
 
-            <View className="w-16 h-16 rounded-full bg-primary/15 items-center justify-center mb-3">
-              <BellRing size={28} color="#994BFF" />
+            <View className="w-12 h-12 rounded-full bg-primary/15 items-center justify-center mb-2">
+              <BellRing size={22} color="#994BFF" />
             </View>
-            <Text className="text-2xl font-black text-textPrimary text-center">New Task Available</Text>
-            
-            {activeTask.isPushedToMe && (
-              <View className="mt-2 bg-purple-500 rounded-full px-3 py-1">
-                <Text className="text-white font-bold text-xs uppercase tracking-widest">Assigned by Supervisor</Text>
-              </View>
-            )}
+            <Text className="text-xl font-black text-textPrimary text-center">New Task Available</Text>
 
-            {order?.isUrgent && (
-              <View className="mt-2 bg-red-500/20 border border-red-500/50 rounded-full px-3 py-1 flex-row items-center">
-                <Text className="text-red-400 font-black text-xs uppercase tracking-widest">⚡ URGENT ORDER</Text>
+            <View className="flex-row flex-wrap items-center justify-center gap-1.5 mt-2">
+              <View className="px-2.5 py-0.5 rounded-full bg-primary/10 border border-primary/25">
+                <Text className="text-primary font-black uppercase tracking-wider text-xs">{stepLabel(curStep)}</Text>
               </View>
-            )}
 
-            <View className="mt-2 px-3 py-1 rounded-full bg-primary/10 border border-primary/20">
-              <Text className="text-primary font-black uppercase tracking-widest text-sm">{stepLabel(curStep)}</Text>
+              {activeTask.isPushedToMe && (
+                <View className="bg-purple-500 rounded-full px-2.5 py-0.5">
+                  <Text className="text-white font-bold text-[11px] uppercase tracking-wider">Assigned by Supervisor</Text>
+                </View>
+              )}
+
+              {order?.isUrgent && (
+                <View className="bg-red-500/20 border border-red-500/50 rounded-full px-2.5 py-0.5 flex-row items-center">
+                  <Text className="text-red-400 font-black text-[11px] uppercase tracking-wider">⚡ Urgent</Text>
+                </View>
+              )}
             </View>
           </View>
 
           {/* Order identity — order number + token (truck #) so two helpers never mix up orders */}
-          <View className="px-5 py-4">
+          <View className="px-4 py-3.5">
             {order?.pickupNote ? (
-              <View className="bg-amber-500/15 border border-amber-500/40 rounded-xl p-3 mb-4">
-                <Text className="text-amber-400 text-xs font-bold uppercase mb-0.5">Rider Pickup Note</Text>
-                <Text className="text-amber-200 text-sm font-medium">{order.pickupNote}</Text>
+              <View className="bg-amber-500/15 border border-amber-500/40 rounded-xl p-2.5 mb-3">
+                <Text className="text-amber-400 text-[11px] font-bold uppercase mb-0.5">Rider Pickup Note</Text>
+                <Text className="text-amber-200 text-xs font-medium">{order.pickupNote}</Text>
               </View>
             ) : null}
             {token ? (
-              <View className="flex-row items-center justify-between bg-primary/10 border border-primary/20 rounded-2xl p-4 mb-4">
+              <View className="flex-row items-center justify-between bg-primary/10 border border-primary/20 rounded-2xl px-3.5 py-2.5 mb-3">
                 <View className="flex-row items-center">
-                  <Hash size={20} color="#994BFF" className="mr-2" />
-                  <Text className="text-textSecondary text-sm font-semibold">Token / Bundle</Text>
+                  <Hash size={17} color="#994BFF" className="mr-1.5" />
+                  <Text className="text-textSecondary text-xs font-semibold">Token / Bundle</Text>
                 </View>
-                <Text className="text-primary font-black text-3xl">#{token}</Text>
+                <Text className="text-primary font-black text-2xl">#{token}</Text>
               </View>
             ) : null}
 
-            <View className="flex-row items-start mb-3">
-              <View className="w-9 h-9 rounded-full bg-bgSurfaceLight items-center justify-center mr-3">
-                <Package size={16} color="#3B82F6" />
+            <View className="flex-row items-center mb-2.5">
+              <View className="w-8 h-8 rounded-full bg-bgSurfaceLight items-center justify-center mr-2.5">
+                <Package size={15} color="#3B82F6" />
               </View>
               <View className="flex-1">
-                <Text className="text-textMuted text-xs font-bold uppercase tracking-wide">Order</Text>
-                <Text className="text-textPrimary font-bold text-lg">#{orderShort}</Text>
+                <Text className="text-textMuted text-[11px] font-bold uppercase tracking-wide">Order</Text>
+                <Text className="text-textPrimary font-bold text-base">#{orderShort}</Text>
               </View>
             </View>
 
             {order?.customerName ? (
-              <View className="flex-row items-start mb-3">
-                <View className="w-9 h-9 rounded-full bg-bgSurfaceLight items-center justify-center mr-3">
-                  <User size={16} color="#10b981" />
+              <View className="flex-row items-center mb-2.5">
+                <View className="w-8 h-8 rounded-full bg-bgSurfaceLight items-center justify-center mr-2.5">
+                  <User size={15} color="#10b981" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-textMuted text-xs font-bold uppercase tracking-wide">Customer</Text>
-                  <Text className="text-textPrimary font-bold text-base">{order.customerName}</Text>
+                  <Text className="text-textMuted text-[11px] font-bold uppercase tracking-wide">Customer</Text>
+                  <Text className="text-textPrimary font-bold text-sm" numberOfLines={1}>{order.customerName}</Text>
                 </View>
               </View>
             ) : null}
 
             {serviceLabel || qty > 0 ? (
-              <View className="flex-row items-start mb-3">
-                <View className="w-9 h-9 rounded-full bg-bgSurfaceLight items-center justify-center mr-3">
-                  <Layers size={16} color="#f59e0b" />
+              <View className="flex-row items-center mb-2.5">
+                <View className="w-8 h-8 rounded-full bg-bgSurfaceLight items-center justify-center mr-2.5">
+                  <Layers size={15} color="#f59e0b" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-textMuted text-xs font-bold uppercase tracking-wide">Service</Text>
-                  <Text className="text-textPrimary font-medium text-base">{serviceLabel || '—'}{qty > 0 ? ` · ${qty} units` : ''}</Text>
+                  <Text className="text-textMuted text-[11px] font-bold uppercase tracking-wide">Service</Text>
+                  <Text className="text-textPrimary font-medium text-sm">{serviceLabel || '—'}{qty > 0 ? ` · ${qty} units` : ''}</Text>
                 </View>
               </View>
             ) : null}
 
             {order?.totalAmount ? (
-              <View className="flex-row items-start">
-                <View className="w-9 h-9 rounded-full bg-bgSurfaceLight items-center justify-center mr-3">
+              <View className="flex-row items-center">
+                <View className="w-8 h-8 rounded-full bg-bgSurfaceLight items-center justify-center mr-2.5">
                   <Text className="text-textMuted text-xs font-bold">₹</Text>
                 </View>
                 <View className="flex-1">
-                  <Text className="text-textMuted text-xs font-bold uppercase tracking-wide">Order Value</Text>
-                  <Text className="text-textPrimary font-bold text-base">₹{orderTotal(order)}</Text>
+                  <Text className="text-textMuted text-[11px] font-bold uppercase tracking-wide">Order Value</Text>
+                  <Text className="text-textPrimary font-bold text-sm">₹{orderTotal(order)}</Text>
                 </View>
               </View>
             ) : null}
           </View>
 
           {/* Action Buttons */}
-          <View className="px-5 pb-6 pt-2 flex-row items-center gap-3">
+          <View className="px-4 pb-4 pt-1.5 flex-row items-center gap-2.5">
             <TouchableOpacity
               onPress={handleDismiss}
-              className="flex-1 h-14 bg-bgSurfaceLight rounded-2xl items-center justify-center border border-bgSurfaceLight"
+              className="flex-1 h-12 bg-bgSurfaceLight rounded-2xl items-center justify-center border border-bgSurfaceLight"
             >
-              <Text className="text-textSecondary text-base font-bold">Later</Text>
+              <Text className="text-textSecondary text-sm font-bold">Later</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               onPress={handleAccept}
               disabled={!!acceptingId}
-              className="flex-2 h-14 bg-primary rounded-2xl items-center justify-center flex-row px-5"
+              className="flex-2 h-12 bg-primary rounded-2xl items-center justify-center flex-row px-4"
             >
               {acceptingId ? (
                 <ActivityIndicator color="#fff" size="small" />
               ) : (
                 <>
-                  <CheckCircle2 color="white" size={20} className="mr-2" />
-                  <Text className="text-white text-base font-black tracking-wide uppercase">Accept Task</Text>
+                  <CheckCircle2 color="white" size={18} className="mr-1.5" />
+                  <Text className="text-white text-sm font-black tracking-wide uppercase">Accept Task</Text>
                 </>
               )}
             </TouchableOpacity>

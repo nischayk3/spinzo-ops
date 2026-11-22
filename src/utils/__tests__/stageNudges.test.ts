@@ -2,7 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { getProcessNudge, getActiveStageNudge, STAGE_NUDGE_RULES, recordLocalSnooze, clearLocalSnooze } from '../stageNudges';
 import { OpsProcess } from '../opsProcess';
 
-function makeTestProcess(cur: 'getting_washed' | 'getting_dried', stageData: any): OpsProcess {
+function makeTestProcess(
+  cur: 'getting_washed' | 'getting_dried' | 'tagging' | 'packaging',
+  stageData: any,
+  overrides: Partial<OpsProcess> = {}
+): OpsProcess {
   return {
     id: 'proc_1',
     orderId: 'ord_1',
@@ -13,6 +17,7 @@ function makeTestProcess(cur: 'getting_washed' | 'getting_dried', stageData: any
       [cur]: stageData,
     },
     garments: { count: 0, labels: [], registered: [] },
+    ...overrides,
   };
 }
 
@@ -67,7 +72,7 @@ describe('stageNudges', () => {
     expect(nudge?.snoozeLabel).toBe('Still Pre-staining (+5m)');
   });
 
-  it('triggers wash started nudge after 35 minutes and allows 5-min snooze', () => {
+  it('triggers wash started nudge after 36 minutes and allows 5-min snooze', () => {
     const baseTime = 1000000;
     const process = makeTestProcess('getting_washed', {
       assignee: UID,
@@ -75,18 +80,18 @@ describe('stageNudges', () => {
       startedAt: baseTime,
     });
 
-    // 34 minutes: suppressed
-    expect(getProcessNudge(process, UID, baseTime + 34 * 60 * 1000)).toBeNull();
+    // 35 minutes: suppressed
+    expect(getProcessNudge(process, UID, baseTime + 35 * 60 * 1000)).toBeNull();
 
-    // 35 minutes: fires!
-    const nudge = getProcessNudge(process, UID, baseTime + 35 * 60 * 1000);
+    // 36 minutes: fires!
+    const nudge = getProcessNudge(process, UID, baseTime + 36 * 60 * 1000);
     expect(nudge).not.toBeNull();
     expect(nudge?.phase).toBe('started');
     expect(nudge?.snoozeLabel).toBe('Still running (+5m)');
     expect(nudge?.actionLabel).toBe('Complete & Unload');
   });
 
-  it('triggers dry accepted after 5 mins (5 min snooze) and dry started after 45 mins (5 min snooze)', () => {
+  it('triggers dry accepted after 5 mins (5 min snooze) and dry started after 40 mins (5 min snooze)', () => {
     const baseTime = 2000000;
     const dryProcess = makeTestProcess('getting_dried', {
       assignee: UID,
@@ -99,15 +104,108 @@ describe('stageNudges', () => {
     expect(dryAcceptNudge?.snoozeLabel).toBe('Still transferring (+5m)');
     expect(dryAcceptNudge?.actionLabel).toBe('Start Drying');
 
-    // Dry start: fires after 45m
+    // Dry start: fires after 40m
     const dryStartedProcess = makeTestProcess('getting_dried', {
       assignee: UID,
       startedAt: baseTime,
     });
-    expect(getProcessNudge(dryStartedProcess, UID, baseTime + 44 * 60 * 1000)).toBeNull();
-    const dryStartedNudge = getProcessNudge(dryStartedProcess, UID, baseTime + 45 * 60 * 1000);
+    expect(getProcessNudge(dryStartedProcess, UID, baseTime + 39 * 60 * 1000)).toBeNull();
+    const dryStartedNudge = getProcessNudge(dryStartedProcess, UID, baseTime + 40 * 60 * 1000);
     expect(dryStartedNudge?.snoozeLabel).toBe('Still running (+5m)');
     expect(dryStartedNudge?.actionLabel).toBe('Complete & Unload');
+  });
+
+  it('triggers tagging and packaging reminders after 10 minutes and repeats every 5 minutes', () => {
+    const baseTime = 2500000;
+    const taggingProc = makeTestProcess('tagging', {
+      assignee: UID,
+      assignedAt: baseTime,
+    });
+
+    // 9m: not due yet
+    expect(getProcessNudge(taggingProc, UID, baseTime + 9 * 60 * 1000)).toBeNull();
+
+    // 10m: fires!
+    const tagNudge = getProcessNudge(taggingProc, UID, baseTime + 10 * 60 * 1000);
+    expect(tagNudge).not.toBeNull();
+    expect(tagNudge?.step).toBe('tagging');
+    expect(tagNudge?.phase).toBe('hands_on');
+    expect(tagNudge?.actionLabel).toBe('Open Order');
+    expect(tagNudge?.snoozeLabel).toBe('Still Tagging (+5m)');
+
+    // Snooze repeat every 5 minutes
+    const snoozedAt = baseTime + 10 * 60 * 1000;
+    const snoozedTagging = makeTestProcess('tagging', {
+      assignee: UID,
+      assignedAt: baseTime,
+      nudge: {
+        hands_on: {
+          lastSnoozedAt: snoozedAt,
+          snoozeCount: 1,
+        },
+      },
+    });
+    expect(getProcessNudge(snoozedTagging, UID, snoozedAt + 4 * 60 * 1000)).toBeNull();
+    expect(getProcessNudge(snoozedTagging, UID, snoozedAt + 5 * 60 * 1000)).not.toBeNull();
+
+    // Completed tagging never fires
+    const completedTagging = makeTestProcess('tagging', {
+      assignee: UID,
+      assignedAt: baseTime,
+      completedAt: baseTime + 5 * 60 * 1000,
+    });
+    expect(getProcessNudge(completedTagging, UID, baseTime + 15 * 60 * 1000)).toBeNull();
+
+    // Packaging anchored on acceptedAt when assignedAt is absent
+    const packagingProc = makeTestProcess('packaging', {
+      assignee: UID,
+      acceptedAt: baseTime,
+    });
+    expect(getProcessNudge(packagingProc, UID, baseTime + 9 * 60 * 1000)).toBeNull();
+    const packNudge = getProcessNudge(packagingProc, UID, baseTime + 10 * 60 * 1000);
+    expect(packNudge).not.toBeNull();
+    expect(packNudge?.step).toBe('packaging');
+    expect(packNudge?.phase).toBe('hands_on');
+    expect(packNudge?.actionLabel).toBe('Open Order');
+    expect(packNudge?.snoozeLabel).toBe('Still Packaging (+5m)');
+  });
+
+  it('exempts a helper’s own tagging/packaging reminder from isHelperDoingHandsOn while still suppressing machine nudges', () => {
+    const baseTime = 2800000;
+    const myTagging = makeTestProcess(
+      'tagging',
+      {
+        assignee: UID,
+        assignedAt: baseTime,
+      },
+      { id: 'proc_tag', orderId: 'ord_tag' }
+    );
+    const myWash = makeTestProcess(
+      'getting_washed',
+      {
+        assignee: UID,
+        startedAt: baseTime - 30 * 60 * 1000, // 40m elapsed by baseTime + 10m
+      },
+      { id: 'proc_wash', orderId: 'ord_wash' }
+    );
+
+    // At 5m into tagging: wash nudge is due (35m+ -> 36m+ elapsed), but MUST be suppressed because helper is doing hands-on tagging
+    expect(
+      getActiveStageNudge([myWash, myTagging], UID, baseTime + 7 * 60 * 1000, 'helper', {
+        onShift: true,
+        onBreak: false,
+      })
+    ).toBeNull();
+
+    // At 10m into tagging: helper's own tagging nudge MUST fire despite isHelperDoingHandsOn being true!
+    const active = getActiveStageNudge([myWash, myTagging], UID, baseTime + 10 * 60 * 1000, 'helper', {
+      onShift: true,
+      onBreak: false,
+    });
+    expect(active).not.toBeNull();
+    expect(active?.step).toBe('tagging');
+    expect(active?.phase).toBe('hands_on');
+    expect(active?.orderId).toBe('ord_tag');
   });
 
   it('suppresses nudges instantly when recordLocalSnooze is called', () => {

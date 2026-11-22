@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { extractLocality, parseSlotTimeWeight, safeShortId, buildSmartRoute } from '../smartRoute';
+import { extractLocality, parseSlotTimeWeight, safeShortId, buildSmartRoute, optimizeStopSequence2Opt } from '../smartRoute';
 import { isValidCoord, resolveCustomerCoordinates, buildDirectionsDestination } from '../storeGeo';
 
 describe('smartRoute utility', () => {
@@ -246,6 +246,109 @@ describe('smartRoute utility', () => {
     expect(route).toHaveLength(1);
     expect(route[0].latitude).toBe(12.9279);
     expect(route[0].longitude).toBe(77.6271);
+  });
+
+  it('2-opt eliminates zig-zagging (North-1 → North-2 → South-1) and populates leg & cumulative distance telemetry', () => {
+    const store = { latitude: 12.9166, longitude: 77.6148 };
+    // ~1.5 km North, ~1.6 km South, ~1.7 km North (right next to North-1)
+    const route = buildSmartRoute({
+      currentLocation: store,
+      myTasks: [
+        {
+          id: 't_north1',
+          orderId: 'NORTH_1',
+          assignee: 'rider_1',
+          status: 'assigned',
+          customerName: 'North 1',
+          pickupAddress: 'Koramangala 5th Block, Bengaluru',
+          pickupSlot: { type: '09:00 AM - 11:00 AM' },
+          latitude: 12.9301,
+          longitude: 77.6148,
+        } as any,
+        {
+          id: 't_south1',
+          orderId: 'SOUTH_1',
+          assignee: 'rider_1',
+          status: 'assigned',
+          customerName: 'South 1',
+          pickupAddress: 'BTM 2nd Stage, Bengaluru',
+          pickupSlot: { type: '09:00 AM - 11:00 AM' },
+          latitude: 12.9022,
+          longitude: 77.6148,
+        } as any,
+        {
+          id: 't_north2',
+          orderId: 'NORTH_2',
+          assignee: 'rider_1',
+          status: 'assigned',
+          customerName: 'North 2',
+          pickupAddress: 'Koramangala 6th Block, Bengaluru',
+          pickupSlot: { type: '09:00 AM - 11:00 AM' },
+          latitude: 12.9319,
+          longitude: 77.6148,
+        } as any,
+      ],
+      myDeliveries: [],
+      orders: [],
+    });
+
+    expect(route.map(s => s.orderId)).toEqual(['NORTH_1', 'NORTH_2', 'SOUTH_1']);
+    expect(route.map(s => s.stopNumber)).toEqual([1, 2, 3]);
+
+    // Verify legDistanceMeters and cumulativeDistanceMeters telemetry
+    expect(route[0].legDistanceMeters).toBeGreaterThan(1400);
+    expect(route[0].legDistanceMeters).toBeLessThan(1600);
+    // Leg from North-1 to North-2 should be ~200m (not 3km+ zig-zag)
+    expect(route[1].legDistanceMeters).toBeGreaterThan(150);
+    expect(route[1].legDistanceMeters).toBeLessThan(250);
+    // Leg from North-2 to South-1 is ~3.3km
+    expect(route[2].legDistanceMeters).toBeGreaterThan(3200);
+    expect(route[2].legDistanceMeters).toBeLessThan(3400);
+
+    expect(route[0].cumulativeDistanceMeters).toBe(route[0].legDistanceMeters);
+    expect(route[1].cumulativeDistanceMeters).toBe(
+      (route[0].legDistanceMeters || 0) + (route[1].legDistanceMeters || 0)
+    );
+    expect(route[2].cumulativeDistanceMeters).toBe(
+      (route[0].legDistanceMeters || 0) + (route[1].legDistanceMeters || 0) + (route[2].legDistanceMeters || 0)
+    );
+  });
+
+  it('optimizeStopSequence2Opt respects >90 min earlier-slot precedence and never mutates stop coordinates', () => {
+    const store = { latitude: 12.9166, longitude: 77.6148 };
+    const mkStop = (id: string, slotText: string, lat?: number, lng?: number): any => ({
+      id,
+      taskId: id,
+      stopNumber: 0,
+      type: 'pickup',
+      orderId: id,
+      orderNumber: id,
+      address: 'HSR Layout, Bengaluru',
+      locality: 'HSR LAYOUT',
+      slotText,
+      isUrgent: false,
+      isInstant: false,
+      status: 'assigned',
+      latitude: lat,
+      longitude: lng,
+      loadUnits: 1,
+      rawTask: {},
+    });
+
+    const earlyFar = mkStop('EARLY_FAR', '09:00 AM - 11:00 AM', 12.9022, 77.6148);
+    const lateNear = mkStop('LATE_NEAR', '05:00 PM - 07:00 PM', 12.9301, 77.6148);
+    const ungeocoded = mkStop('UNGEOCODED', '09:00 AM - 11:00 AM', undefined, undefined);
+
+    const ordered = optimizeStopSequence2Opt([lateNear, earlyFar, ungeocoded], store);
+    // Early morning stops must precede evening stop (>90 min gap)
+    const lateIdx = ordered.findIndex(s => s.id === 'LATE_NEAR');
+    const earlyIdx = ordered.findIndex(s => s.id === 'EARLY_FAR');
+    expect(earlyIdx).toBeLessThan(lateIdx);
+
+    // Ungeocoded stop must NOT have its coordinates mutated
+    const ung = ordered.find(s => s.id === 'UNGEOCODED');
+    expect(ung?.latitude).toBeUndefined();
+    expect(ung?.longitude).toBeUndefined();
   });
 });
 

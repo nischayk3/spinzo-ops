@@ -1,9 +1,10 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { View, Text, ScrollView, TouchableOpacity, TextInput, ActivityIndicator, KeyboardAvoidingView, Platform, Modal, Image } from 'react-native';
-import { X, Play, AlertCircle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp, Zap, Truck, KeyRound, Video } from 'lucide-react-native';
+import { X, Play, AlertCircle, AlertTriangle, MoreHorizontal, Calendar, Phone, MapPin, MessageCircle, UserPlus, Navigation, Undo2, Droplets, Sun, Check, Shirt, Camera, Clock, CheckCircle2, Eye, Lock, Pencil, Wind, ChevronDown, ChevronUp, Zap, Truck, KeyRound, Video } from 'lucide-react-native';
 import { Linking, Alert } from 'react-native';
 import { QRScanner } from '../../components/QRScanner';
 import { EditOrderModal } from '../../components/EditOrderModal';
+import { DamageReportModal } from '../../components/DamageReportModal';
 import { CancelOrderModal } from '../../components/Supervisor/CancelOrderModal';
 import { RescheduleModal } from '../../components/Supervisor/RescheduleModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
@@ -17,8 +18,10 @@ import { useOpsStaffStore } from '../../store/opsStaffStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
 import { serviceSummary, orderTotal, parseOrderTokens, formatItemSummary, slotLabel, getPickupInfo, formatDateTime, computePickupBenchmark, computeDeliveryBenchmark, isExpressOrder } from '../../utils/orderFeed';
+import { computeOrderUrgency, getOrderTimestamps, formatCompactDateTime, formatCompactDuration, toEpochMs } from '../../utils/orderUrgency';
 import { currentStep, isDone, stage, stepLabel, GarmentsRecord } from '../../utils/opsProcess';
 import { opsTimeline } from '../../utils/opsTimeline';
+import { aggregateMultiLoadOrder } from '../../utils/multiLoad';
 import { printGarmentLabels } from '../../utils/labelPrint';
 import { verifyStoreOTP } from '../../utils/opsPickup';
 import { canStartStage } from './ProcessingScreen';
@@ -99,7 +102,7 @@ function WasherCycleMonitor({
 
   const elapsedMs = Math.max(0, now - startMs);
   const elapsedSec = Math.floor(elapsedMs / 1000);
-  const totalSec = 35 * 60; // 2100 seconds
+  const totalSec = 36 * 60; // 2160 seconds
   const progressPercent = Math.min(100, Math.round((elapsedSec / totalSec) * 100));
 
   const formatMinSec = (sec: number) => {
@@ -108,9 +111,9 @@ function WasherCycleMonitor({
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const isDetergentDue = elapsedSec >= 780 && !detergentAddedAt;
+  const isDetergentDue = elapsedSec >= 180 && !detergentAddedAt;
   const isSoftenerDue = elapsedSec >= 1260 && !softenerAddedAt;
-  const isWashComplete = elapsedSec >= 2100;
+  const isWashComplete = elapsedSec >= 2160;
 
   const handleDetergent = async () => {
     setAddingDetergent(true);
@@ -135,9 +138,9 @@ function WasherCycleMonitor({
       <View className="flex-row items-center justify-between mb-3">
         <View className="flex-row items-center gap-2">
           <Droplets size={18} color="#994bff" />
-          <Text className="text-gray-900 font-bold text-sm">35-Min Wash Cycle</Text>
+          <Text className="text-gray-900 font-bold text-sm">36-Min Wash Cycle</Text>
         </View>
-        <Text className="text-[#994bff] font-black text-base">{formatMinSec(elapsedSec)} / 35:00</Text>
+        <Text className="text-[#994bff] font-black text-base">{formatMinSec(elapsedSec)} / 36:00</Text>
       </View>
 
       {/* Progress Bar */}
@@ -150,21 +153,21 @@ function WasherCycleMonitor({
 
       {/* Milestones Info Grid */}
       <View className="gap-2.5">
-        {/* Detergent milestone @ 13 min */}
+        {/* Detergent milestone @ 3 min */}
         <View className={`p-3 rounded-xl border ${isDetergentDue ? 'bg-amber-50 border-amber-300 shadow-sm' : detergentAddedAt ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-gray-100'}`}>
           <View className="flex-row items-center justify-between">
             <View className="flex-row items-center gap-2 flex-1 mr-2">
               <View className={`w-7 h-7 rounded-full items-center justify-center ${detergentAddedAt ? 'bg-emerald-100' : isDetergentDue ? 'bg-amber-100' : 'bg-gray-100'}`}>
-                <Text className="text-xs font-bold text-gray-700">13m</Text>
+                <Text className="text-xs font-bold text-gray-700">3m</Text>
               </View>
               <View className="flex-1">
-                <Text className="text-gray-900 font-bold text-xs">Detergent (13 Min)</Text>
+                <Text className="text-gray-900 font-bold text-xs">Detergent (3 Min)</Text>
                 <Text className="text-gray-500 text-[11px]">
                   {detergentAddedAt
                     ? 'Added to washer'
                     : isDetergentDue
                     ? 'Due right now! Add detergent'
-                    : `Due in ${Math.max(1, Math.ceil((780 - elapsedSec) / 60))} min`}
+                    : `Due in ${Math.max(1, Math.ceil((180 - elapsedSec) / 60))} min`}
                 </Text>
               </View>
             </View>
@@ -192,7 +195,7 @@ function WasherCycleMonitor({
           </View>
         </View>
 
-        {/* Softener milestone @ 21 min */}
+        {/* Softener milestone @ 21 min (15m left on 36m wash) */}
         <View className={`p-3 rounded-xl border ${isSoftenerDue ? 'bg-purple-50 border-purple-300 shadow-sm' : softenerAddedAt ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-gray-100'}`}>
           <View className="flex-row items-center justify-between">
             <View className="flex-row items-center gap-2 flex-1 mr-2">
@@ -200,7 +203,7 @@ function WasherCycleMonitor({
                 <Text className="text-xs font-bold text-gray-700">21m</Text>
               </View>
               <View className="flex-1">
-                <Text className="text-gray-900 font-bold text-xs">Fabric Softener (21 Min)</Text>
+                <Text className="text-gray-900 font-bold text-xs">Fabric Softener (21 Min · 15m left)</Text>
                 <Text className="text-gray-500 text-[11px]">
                   {softenerAddedAt
                     ? 'Added to washer'
@@ -234,12 +237,12 @@ function WasherCycleMonitor({
           </View>
         </View>
 
-        {/* Cycle completion banner @ 35 min */}
+        {/* Cycle completion banner @ 36 min */}
         {isWashComplete && (
           <View className="bg-emerald-50 border border-emerald-300 p-3 rounded-xl flex-row items-center gap-2">
             <Check size={16} color="#059669" />
             <Text className="text-emerald-800 font-bold text-xs flex-1">
-              35-minute wash cycle completed! Ready to unload and move to dryer.
+              36-minute wash cycle completed! Ready to unload and move to dryer.
             </Text>
           </View>
         )}
@@ -268,7 +271,7 @@ function DryerCycleMonitor({
 
   const elapsedMs = Math.max(0, now - startMs);
   const elapsedSec = Math.floor(elapsedMs / 1000);
-  const totalSec = 30 * 60; // 1800 seconds (standard 30-min drying cycle)
+  const totalSec = 40 * 60; // 2400 seconds (standard 40-min drying cycle)
   const progressPercent = Math.min(100, Math.round((elapsedSec / totalSec) * 100));
 
   const formatMinSec = (sec: number) => {
@@ -277,18 +280,20 @@ function DryerCycleMonitor({
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const isCycleDone = elapsedSec >= 1800;
+  const isCycleDone = elapsedSec >= 2400;
+  const isMinLocked = elapsedSec < 1800; // 30-min minimum accidental-completion lock
   const lockMinutesLeft = Math.max(1, Math.ceil((1800 - elapsedSec) / 60));
+  const cycleMinutesLeft = Math.max(1, Math.ceil((2400 - elapsedSec) / 60));
 
   return (
     <View className={`mb-4 rounded-2xl p-4 border shadow-sm ${isCycleDone ? 'bg-emerald-50/70 border-emerald-200' : 'bg-purple-50/60 border-purple-100'}`}>
       <View className="flex-row items-center justify-between mb-3">
         <View className="flex-row items-center gap-2">
           <Wind size={18} color={isCycleDone ? '#059669' : '#994bff'} />
-          <Text className="text-gray-900 font-bold text-sm">30-Min Drying Cycle</Text>
+          <Text className="text-gray-900 font-bold text-sm">40-Min Drying Cycle</Text>
         </View>
         <Text className={`font-black text-base ${isCycleDone ? 'text-emerald-700' : 'text-[#994bff]'}`}>
-          {formatMinSec(elapsedSec)} / 30:00
+          {formatMinSec(elapsedSec)} / 40:00
         </Text>
       </View>
 
@@ -309,7 +314,7 @@ function DryerCycleMonitor({
               Drying Cycle Complete
             </Text>
             <Text className="text-emerald-800 text-xs mt-0.5">
-              Cool-down finished. Clothes are dry and ready to unload.
+              40-minute drying cycle finished. Clothes are dry and ready to unload.
             </Text>
           </View>
         </View>
@@ -317,16 +322,18 @@ function DryerCycleMonitor({
         <View className="bg-amber-50/90 border border-amber-200 p-3 rounded-xl flex-row items-center gap-2.5">
           <Lock size={16} color="#d97706" />
           <View className="flex-1">
-            <View className="flex-row items-center justify-between">
+            <View className="flex-row items-center justify-between flex-wrap gap-1">
               <Text className="text-amber-900 font-bold text-xs uppercase tracking-wider">
                 Machine Running · Tumble & Heat
               </Text>
               <Text className="text-amber-800 font-black text-xs">
-                {lockMinutesLeft}m lock left
+                {isMinLocked ? `${lockMinutesLeft}m lock left` : `${cycleMinutesLeft}m to 40m`}
               </Text>
             </View>
             <Text className="text-amber-700 text-[11px] mt-0.5">
-              Allow cycle to finish for optimal drying and fabric care.
+              {isMinLocked
+                ? `30m safety lock active · ${cycleMinutesLeft}m remaining in 40-min cycle.`
+                : `Safety lock passed · ${cycleMinutesLeft}m left for full 40-min drying cycle.`}
             </Text>
           </View>
         </View>
@@ -401,6 +408,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const [showEmergencyOverrideModal, setShowEmergencyOverrideModal] = useState(false);
   const [showResetMachineModal, setShowResetMachineModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showDamageModal, setShowDamageModal] = useState(false);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   const isTaggingState = useMemo(() => {
@@ -464,82 +472,172 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const isCycleLocked = isCurrentMachineStep && machineElapsedSec < 1800;
   const cycleLockMinLeft = Math.max(1, Math.ceil((1800 - machineElapsedSec) / 60));
 
+  const aggregated = useMemo(() => aggregateMultiLoadOrder(order, orderProcesses), [order, orderProcesses]);
+
   const packagingPhotos = useMemo(() => {
-    const list: string[] = [];
-    const fromOrder = order?.packagingPhotos || order?.qualityPhotos || order?.opsDetails?.packagingPhotos || order?.opsDetails?.qualityPhotos;
+    const list: string[] = [...aggregated.photos];
+    const fromOrder = order?.qualityPhotos || order?.opsDetails?.qualityPhotos;
     if (Array.isArray(fromOrder)) {
-      list.push(...fromOrder);
-    } else if (typeof fromOrder === 'string') {
-      list.push(fromOrder);
-    }
-    const fromProcess = process?.stages?.packaging?.qualityProof?.photos;
-    if (Array.isArray(fromProcess)) {
-      fromProcess.forEach(p => {
-        if (p && !list.includes(p)) list.push(p);
+      fromOrder.forEach(p => {
+        if (typeof p === 'string' && p.trim() && !list.includes(p.trim())) list.push(p.trim());
       });
+    } else if (typeof fromOrder === 'string' && fromOrder.trim() && !list.includes(fromOrder.trim())) {
+      list.push(fromOrder.trim());
     }
     const fromProofUrl = order?.proofUrl;
-    if (fromProofUrl && !list.includes(fromProofUrl)) {
-      list.push(fromProofUrl);
+    if (typeof fromProofUrl === 'string' && fromProofUrl.trim() && !list.includes(fromProofUrl.trim())) {
+      list.push(fromProofUrl.trim());
     }
     return list;
-  }, [order, process]);
+  }, [aggregated.photos, order]);
 
-  const bundlesCount = order?.opsDetails?.packagingProof?.bundles ?? order?.packagingProof?.bundles ?? process?.stages?.packaging?.qualityProof?.bundles;
-  const packagingVideoUrl = order?.packagingProof?.videoUrl ?? order?.opsDetails?.packagingProof?.videoUrl ?? process?.stages?.packaging?.qualityProof?.videoUrl ?? null;
+  const packagingVideos = aggregated.videos;
+  const bundlesCount = aggregated.totalBundles ?? order?.opsDetails?.packagingProof?.bundles ?? order?.packagingProof?.bundles ?? process?.stages?.packaging?.qualityProof?.bundles;
   const pickupBenchmark = useMemo(() => order ? computePickupBenchmark(order) : null, [order]);
   const deliveryBenchmark = useMemo(() => order ? computeDeliveryBenchmark(order) : null, [order]);
-  const garmentCountDisplay = process?.garments?.count ?? order?.garmentCount ?? order?.opsDetails?.garmentCount;
+  const garmentCountDisplay = aggregated.totalGarments ?? process?.garments?.count ?? order?.garmentCount ?? order?.opsDetails?.garmentCount;
+  const timestamps = useMemo(() => getOrderTimestamps(order), [order]);
+  const urgency = useMemo(() => computeOrderUrgency(order), [order]);
+
+  const stageTelemetry = useMemo(() => {
+    const stageName = cur && !done
+      ? stepLabel(cur)
+      : done
+      ? (order?.status === 'delivered' ? 'Delivered' : order?.status === 'out_for_delivery' ? 'Out for Delivery' : 'Ready')
+      : order?.status
+      ? order.status.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())
+      : 'Active';
+
+    const stageAnchorMs =
+      toEpochMs(curStage?.assignedAt) ??
+      toEpochMs(curStage?.startedAt) ??
+      toEpochMs(curStage?.acceptedAt) ??
+      toEpochMs(curStage?.queuedAt);
+
+    const isTerminal = done || order?.status === 'delivered' || order?.status === 'cancelled';
+    const dwellStr = !isTerminal && stageAnchorMs !== null
+      ? formatCompactDuration(Math.max(0, Date.now() - stageAnchorMs))
+      : null;
+
+    const directWeight = Number((order as any)?.totalWeight ?? (order as any)?.weight ?? (order as any)?.opsDetails?.weight);
+    let weightKg: number | null = Number.isFinite(directWeight) && directWeight > 0 ? Math.round(directWeight * 10) / 10 : null;
+    if (weightKg === null && Array.isArray(order?.items)) {
+      const sum = order.items.reduce((acc: number, it: any) => {
+        const w = Number(it?.weight ?? it?.kg ?? it?.quantityKg ?? 0);
+        return acc + (Number.isFinite(w) && w > 0 ? w : 0);
+      }, 0);
+      if (sum > 0) weightKg = Math.round(sum * 10) / 10;
+    }
+
+    const loadParts: string[] = [];
+    if (weightKg !== null) loadParts.push(`${weightKg} kg`);
+    if (garmentCountDisplay) loadParts.push(`${garmentCountDisplay} pcs`);
+
+    return {
+      title: dwellStr ? `${stageName} · ${dwellStr}` : stageName,
+      subtext: loadParts.length > 0
+        ? loadParts.join(' · ')
+        : (curStage?.assigneeName ? curStage.assigneeName : 'Awaiting count'),
+    };
+  }, [cur, done, order, curStage?.assignedAt, curStage?.startedAt, curStage?.acceptedAt, curStage?.queuedAt, curStage?.assigneeName, garmentCountDisplay]);
   const isTaggingDone = (process?.currentIndex ?? 0) > 0 || process?.status === 'done' || (order?.status !== 'placed' && order?.status !== 'confirmed' && order?.status !== 'in_transit_to_store');
 
-  const timelineEvents = useMemo(() => {
-    if (process) {
-      const raw = opsTimeline(process);
-      const activeOrDone = raw.filter(e => e.startedAt || e.completedAt || e.queuedAt);
-      if (activeOrDone.length > 0) return activeOrDone;
+  const damageReports = useMemo(() => {
+    const raw: any[] = [];
+    const fromOrder = (order as any)?.damageReports;
+    if (Array.isArray(fromOrder)) raw.push(...fromOrder);
+    const fromOpsDetails = (order as any)?.opsDetails?.damageReports;
+    if (Array.isArray(fromOpsDetails)) raw.push(...fromOpsDetails);
+    for (const p of orderProcesses) {
+      const fromProc = (p as any)?.damageReports;
+      if (Array.isArray(fromProc)) raw.push(...fromProc);
     }
-    const timings = order?.stageTimings || order?.opsDetails?.stageTimings;
-    if (!timings || typeof timings !== 'object') return [];
+    const seen = new Set<string>();
+    const deduped: any[] = [];
+    for (const r of raw) {
+      if (!r || typeof r !== 'object') continue;
+      const key = String(r.id || `${r.processId || ''}_${r.reportedAt || ''}_${Array.isArray(r.photos) ? r.photos.join(',') : ''}`);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(r);
+    }
+    return deduped;
+  }, [order, orderProcesses]);
 
-    // Strictly enforce production workflow order: Tagging -> Washing -> Drying -> Ironing -> Packaging
+  const buildStageEvents = (stagesMap: Record<string, any> | undefined) => {
+    if (!stagesMap || typeof stagesMap !== 'object') return [];
     const CANONICAL_ORDER = ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'];
-
-    // Normalize any step aliases (e.g. drying -> getting_dried, ironing -> getting_ironed)
     const normalized: Record<string, any> = {};
-    Object.entries(timings).forEach(([k, val]) => {
-      if (!val) return;
+    Object.entries(stagesMap).forEach(([k, val]) => {
+      if (!val || typeof val !== 'object') return;
       const canonicalKey = k === 'drying' ? 'getting_dried' : (k === 'ironing' ? 'getting_ironed' : (k === 'wash' ? 'getting_washed' : k));
       normalized[canonicalKey] = { ...(normalized[canonicalKey] || {}), ...val };
     });
 
-    const presentKeys = Object.keys(normalized);
-    // 1. Strict canonical stages first
+    const presentKeys = Object.keys(normalized).filter(k => {
+      const s = normalized[k];
+      return !!(s?.startedAt || s?.completedAt || s?.queuedAt || s?.acceptedAt);
+    });
     const orderedSteps = CANONICAL_ORDER.filter(s => presentKeys.includes(s));
-    // 2. Any additional custom stages next
     presentKeys.forEach(k => {
       if (!orderedSteps.includes(k)) orderedSteps.push(k);
     });
 
     return orderedSteps.map(step => {
       const s = normalized[step] || {};
+      const computedRunMin =
+        typeof s.startToCompleteMin === 'number'
+          ? s.startToCompleteMin
+          : typeof s.durationMs === 'number' && s.durationMs > 0
+          ? Math.round(s.durationMs / 60000)
+          : undefined;
       return {
         step,
         label: stepLabel(step),
         assigneeName: s.assigneeName,
+        machineName: s.machineName,
         queuedAt: s.queuedAt,
         acceptedAt: s.acceptedAt,
         startedAt: s.startedAt,
         completedAt: s.completedAt,
         durationMs: s.durationMs,
         acceptToCompleteMin: s.acceptToCompleteMin,
-        startToCompleteMin: s.startToCompleteMin,
+        startToCompleteMin: computedRunMin,
         detergentAddedAt: s.detergentAddedAt,
         softenerAddedAt: s.softenerAddedAt,
         skipped: false,
         reached: true,
       };
     });
+  };
+
+  const timelineEvents = useMemo(() => {
+    if (process) {
+      const raw = opsTimeline(process);
+      const activeOrDone = raw
+        .filter(e => e.startedAt || e.completedAt || e.queuedAt)
+        .map(e => {
+          const st = stage(process, e.step);
+          return {
+            ...e,
+            machineName: st?.machineName,
+            detergentAddedAt: st?.detergentAddedAt,
+            softenerAddedAt: st?.softenerAddedAt,
+          };
+        });
+      if (activeOrDone.length > 0) return activeOrDone;
+    }
+    const timings = order?.stageTimings || order?.opsDetails?.stageTimings;
+    return buildStageEvents(timings);
   }, [process, order]);
+
+  const multiLoadTimings = useMemo(() => {
+    if (aggregated.loadTimings.length <= 1) return [];
+    return aggregated.loadTimings.map(loadSec => ({
+      ...loadSec,
+      events: buildStageEvents(loadSec.stages),
+    }));
+  }, [aggregated.loadTimings]);
 
 
   const runAction = async (fn: () => Promise<OpsProcessingResult>, onSuccess?: () => void) => {
@@ -919,17 +1017,28 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     if (garments?.count == null) {
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
-          <View className="flex-row items-center justify-between mb-4">
-            <Text className="text-gray-900 font-bold text-lg">Garment Registration</Text>
-            {isTaggingState && (
-              <TouchableOpacity
-                onPress={() => setShowEditModal(true)}
-                className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
-              >
-                <Pencil size={12} color="#2563eb" />
-                <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
-              </TouchableOpacity>
-            )}
+          <View className="flex-row items-center justify-between gap-2 mb-4">
+            <Text className="text-gray-900 font-bold text-lg flex-1" numberOfLines={1}>Garment Registration</Text>
+            <View className="flex-row items-center gap-1.5 shrink-0">
+              {process && (
+                <TouchableOpacity
+                  onPress={() => setShowDamageModal(true)}
+                  className="flex-row items-center bg-amber-50 border border-amber-300 px-2.5 py-1 rounded-lg active:opacity-70"
+                >
+                  <AlertTriangle size={12} color="#d97706" />
+                  <Text className="text-amber-700 text-xs font-bold ml-1">Report</Text>
+                </TouchableOpacity>
+              )}
+              {isTaggingState && (
+                <TouchableOpacity
+                  onPress={() => setShowEditModal(true)}
+                  className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
+                >
+                  <Pencil size={12} color="#2563eb" />
+                  <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
           <Text className="text-gray-500 mb-2">How many garments are in this order?</Text>
           <View className="flex-row gap-3">
@@ -958,17 +1067,28 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
     return (
       <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
-        <View className="flex-row items-center justify-between mb-4">
-          <Text className="text-gray-900 font-bold text-lg">Garment Scanning</Text>
-          {isTaggingState && (
-            <TouchableOpacity
-              onPress={() => setShowEditModal(true)}
-              className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
-            >
-              <Pencil size={12} color="#2563eb" />
-              <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
-            </TouchableOpacity>
-          )}
+        <View className="flex-row items-center justify-between gap-2 mb-4">
+          <Text className="text-gray-900 font-bold text-lg flex-1" numberOfLines={1}>Garment Scanning</Text>
+          <View className="flex-row items-center gap-1.5 shrink-0">
+            {process && (
+              <TouchableOpacity
+                onPress={() => setShowDamageModal(true)}
+                className="flex-row items-center bg-amber-50 border border-amber-300 px-2.5 py-1 rounded-lg active:opacity-70"
+              >
+                <AlertTriangle size={12} color="#d97706" />
+                <Text className="text-amber-700 text-xs font-bold ml-1">Report</Text>
+              </TouchableOpacity>
+            )}
+            {isTaggingState && (
+              <TouchableOpacity
+                onPress={() => setShowEditModal(true)}
+                className="flex-row items-center bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg active:opacity-70"
+              >
+                <Pencil size={12} color="#2563eb" />
+                <Text className="text-blue-600 text-xs font-bold ml-1">Edit Order</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
         
         <View className="flex-row items-center justify-between mb-4 bg-gray-50 p-4 rounded-xl border border-gray-100">
@@ -1272,9 +1392,10 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                     <TouchableOpacity
                       onPress={() => {
                         if (isCycleLocked) {
+                          const stdCycleMin = cur === 'getting_washed' ? 36 : 40;
                           Alert.alert(
                             'Cycle in Progress',
-                            `The machine has only run for ${elapsedMin} minutes. The standard cycle is 30 minutes. Are you sure clothes are ready to unload?`,
+                            `The machine has only run for ${elapsedMin} minutes (30m safety lock; standard ${stdCycleMin}m cycle). Are you sure clothes are ready to unload?`,
                             [
                               { text: 'Wait for Cycle', style: 'cancel' },
                               { text: 'Yes, Unload Now', style: 'destructive', onPress: handleComplete }
@@ -1717,35 +1838,42 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
         {/* Enhanced Customer & Order Hero Card */}
         {order && (
-          <View className={`mb-5 bg-white rounded-3xl shadow-sm overflow-hidden z-0 ${
+          <View className={`mb-4 bg-white rounded-3xl shadow-sm overflow-hidden z-0 ${
             isExpressOrder(order) ? 'border-2 border-orange-500' : 'border border-gray-100'
           }`}>
             {isExpressOrder(order) && (
-              <View className="bg-orange-600 px-5 py-2.5 flex-row items-center justify-between">
+              <View className="bg-orange-600 px-4 py-2 flex-row items-center justify-between">
                 <View className="flex-row items-center">
-                  <Zap size={14} color="#ffffff" />
+                  <Zap size={13} color="#ffffff" />
                   <Text className="text-white font-black text-xs uppercase tracking-wider ml-1.5">
                     EXPRESS ORDER • 6–8H GUARANTEED SLA
                   </Text>
                 </View>
-                <View className="bg-white/20 px-2.5 py-0.5 rounded-full">
+                <View className="bg-white/20 px-2 py-0.5 rounded-full">
                   <Text className="text-white font-extrabold text-[10px] uppercase">CATER FIRST</Text>
                 </View>
               </View>
             )}
 
-            <View className="p-5">
-            {/* Top Row: Customer Avatar, Name, Service & Contact Actions */}
-            <View className="flex-row items-center justify-between pb-4 border-b border-gray-100">
+            <View className="p-4">
+            {/* Top Row: Customer Avatar, Name, Service, Status & Contact Actions */}
+            <View className="flex-row items-center justify-between pb-3 border-b border-gray-100">
               <View className="flex-row items-center flex-1 mr-3">
-                <View className="w-12 h-12 rounded-2xl bg-[#994bff]/10 border border-[#994bff]/20 items-center justify-center mr-3">
+                <View className="w-11 h-11 rounded-2xl bg-[#994bff]/10 border border-[#994bff]/20 items-center justify-center mr-3">
                   <Text className="text-[#994bff] font-extrabold text-base">{customerInitials}</Text>
                 </View>
                 <View className="flex-1">
-                  <Text className="text-gray-900 font-extrabold text-lg leading-tight" numberOfLines={1}>
-                    {order.customerName || 'Unknown Customer'}
-                  </Text>
-                  <Text className="text-gray-500 font-medium text-xs mt-0.5">
+                  <View className="flex-row items-center flex-wrap gap-1.5">
+                    <Text className="text-gray-900 font-extrabold text-base leading-tight" numberOfLines={1}>
+                      {order.customerName || 'Unknown Customer'}
+                    </Text>
+                    <View className="bg-gray-100 px-2 py-0.5 rounded-full">
+                      <Text className="text-[10px] font-bold text-gray-600 uppercase">
+                        {order.status?.replace(/_/g, ' ') || 'ACTIVE'}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text className="text-gray-500 font-medium text-xs mt-0.5" numberOfLines={1}>
                     {serviceSummary(order)}
                   </Text>
                 </View>
@@ -1756,37 +1884,132 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 {order.customerPhone ? (
                   <TouchableOpacity
                     onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}
-                    className="w-10 h-10 rounded-full bg-blue-50 border border-blue-200 items-center justify-center active:scale-95"
+                    className="w-9 h-9 rounded-full bg-blue-50 border border-blue-200 items-center justify-center active:scale-95"
                     hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                   >
-                    <Phone size={16} color="#2563eb" />
+                    <Phone size={15} color="#2563eb" />
                   </TouchableOpacity>
                 ) : null}
                 <TouchableOpacity
                   onPress={handleWhatsApp}
-                  className="w-10 h-10 rounded-full bg-emerald-50 border border-emerald-200 items-center justify-center active:scale-95"
+                  className="w-9 h-9 rounded-full bg-emerald-50 border border-emerald-200 items-center justify-center active:scale-95"
                   hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                 >
-                  <MessageCircle size={16} color="#059669" />
+                  <MessageCircle size={15} color="#059669" />
                 </TouchableOpacity>
               </View>
             </View>
 
-            {/* Pickup Slot & Scheduling Banner */}
-            <View className={`mt-3.5 rounded-2xl p-3.5 border shadow-sm ${
+            {/* Operational Lifecycle Telemetry Strip (4 Tiles) */}
+            {(() => {
+              const isDeliveredOrder = order.status === 'delivered';
+              const isCriticalSla = !isDeliveredOrder && (urgency.isOverdue || urgency.isStalled48h);
+              const isWarnSla = !isDeliveredOrder && !isCriticalSla && (urgency.severity === 'high' || urgency.severity === 'medium');
+              const slaCardCls = isCriticalSla
+                ? 'bg-red-50 border-red-200'
+                : isWarnSla
+                ? 'bg-amber-50 border-amber-200'
+                : 'bg-emerald-50 border-emerald-200';
+              const slaLabelCls = isCriticalSla
+                ? 'text-red-700'
+                : isWarnSla
+                ? 'text-amber-700'
+                : 'text-emerald-700';
+              const slaValueCls = isCriticalSla
+                ? 'text-red-900'
+                : isWarnSla
+                ? 'text-amber-900'
+                : 'text-emerald-900';
+              const slaSubCls = isCriticalSla
+                ? 'text-red-700/80'
+                : isWarnSla
+                ? 'text-amber-700/80'
+                : 'text-emerald-700/80';
+              const deliverySlotText = [
+                order.deliveryDate,
+                typeof order.deliverySlot === 'string' ? order.deliverySlot : order.deliveryTime,
+              ].filter(Boolean).join(' · ');
+              const slaSubtext = isDeliveredOrder
+                ? formatCompactDateTime(timestamps.deliveredMs)
+                : (urgency.deadlineMs
+                    ? formatCompactDateTime(urgency.deadlineMs)
+                    : (deliverySlotText || 'No deadline'));
+              const tileBasis = isDesktop ? 'min-w-[23%]' : 'min-w-[46%]';
+
+              return (
+                <View className="mt-3 flex-row flex-wrap gap-2">
+                  {/* 1. Placed */}
+                  <View className={`flex-1 ${tileBasis} rounded-xl px-2.5 py-2 bg-slate-50 border border-slate-200/80`}>
+                    <Text className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                      Placed
+                    </Text>
+                    <Text className="text-xs font-extrabold text-slate-900 mt-0.5" numberOfLines={1}>
+                      {formatCompactDateTime(timestamps.placedMs)}
+                    </Text>
+                    <Text className="text-[10px] font-medium text-slate-500 mt-0.5" numberOfLines={1}>
+                      {pickupInfo.isInstant ? 'Instant pickup' : (pickupInfo.dateLabel || 'Scheduled')}
+                    </Text>
+                  </View>
+
+                  {/* 2. Picked Up */}
+                  <View className={`flex-1 ${tileBasis} rounded-xl px-2.5 py-2 bg-slate-50 border border-slate-200/80`}>
+                    <Text className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">
+                      Picked Up
+                    </Text>
+                    <Text className="text-xs font-extrabold text-slate-900 mt-0.5" numberOfLines={1}>
+                      {timestamps.isActualPickup ? formatCompactDateTime(timestamps.pickedUpMs) : 'Pending Pickup'}
+                    </Text>
+                    <Text className="text-[10px] font-medium text-slate-500 mt-0.5" numberOfLines={1}>
+                      {timestamps.isActualPickup
+                        ? `${urgency.ageLabel}${assignedRiderName ? ` · ${assignedRiderName}` : ''}`
+                        : (assignedRiderName ? `Rider: ${assignedRiderName}` : 'Awaiting rider')}
+                    </Text>
+                  </View>
+
+                  {/* 3. Delivery SLA */}
+                  <View className={`flex-1 ${tileBasis} rounded-xl px-2.5 py-2 border ${slaCardCls}`}>
+                    <Text className={`text-[10px] font-extrabold uppercase tracking-wider ${slaLabelCls}`}>
+                      Delivery SLA
+                    </Text>
+                    <Text className={`text-xs font-black mt-0.5 ${slaValueCls}`} numberOfLines={1}>
+                      {isDeliveredOrder ? 'Delivered' : urgency.slaLabel}
+                    </Text>
+                    <Text className={`text-[10px] font-semibold mt-0.5 ${slaSubCls}`} numberOfLines={1}>
+                      {slaSubtext}
+                    </Text>
+                  </View>
+
+                  {/* 4. Stage Dwell / Weight */}
+                  <View className={`flex-1 ${tileBasis} rounded-xl px-2.5 py-2 bg-purple-50/70 border border-purple-200/80`}>
+                    <Text className="text-[10px] font-extrabold uppercase tracking-wider text-purple-700">
+                      Stage / Load
+                    </Text>
+                    <Text className="text-xs font-extrabold text-purple-950 mt-0.5" numberOfLines={1}>
+                      {stageTelemetry.title}
+                    </Text>
+                    <Text className="text-[10px] font-medium text-purple-700/80 mt-0.5" numberOfLines={1}>
+                      {stageTelemetry.subtext}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })()}
+
+            {/* Compact Pickup Slot & Scheduling Banner */}
+            <View className={`mt-2.5 rounded-xl py-2 px-3 border ${
               pickupInfo.isInstant
                 ? 'bg-amber-50/90 border-amber-300'
                 : 'bg-blue-50/80 border-blue-200/90'
             }`}>
-              <View className="flex-row items-center justify-between mb-1.5">
-                <View className="flex-row items-center gap-1.5">
-                  <View className={`w-5 h-5 rounded-full items-center justify-center ${
+              <View className="flex-row items-center justify-between flex-wrap gap-1.5">
+                <View className="flex-row items-center gap-1.5 flex-1 mr-1">
+                  <View className={`w-4 h-4 rounded-full items-center justify-center ${
                     pickupInfo.isInstant ? 'bg-amber-500' : 'bg-blue-600'
                   }`}>
                     {pickupInfo.isInstant ? (
-                      <Zap size={11} color="#ffffff" />
+                      <Zap size={10} color="#ffffff" />
                     ) : (
-                      <Calendar size={11} color="#ffffff" />
+                      <Calendar size={10} color="#ffffff" />
                     )}
                   </View>
                   <Text className={`font-black text-xs uppercase tracking-wide ${
@@ -1794,15 +2017,22 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   }`}>
                     {pickupInfo.badgeLabel}
                   </Text>
+                  <Text className={`font-bold text-xs flex-1 ${
+                    pickupInfo.isInstant ? 'text-amber-900' : 'text-blue-900'
+                  }`} numberOfLines={1}>
+                    · {pickupInfo.isInstant
+                      ? (pickupInfo.timeLabel || 'Within 30–45 mins')
+                      : `${pickupInfo.dateLabel ? `${pickupInfo.dateLabel} · ` : ''}${pickupInfo.timeLabel || 'Slot pending'}`}
+                  </Text>
                 </View>
-                <View className="flex-row items-center gap-1">
+                <View className="flex-row items-center gap-1 shrink-0">
                   {isExpressOrder(order) && (
-                    <View className="bg-orange-600 px-2 py-0.5 rounded-full mr-1">
+                    <View className="bg-orange-600 px-2 py-0.5 rounded-full">
                       <Text className="text-white text-[10px] font-black uppercase">⚡ EXPRESS 6-8H</Text>
                     </View>
                   )}
                   {order.isUrgent && !isExpressOrder(order) && (
-                    <View className="bg-red-500 px-2 py-0.5 rounded-full mr-1">
+                    <View className="bg-red-500 px-2 py-0.5 rounded-full">
                       <Text className="text-white text-[10px] font-black uppercase">⚡ URGENT</Text>
                     </View>
                   )}
@@ -1820,20 +2050,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 </View>
               </View>
 
-              <View className="flex-row items-center gap-2 mt-0.5">
-                <Clock size={15} color={pickupInfo.isInstant ? '#b45309' : '#1d4ed8'} />
-                <Text className={`font-black text-sm flex-1 ${
-                  pickupInfo.isInstant ? 'text-amber-950' : 'text-blue-950'
-                }`}>
-                  {pickupInfo.isInstant
-                    ? (pickupInfo.timeLabel || 'Within 30–45 mins')
-                    : `${pickupInfo.dateLabel ? `${pickupInfo.dateLabel} • ` : ''}${pickupInfo.timeLabel || 'Slot pending'}`}
-                </Text>
-              </View>
-
               {/* Inbound Dispatch & Rider Status (for pre-pickup orders) */}
               {['placed', 'confirmed', 'in_transit_to_store'].includes(order.status) && (
-                <View className={`mt-2.5 pt-2 border-t flex-row items-center justify-between flex-wrap gap-2 ${
+                <View className={`mt-2 pt-2 border-t flex-row items-center justify-between flex-wrap gap-2 ${
                   pickupInfo.isInstant ? 'border-amber-200/80' : 'border-blue-200/70'
                 }`}>
                   <View className="flex-row items-center gap-1.5 flex-1 mr-2">
@@ -1998,11 +2217,11 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                 </View>
               </View>
             ) : (order.deliveryDate || order.deliverySlot || order.deliveryTime) ? (
-              <View className="mt-3.5 bg-blue-50/80 border border-blue-200/80 rounded-2xl px-3.5 py-2.5 flex-row items-center justify-between">
+              <View className="mt-2.5 bg-blue-50/80 border border-blue-200/80 rounded-xl px-3 py-2 flex-row items-center justify-between">
                 <View className="flex-row items-center gap-2 flex-1 mr-2">
-                  <Clock size={15} color="#2563eb" />
+                  <Clock size={14} color="#2563eb" />
                   <View className="flex-1">
-                    <Text className="text-blue-900 font-bold text-xs">
+                    <Text className="text-blue-900 font-bold text-xs" numberOfLines={1}>
                       Target Delivery: {order.deliveryDate || ''} {order.deliverySlot || order.deliveryTime || ''}
                     </Text>
                   </View>
@@ -2024,38 +2243,18 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
             {/* Rider Pickup Note */}
             {Boolean(order.pickupNote || (process as any)?.pickupNote) && (
-              <View className="mt-2.5 bg-amber-50/90 border border-amber-300 rounded-2xl p-3.5 flex-row items-start gap-2.5">
-                <AlertCircle size={16} color="#d97706" className="mt-0.5" />
+              <View className="mt-2.5 bg-amber-50/90 border border-amber-300 rounded-xl py-2.5 px-3 flex-row items-start gap-2.5">
+                <AlertCircle size={15} color="#d97706" className="mt-0.5" />
                 <View className="flex-1">
-                  <Text className="text-amber-900 font-extrabold text-xs uppercase tracking-wider">
+                  <Text className="text-amber-900 font-extrabold text-[11px] uppercase tracking-wider">
                     Rider Pickup Note
                   </Text>
-                  <Text className="text-amber-950 text-sm font-medium mt-0.5">
+                  <Text className="text-amber-950 text-xs font-medium mt-0.5">
                     {order.pickupNote || (process as any)?.pickupNote}
                   </Text>
                 </View>
               </View>
             )}
-
-            {/* Tokens & Order IDs */}
-            <View className="mt-3 pt-3 border-t border-gray-100 flex-row items-center justify-between flex-wrap gap-2">
-              <View className="flex-row items-center gap-1.5 flex-wrap">
-                <Text className="text-gray-900 font-black text-sm">#{orderId.slice(-6).toUpperCase()}</Text>
-                {(() => {
-                  const tokenChips = parseOrderTokens(order.tokens, order.tokenNumber || process?.tokenNumber, order.items);
-                  return tokenChips.map((c, i) => (
-                    <View key={i} className="bg-amber-100 border border-amber-200 px-2 py-0.5 rounded">
-                      <Text className="text-amber-800 font-bold text-xs">
-                        T-{c.token}{c.serviceLabel ? ` · ${c.serviceLabel}` : ''}
-                      </Text>
-                    </View>
-                  ));
-                })()}
-              </View>
-              <View className="bg-gray-100 px-2.5 py-0.5 rounded-full">
-                <Text className="text-xs font-bold text-gray-600 uppercase">{order.status?.replace(/_/g, ' ') || 'ACTIVE'}</Text>
-              </View>
-            </View>
 
             {/* Verification OTPs (Customer Pickup, Store Handover, Delivery) */}
             {Boolean(order.pickupOTP || order.storeOTP || order.deliveryOTP) && (
@@ -2190,21 +2389,23 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         {/* Garment Count & Scan Details Card */}
         {garmentCountDisplay != null && garmentCountDisplay > 0 && isTaggingDone && (
           <View className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 mb-4">
-            <View className="flex-row items-center justify-between">
-              <View className="flex-row items-center gap-3">
-                <View className="w-10 h-10 rounded-full bg-purple-50 items-center justify-center">
+            <View className="flex-row items-center justify-between gap-2">
+              <View className="flex-row items-center gap-3 flex-1">
+                <View className="w-10 h-10 rounded-full bg-purple-50 items-center justify-center shrink-0">
                   <Shirt size={20} color="#994bff" />
                 </View>
-                <View>
+                <View className="flex-1">
                   <Text className="text-gray-900 font-bold text-base">
                     {garmentCountDisplay} Garment{garmentCountDisplay > 1 ? 's' : ''} Tagged
                   </Text>
                   <Text className="text-gray-500 text-xs">
-                    All barcode labels scanned & verified
+                    {aggregated.isMultiLoad
+                      ? `Combined across ${aggregated.loadCount} loads · All barcode labels verified`
+                      : 'All barcode labels scanned & verified'}
                   </Text>
                 </View>
               </View>
-              <View className="bg-green-50 border border-green-200 px-2.5 py-1 rounded-full flex-row items-center gap-1">
+              <View className="bg-green-50 border border-green-200 px-2.5 py-1 rounded-full flex-row items-center gap-1 shrink-0">
                 <CheckCircle2 size={13} color="#16a34a" />
                 <Text className="text-green-700 text-xs font-bold">Verified</Text>
               </View>
@@ -2212,53 +2413,177 @@ export function OrderDetailScreen({ route, navigation }: Props) {
           </View>
         )}
 
+        {/* Pre-Existing Damage Reports Card */}
+        {damageReports.length > 0 && (
+          <View className="bg-white rounded-xl p-4 shadow-sm border border-amber-200 mb-4">
+            <View className="flex-row items-center justify-between gap-2 mb-3">
+              <View className="flex-row items-center gap-2 flex-1">
+                <View className="w-8 h-8 rounded-full bg-amber-50 border border-amber-200 items-center justify-center shrink-0">
+                  <AlertTriangle size={15} color="#d97706" />
+                </View>
+                <Text className="text-gray-900 font-bold text-base flex-1" numberOfLines={1}>
+                  Pre-Existing Damage Reports
+                </Text>
+              </View>
+              <View className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full shrink-0">
+                <Text className="text-amber-800 text-[11px] font-bold">
+                  {damageReports.length} report{damageReports.length > 1 ? 's' : ''}
+                </Text>
+              </View>
+            </View>
+
+            <View className="gap-3">
+              {damageReports.map((report: any, rIdx: number) => {
+                const rPhotos: string[] = Array.isArray(report.photos) ? report.photos.filter(Boolean) : [];
+                const rVideos: string[] = Array.isArray(report.videos) ? report.videos.filter(Boolean) : [];
+                return (
+                  <View
+                    key={report.id || `dmg-${rIdx}`}
+                    className="bg-amber-50/40 border border-amber-200/80 rounded-xl p-3"
+                  >
+                    <View className="flex-row items-center justify-between flex-wrap gap-1.5 mb-1.5">
+                      <View className="flex-row items-center flex-wrap gap-1.5">
+                        <Text className="text-gray-900 font-bold text-xs">
+                          {report.reportedByName || 'Store Staff'}
+                        </Text>
+                        {report.loadLabel ? (
+                          <View className="bg-white border border-amber-200 px-2 py-0.5 rounded-full">
+                            <Text className="text-amber-800 text-[10px] font-bold">{report.loadLabel}</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                      <Text className="text-gray-500 text-[11px]">
+                        {fmtDT(report.reportedAt || report.createdAt)}
+                      </Text>
+                    </View>
+
+                    {report.note ? (
+                      <Text className="text-gray-800 text-xs mb-2 leading-4">{report.note}</Text>
+                    ) : null}
+
+                    {rPhotos.length > 0 && (
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={{ gap: 8 }}
+                        className="mb-2"
+                      >
+                        {rPhotos.map((photoUri, pIdx) => (
+                          <TouchableOpacity
+                            key={`dmg-photo-${rIdx}-${pIdx}`}
+                            onPress={() => setPreviewImage(photoUri)}
+                            activeOpacity={0.8}
+                            className="rounded-xl overflow-hidden border border-amber-200 bg-gray-100 relative"
+                            style={{ width: 84, height: 84 }}
+                          >
+                            <Image
+                              source={{ uri: photoUri }}
+                              style={{ width: '100%', height: '100%' }}
+                              resizeMode="cover"
+                            />
+                            <View className="absolute bottom-1 right-1 bg-black/60 rounded px-1.5 py-0.5 flex-row items-center gap-0.5">
+                              <Eye size={10} color="#fff" />
+                              <Text className="text-white text-[9px] font-bold">View</Text>
+                            </View>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    )}
+
+                    {rVideos.length > 0 && (
+                      <View className="flex-row flex-wrap gap-2">
+                        {rVideos.map((videoUri, vIdx) => (
+                          <TouchableOpacity
+                            key={`dmg-video-${rIdx}-${vIdx}`}
+                            onPress={() => Linking.openURL(videoUri)}
+                            className="bg-amber-600 px-3 py-1.5 rounded-lg flex-row items-center gap-1.5 active:opacity-90"
+                          >
+                            <Play size={11} color="#fff" />
+                            <Text className="text-white text-xs font-bold">
+                              {rVideos.length > 1 ? `Watch Video ${vIdx + 1}` : 'Watch Video'}
+                            </Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
         {/* Quality & Packaging Proof (Video & Photos) */}
-        {(packagingPhotos.length > 0 || !!packagingVideoUrl) && (
+        {(packagingPhotos.length > 0 || packagingVideos.length > 0 || (bundlesCount != null && bundlesCount > 0)) && (
           <View className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 mb-4">
-            <View className="flex-row items-center justify-between mb-2">
+            <View className="flex-row items-center justify-between flex-wrap gap-2 mb-2">
               <View className="flex-row items-center gap-2">
                 <Camera size={18} color="#994bff" />
                 <Text className="text-gray-900 font-bold text-base">Packaging & Quality Proof</Text>
               </View>
-              <View className="flex-row items-center gap-1.5">
-                {bundlesCount ? (
-                  <View className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
-                    <Text className="text-amber-800 text-xs font-bold">📦 {bundlesCount} Bundle{bundlesCount > 1 ? 's' : ''}</Text>
+              <View className="flex-row items-center flex-wrap gap-1.5">
+                {aggregated.isMultiLoad ? (
+                  <View className="bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                    <Text className="text-blue-700 text-[11px] font-bold">{aggregated.loadCount} Loads</Text>
                   </View>
                 ) : null}
-                {packagingVideoUrl ? (
+                {bundlesCount ? (
+                  <View className="bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
+                    <Text className="text-amber-800 text-[11px] font-bold">📦 {bundlesCount} Bundle{bundlesCount > 1 ? 's' : ''}</Text>
+                  </View>
+                ) : null}
+                {packagingVideos.length > 0 ? (
                   <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full flex-row items-center gap-1">
                     <Video size={10} color="#994bff" />
-                    <Text className="text-purple-700 text-xs font-bold">Video QC</Text>
+                    <Text className="text-purple-700 text-[11px] font-bold">
+                      {packagingVideos.length > 1 ? `${packagingVideos.length} Videos QC` : 'Video QC'}
+                    </Text>
                   </View>
                 ) : null}
                 {packagingPhotos.length > 0 ? (
                   <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">
-                    <Text className="text-purple-700 text-xs font-bold">{packagingPhotos.length} photo{packagingPhotos.length > 1 ? 's' : ''}</Text>
+                    <Text className="text-purple-700 text-[11px] font-bold">{packagingPhotos.length} photo{packagingPhotos.length > 1 ? 's' : ''}</Text>
                   </View>
                 ) : null}
               </View>
             </View>
 
-            {/* Packaging Video Proof Player Card */}
-            {packagingVideoUrl ? (
-              <View className="my-2 p-3 bg-purple-50/70 border border-purple-200 rounded-xl flex-row items-center justify-between">
-                <View className="flex-row items-center gap-2.5 flex-1 mr-2">
-                  <View className="w-9 h-9 rounded-full bg-purple-600 items-center justify-center">
-                    <Video size={16} color="#fff" />
-                  </View>
-                  <View className="flex-1">
-                    <Text className="text-purple-950 font-bold text-xs">Verified QC Video Proof</Text>
-                    <Text className="text-purple-700 text-[10px]">Short packaging recording by helper</Text>
-                  </View>
-                </View>
-                <TouchableOpacity
-                  onPress={() => Linking.openURL(packagingVideoUrl)}
-                  className="bg-purple-600 px-3 py-1.5 rounded-lg flex-row items-center gap-1 active:opacity-90"
-                >
-                  <Play size={12} color="#fff" />
-                  <Text className="text-white text-xs font-bold">Watch Video</Text>
-                </TouchableOpacity>
+            {/* Packaging Video Proof Player Cards (all loads) */}
+            {packagingVideos.length > 0 ? (
+              <View className="gap-2 my-2">
+                {packagingVideos.map((vid, vIdx) => {
+                  const shortLoadLabel = vid.label.split(' · ')[0];
+                  const showLoadSuffix = aggregated.isMultiLoad || packagingVideos.length > 1;
+                  return (
+                    <View
+                      key={`${vid.processId}-${vIdx}`}
+                      className="p-3 bg-purple-50/70 border border-purple-200 rounded-xl flex-row items-center justify-between gap-2"
+                    >
+                      <View className="flex-row items-center gap-2.5 flex-1">
+                        <View className="w-9 h-9 rounded-full bg-purple-600 items-center justify-center shrink-0">
+                          <Video size={16} color="#fff" />
+                        </View>
+                        <View className="flex-1">
+                          <Text className="text-purple-950 font-bold text-xs" numberOfLines={1}>
+                            {showLoadSuffix ? `Verified QC Video · ${vid.label}` : 'Verified QC Video Proof'}
+                          </Text>
+                          <Text className="text-purple-700 text-[11px]">
+                            Short packaging recording by helper
+                          </Text>
+                        </View>
+                      </View>
+                      <TouchableOpacity
+                        onPress={() => Linking.openURL(vid.url)}
+                        className="bg-purple-600 px-3 py-1.5 rounded-lg flex-row items-center gap-1 active:opacity-90 shrink-0"
+                      >
+                        <Play size={12} color="#fff" />
+                        <Text className="text-white text-xs font-bold">
+                          {showLoadSuffix ? `Watch Video (${shortLoadLabel})` : 'Watch Video'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  );
+                })}
               </View>
             ) : null}
 
@@ -2295,80 +2620,192 @@ export function OrderDetailScreen({ route, navigation }: Props) {
         )}
         
         {/* Step-by-Step Stage Timings & Timeline */}
-        {timelineEvents.length > 0 && (
+        {(multiLoadTimings.length > 1 || timelineEvents.length > 0) && (
           <View className="bg-white rounded-xl p-5 shadow-sm border border-gray-100 mt-1 mb-4">
             <View className="flex-row items-center justify-between mb-4">
               <View className="flex-row items-center gap-2">
                 <Clock size={18} color="#994bff" />
                 <Text className="text-gray-900 font-bold text-base">Stage Timings & Timeline</Text>
               </View>
-              <Text className="text-gray-400 text-xs">{timelineEvents.length} stages recorded</Text>
+              {multiLoadTimings.length > 1 ? (
+                <View className="bg-purple-50 border border-purple-200 px-2.5 py-0.5 rounded-full">
+                  <Text className="text-purple-700 text-[11px] font-bold">
+                    {multiLoadTimings.length} Loads
+                  </Text>
+                </View>
+              ) : (
+                <Text className="text-gray-400 text-xs">{timelineEvents.length} stages recorded</Text>
+              )}
             </View>
 
-            {timelineEvents.map((event, idx, arr) => {
-              const ts = event.completedAt || event.startedAt || event.acceptedAt;
-              const ms = ts ? ((ts as any).toMillis?.() || (ts as any).seconds * 1000 || (ts as any)._seconds * 1000 || (typeof ts === 'number' ? ts : 0)) : 0;
-              const dateStr = ms ? new Date(ms).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
-              const isCompleted = !!event.completedAt;
-
-              return (
-                <View key={idx} className="flex-row mb-4 last:mb-0">
-                  <View className="items-center mr-3">
-                    <View className={`w-4 h-4 rounded-full items-center justify-center ${isCompleted ? 'bg-green-500' : 'bg-orange-400'}`}>
-                      {isCompleted ? <Check size={10} color="#fff" /> : <View className="w-1.5 h-1.5 rounded-full bg-white" />}
-                    </View>
-                    {idx < arr.length - 1 && <View className="w-0.5 flex-1 bg-gray-200 my-1" />}
-                  </View>
-                  <View className="flex-1 pb-1">
-                    <View className="flex-row items-center justify-between flex-wrap gap-1">
-                      <Text className="text-gray-900 font-bold text-sm">{event.label}</Text>
-                      <View className="flex-row items-center gap-1.5">
-                        {typeof event.acceptToCompleteMin === 'number' && (
-                          <View className="bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
-                            <Text className="text-green-700 text-[11px] font-bold">
-                              {event.acceptToCompleteMin}m total
-                            </Text>
-                          </View>
-                        )}
-                        {typeof event.startToCompleteMin === 'number' && event.startToCompleteMin !== event.acceptToCompleteMin && (
-                          <View className="bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
-                            <Text className="text-blue-700 text-[11px] font-bold">
-                              {event.startToCompleteMin}m run
-                            </Text>
-                          </View>
-                        )}
+            {multiLoadTimings.length > 1 ? (
+              <View className="gap-4">
+                {multiLoadTimings.map((loadSec) => (
+                  <View
+                    key={loadSec.processId}
+                    className="bg-gray-50/80 border border-gray-200/80 rounded-xl p-3.5"
+                  >
+                    <View className="flex-row items-center justify-between gap-2 pb-2.5 mb-3 border-b border-gray-200/80">
+                      <Text className="text-gray-900 font-extrabold text-xs flex-1" numberOfLines={1}>
+                        {loadSec.label}
+                      </Text>
+                      <View className="bg-white border border-gray-200 px-2 py-0.5 rounded-full shrink-0">
+                        <Text className="text-gray-600 text-[11px] font-bold">
+                          {loadSec.events.length} stage{loadSec.events.length === 1 ? '' : 's'}
+                        </Text>
                       </View>
                     </View>
 
-                    <View className="flex-row items-center gap-2 mt-1">
-                      {event.assigneeName ? (
-                        <Text className="text-gray-600 text-xs font-medium">By {event.assigneeName}</Text>
-                      ) : null}
-                      {event.assigneeName && dateStr ? <Text className="text-gray-300 text-xs">·</Text> : null}
-                      {dateStr ? <Text className="text-gray-500 text-xs">{dateStr}</Text> : null}
-                    </View>
+                    {loadSec.events.length === 0 ? (
+                      <Text className="text-gray-400 text-xs italic">Queued — no stages started yet</Text>
+                    ) : (
+                      loadSec.events.map((event, idx, arr) => {
+                        const ts = event.completedAt || event.startedAt || event.acceptedAt;
+                        const ms = ts ? ((ts as any).toMillis?.() || (ts as any).seconds * 1000 || (ts as any)._seconds * 1000 || (typeof ts === 'number' ? ts : 0)) : 0;
+                        const dateStr = ms ? new Date(ms).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+                        const isCompleted = !!event.completedAt;
 
-                    {/* Milestones if wash cycle */}
-                    {(event.step === 'getting_washed' || event.step === 'wash') && ((event as any).detergentAddedAt || (event as any).softenerAddedAt) && (
-                      <View className="flex-row gap-2 mt-1.5">
-                        {(event as any).detergentAddedAt && (
-                          <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
-                            <Check size={10} color="#994bff" />
-                            <Text className="text-purple-700 text-[10px] font-bold">Detergent @ 13m</Text>
+                        return (
+                          <View key={`${loadSec.processId}-${event.step}-${idx}`} className="flex-row mb-3.5 last:mb-0">
+                            <View className="items-center mr-3">
+                              <View className={`w-4 h-4 rounded-full items-center justify-center ${isCompleted ? 'bg-green-500' : 'bg-orange-400'}`}>
+                                {isCompleted ? <Check size={10} color="#fff" /> : <View className="w-1.5 h-1.5 rounded-full bg-white" />}
+                              </View>
+                              {idx < arr.length - 1 && <View className="w-0.5 flex-1 bg-gray-200 my-1" />}
+                            </View>
+                            <View className="flex-1 pb-0.5">
+                              <View className="flex-row items-center justify-between flex-wrap gap-1">
+                                <View className="flex-row items-center flex-wrap gap-1.5">
+                                  <Text className="text-gray-900 font-bold text-sm">{event.label}</Text>
+                                  {event.machineName ? (
+                                    <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">
+                                      <Text className="text-purple-700 text-[10px] font-bold">{event.machineName}</Text>
+                                    </View>
+                                  ) : null}
+                                </View>
+                                <View className="flex-row items-center gap-1.5">
+                                  {typeof event.acceptToCompleteMin === 'number' && (
+                                    <View className="bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                                      <Text className="text-green-700 text-[11px] font-bold">
+                                        {event.acceptToCompleteMin}m total
+                                      </Text>
+                                    </View>
+                                  )}
+                                  {typeof event.startToCompleteMin === 'number' && event.startToCompleteMin !== event.acceptToCompleteMin && (
+                                    <View className="bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                                      <Text className="text-blue-700 text-[11px] font-bold">
+                                        {event.startToCompleteMin}m run
+                                      </Text>
+                                    </View>
+                                  )}
+                                </View>
+                              </View>
+
+                              <View className="flex-row items-center flex-wrap gap-1.5 mt-1">
+                                {event.assigneeName ? (
+                                  <Text className="text-gray-600 text-xs font-medium">By {event.assigneeName}</Text>
+                                ) : null}
+                                {event.assigneeName && dateStr ? <Text className="text-gray-300 text-xs">·</Text> : null}
+                                {dateStr ? <Text className="text-gray-500 text-xs">{dateStr}</Text> : null}
+                              </View>
+
+                              {(event.step === 'getting_washed' || event.step === 'wash') && (event.detergentAddedAt || event.softenerAddedAt) && (
+                                <View className="flex-row flex-wrap gap-2 mt-1.5">
+                                  {event.detergentAddedAt && (
+                                    <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
+                                      <Check size={10} color="#994bff" />
+                                      <Text className="text-purple-700 text-[10px] font-bold">Detergent @ 3m</Text>
+                                    </View>
+                                  )}
+                                  {event.softenerAddedAt && (
+                                    <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
+                                      <Check size={10} color="#994bff" />
+                                      <Text className="text-purple-700 text-[10px] font-bold">Softener @ 21m</Text>
+                                    </View>
+                                  )}
+                                </View>
+                              )}
+                            </View>
                           </View>
-                        )}
-                        {(event as any).softenerAddedAt && (
-                          <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
-                            <Check size={10} color="#994bff" />
-                            <Text className="text-purple-700 text-[10px] font-bold">Softener @ 21m</Text>
-                          </View>
-                        )}
-                      </View>
+                        );
+                      })
                     )}
                   </View>
-                </View>
-              );
-            })}
+                ))}
+              </View>
+            ) : (
+              timelineEvents.map((event, idx, arr) => {
+                const ts = event.completedAt || event.startedAt || event.acceptedAt;
+                const ms = ts ? ((ts as any).toMillis?.() || (ts as any).seconds * 1000 || (ts as any)._seconds * 1000 || (typeof ts === 'number' ? ts : 0)) : 0;
+                const dateStr = ms ? new Date(ms).toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+                const isCompleted = !!event.completedAt;
+
+                return (
+                  <View key={idx} className="flex-row mb-4 last:mb-0">
+                    <View className="items-center mr-3">
+                      <View className={`w-4 h-4 rounded-full items-center justify-center ${isCompleted ? 'bg-green-500' : 'bg-orange-400'}`}>
+                        {isCompleted ? <Check size={10} color="#fff" /> : <View className="w-1.5 h-1.5 rounded-full bg-white" />}
+                      </View>
+                      {idx < arr.length - 1 && <View className="w-0.5 flex-1 bg-gray-200 my-1" />}
+                    </View>
+                    <View className="flex-1 pb-1">
+                      <View className="flex-row items-center justify-between flex-wrap gap-1">
+                        <View className="flex-row items-center flex-wrap gap-1.5">
+                          <Text className="text-gray-900 font-bold text-sm">{event.label}</Text>
+                          {(event as any).machineName ? (
+                            <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-purple-700 text-[10px] font-bold">{(event as any).machineName}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        <View className="flex-row items-center gap-1.5">
+                          {typeof event.acceptToCompleteMin === 'number' && (
+                            <View className="bg-green-50 border border-green-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-green-700 text-[11px] font-bold">
+                                {event.acceptToCompleteMin}m total
+                              </Text>
+                            </View>
+                          )}
+                          {typeof event.startToCompleteMin === 'number' && event.startToCompleteMin !== event.acceptToCompleteMin && (
+                            <View className="bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-blue-700 text-[11px] font-bold">
+                                {event.startToCompleteMin}m run
+                              </Text>
+                            </View>
+                          )}
+                        </View>
+                      </View>
+
+                      <View className="flex-row items-center flex-wrap gap-1.5 mt-1">
+                        {event.assigneeName ? (
+                          <Text className="text-gray-600 text-xs font-medium">By {event.assigneeName}</Text>
+                        ) : null}
+                        {event.assigneeName && dateStr ? <Text className="text-gray-300 text-xs">·</Text> : null}
+                        {dateStr ? <Text className="text-gray-500 text-xs">{dateStr}</Text> : null}
+                      </View>
+
+                      {/* Milestones if wash cycle */}
+                      {(event.step === 'getting_washed' || event.step === 'wash') && ((event as any).detergentAddedAt || (event as any).softenerAddedAt) && (
+                        <View className="flex-row flex-wrap gap-2 mt-1.5">
+                          {(event as any).detergentAddedAt && (
+                            <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
+                              <Check size={10} color="#994bff" />
+                              <Text className="text-purple-700 text-[10px] font-bold">Detergent @ 3m</Text>
+                            </View>
+                          )}
+                          {(event as any).softenerAddedAt && (
+                            <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded flex-row items-center gap-1">
+                              <Check size={10} color="#994bff" />
+                              <Text className="text-purple-700 text-[10px] font-bold">Softener @ 21m</Text>
+                            </View>
+                          )}
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                );
+              })
+            )}
           </View>
         )}
         </View>
@@ -2496,6 +2933,15 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               visible={showEditModal}
               onClose={() => setShowEditModal(false)}
               order={order}
+            />
+          )}
+          {process && (
+            <DamageReportModal
+              visible={showDamageModal}
+              processId={process.id}
+              orderId={orderId}
+              orderLabel={`#${orderId.slice(-6).toUpperCase()}${process.serviceLabel ? ` · ${process.serviceLabel}` : ''}`}
+              onClose={() => setShowDamageModal(false)}
             />
           )}
         </>

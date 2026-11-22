@@ -3,6 +3,7 @@ package com.nischayk3.spinzoops.overlay
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
@@ -37,20 +38,56 @@ class SpinzoMessagingService : FirebaseMessagingService() {
             val canDraw = Settings.canDrawOverlays(this)
             Log.d("SpinzoOverlay", "3. Overlay permission (canDrawOverlays): $canDraw")
 
+            val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            val dispatchWakeLock = try {
+                pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SpinzoOps:FCMDispatchLock")?.apply {
+                    setReferenceCounted(false)
+                    acquire(10_000L)
+                }
+            } catch (e: Exception) {
+                Log.w("SpinzoOverlay", "Failed to acquire FCMDispatchLock: ${e.message}")
+                null
+            }
+
             if (canDraw) {
                 Log.d("SpinzoOverlay", "4. Triggering native overlay on Main Thread via WindowManager")
-                Handler(Looper.getMainLooper()).post {
+                val posted = Handler(Looper.getMainLooper()).post {
                     try {
                         SpinzoOverlayManager.showOverlay(applicationContext, data)
                         Log.d("SpinzoOverlay", "5. WindowManager.addView successful")
                     } catch (e: Exception) {
                         Log.e("SpinzoOverlay", "5. WindowManager.addView failed: ${e.message}", e)
                         SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                    } finally {
+                        try {
+                            if (dispatchWakeLock?.isHeld == true) {
+                                dispatchWakeLock.release()
+                            }
+                        } catch (e: Exception) {
+                            Log.w("SpinzoOverlay", "Error releasing FCMDispatchLock: ${e.message}")
+                        }
                     }
+                }
+                if (!posted) {
+                    try {
+                        if (dispatchWakeLock?.isHeld == true) {
+                            dispatchWakeLock.release()
+                        }
+                    } catch (e: Exception) {}
                 }
             } else {
                 Log.d("SpinzoOverlay", "4. Overlay permission missing - triggering fallback Heads-Up notification")
-                SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                try {
+                    SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                } finally {
+                    try {
+                        if (dispatchWakeLock?.isHeld == true) {
+                            dispatchWakeLock.release()
+                        }
+                    } catch (e: Exception) {
+                        Log.w("SpinzoOverlay", "Error releasing FCMDispatchLock: ${e.message}")
+                    }
+                }
             }
         }
     }

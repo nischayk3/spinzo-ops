@@ -1,25 +1,26 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Linking } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Linking, TextInput } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import { Inbox, Clock, Phone, MapPin, ChevronDown, User, AlertTriangle, Zap, Tag, Shirt, Check, CheckCircle2, Wind } from 'lucide-react-native';
+import { Inbox, Clock, Phone, MapPin, User, AlertTriangle, Zap, Shirt, Check, Search, X, Hourglass } from 'lucide-react-native';
 import { useAuthStore } from '../../store/authStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
-import { serviceSummary, FeedOrder, orderTotal, isExpressOrder } from '../../utils/orderFeed';
+import { serviceSummary, FeedOrder, orderTotal } from '../../utils/orderFeed';
 import { currentStep, isDone, myInProgress, stage, stepLabel, stepQueue, isMachineStep, OpsProcess } from '../../utils/opsProcess';
-import { slaRemainingMinutes, slaTone, STAGE_SLA_MINUTES, SlaTone } from '../../utils/sla';
+import { computeOrderUrgency, compareOrdersForOps, formatCompactDuration, toEpochMs } from '../../utils/orderUrgency';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
 import { WorkflowSteps } from '../../components/WorkflowSteps';
 import { FloatingTaskCard } from '../../components/FloatingTaskCard';
 import { AssignHelperModal } from '../../components/Supervisor/AssignHelperModal';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
+import { useHelperRulesStore } from '../../store/helperRulesStore';
+import { isHelperAllowedForStage } from '../../utils/helperEligibility';
 import { useResponsive } from '../../utils/useResponsive';
 
 type AppRole = 'helper' | 'iron' | 'supervisor' | 'admin';
-
-const IRON_TABS = ['getting_ironed'];
+type UrgencyFilter = 'all' | 'critical' | 'express' | 'aging24h';
 
 const STAGE_ORDER = [
   'tagging',
@@ -30,8 +31,6 @@ const STAGE_ORDER = [
 ];
 const KNOWN_STAGES = new Set(STAGE_ORDER);
 const OTHER_KEY = '__other__';
-
-const HELPER_TABS = STAGE_ORDER.filter(s => s !== 'getting_ironed');
 
 export const canStartStage = (role: AppRole, step: string): boolean => {
   if (role === 'supervisor' || role === 'admin') return true;
@@ -47,13 +46,6 @@ const getTabsForRole = (role: AppRole) => {
 
 const tabLabel = (step: string): string => (step === OTHER_KEY ? 'Other' : stepLabel(step));
 
-const TONE_CLASS: Record<SlaTone, string> = {
-  muted: 'text-gray-400',
-  ok: 'text-[#10b981]',
-  warning: 'text-orange-500',
-  error: 'text-red-500',
-};
-
 interface QueueItem {
   key: string;
   orderId: string;
@@ -66,38 +58,79 @@ const LiveTimer = ({ startTimeMs }: { startTimeMs: number }) => {
     const interval = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(interval);
   }, []);
-  const diff = Math.floor((Date.now() - startTimeMs) / 1000);
+  const diff = Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000));
   const h = Math.floor(diff / 3600);
   const m = Math.floor((diff % 3600) / 60);
   const s = diff % 60;
-  return <Text className="font-bold text-[#994bff]">{h.toString().padStart(2,'0')}:{m.toString().padStart(2,'0')}:{s.toString().padStart(2,'0')}</Text>;
+  return <Text className="font-bold text-xs text-[#994bff]">{h.toString().padStart(2,'0')}:{m.toString().padStart(2,'0')}:{s.toString().padStart(2,'0')}</Text>;
 };
 
-const UrgencyCountdown = ({ createdAt }: { createdAt: any }) => {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 1000);
-    return () => clearInterval(interval);
-  }, []);
-  
-  const createdMs = typeof createdAt?.toMillis === 'function' ? createdAt.toMillis() : new Date(createdAt).getTime();
-  const diffSecs = 60 - Math.floor((Date.now() - createdMs) / 1000);
-  
-  if (diffSecs <= 0) return <Text className="text-red-500 font-bold text-xs">Overdue!</Text>;
-  return <Text className="text-orange-500 font-bold text-xs">{diffSecs}s urgency</Text>;
+const formatWeightKg = (kg: number): string => {
+  const rounded = Math.round(kg * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded} kg` : `${rounded.toFixed(1)} kg`;
 };
 
-const formatPickupTime = (order?: FeedOrder) => {
-  const pAt = (order as any)?.pickedUpAt || (order as any)?.pickupCompletedAt || (order as any)?.createdAt;
-  if (!pAt) return null;
-  const ms = typeof pAt.toMillis === 'function' ? pAt.toMillis() : new Date(pAt).getTime();
-  if (isNaN(ms) || ms <= 0) return null;
-  const diffMin = Math.max(0, Math.floor((Date.now() - ms) / 60000));
-  const timeStr = new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  if (diffMin < 60) return `Picked: ${timeStr} (${diffMin}m ago)`;
-  const h = Math.floor(diffMin / 60);
-  const m = diffMin % 60;
-  return `Picked: ${timeStr} (${h}h ${m}m ago)`;
+const getLoadTelemetry = (order?: FeedOrder, p?: OpsProcess): string | null => {
+  const matchingItems = p
+    ? (order?.items?.filter(i => i.serviceType === p.serviceType) || [])
+    : (order?.items || []);
+
+  let totalWeight = 0;
+  let itemClothesCount = 0;
+  let fallbackQty = 0;
+
+  for (const item of matchingItems) {
+    if (typeof item.weight === 'number' && item.weight > 0) {
+      totalWeight += item.weight;
+    } else if (typeof item.unit === 'string' && /kg/i.test(item.unit) && typeof item.quantity === 'number' && item.quantity > 0) {
+      totalWeight += item.quantity;
+    }
+    if (typeof item.clothesCount === 'number' && item.clothesCount > 0) {
+      itemClothesCount += item.clothesCount;
+    }
+    if (typeof item.quantity === 'number' && item.quantity > 0) {
+      fallbackQty += item.quantity;
+    }
+  }
+
+  const garmentsCount =
+    (p?.garments?.count && p.garments.count > 0 ? p.garments.count : 0) ||
+    (itemClothesCount > 0 ? itemClothesCount : 0) ||
+    (order?.garmentCount && order.garmentCount > 0 ? order.garmentCount : 0) ||
+    (order?.opsDetails?.garmentCount && order.opsDetails.garmentCount > 0 ? order.opsDetails.garmentCount : 0);
+
+  let bundles = 0;
+  if (p?.stages) {
+    for (const st of Object.values(p.stages)) {
+      const b = st?.qualityProof?.bundles;
+      if (typeof b === 'number' && b > bundles) bundles = b;
+    }
+  }
+
+  const parts: string[] = [];
+  if (totalWeight > 0) parts.push(formatWeightKg(totalWeight));
+  if (garmentsCount > 0) parts.push(`${garmentsCount} pcs`);
+  else if (totalWeight === 0 && fallbackQty > 0) parts.push(`${fallbackQty} units`);
+  if (bundles > 0) parts.push(`${bundles} ${bundles === 1 ? 'bdl' : 'bdls'}`);
+
+  return parts.length > 0 ? parts.join(' · ') : null;
+};
+
+const getStageEnteredMs = (p?: OpsProcess, cur?: string | null): number | null => {
+  if (!p || !cur) return null;
+  const curStage = stage(p, cur);
+  const stepArr = p.steps || [];
+  const idx = stepArr.indexOf(cur);
+  const prevStep = idx > 0 ? stepArr[idx - 1] : null;
+  const prevCompletedMs = prevStep ? toEpochMs(p.stages?.[prevStep]?.completedAt) : null;
+
+  return (
+    toEpochMs(curStage?.queuedAt) ??
+    prevCompletedMs ??
+    toEpochMs(curStage?.startedAt) ??
+    toEpochMs(curStage?.assignedAt) ??
+    toEpochMs(p.claimedAt)
+  );
 };
 
 function SupervisorFeed() {
@@ -110,6 +143,8 @@ function SupervisorFeed() {
   
   const { processes, isLoading, error, initialize, startStep, completeStep, drainWaitingOpsQueues } = useOpsProcessStore();
   const resources = useStoreResourcesStore(s => s.resources);
+  const helperRules = useHelperRulesStore(s => s.rules);
+  const subscribeHelperRules = useHelperRulesStore(s => s.subscribe);
   const { orders, initialize: initializeFeed } = useOrderFeedStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const { isDesktop, isTablet, maxContainerStyle } = useResponsive();
@@ -124,6 +159,14 @@ function SupervisorFeed() {
 
   const tabs = getTabsForRole(role);
   const [selected, setSelected] = useState(tabs[0] || 'tagging');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [urgencyFilter, setUrgencyFilter] = useState<UrgencyFilter>('all');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     // Make sure selected is valid for current role
@@ -134,8 +177,15 @@ function SupervisorFeed() {
 
   useEffect(() => {
     initializeFeed();
+    subscribeHelperRules();
     if (user?.id) initialize(user.id);
-  }, [initialize, initializeFeed, user?.id]);
+  }, [initialize, initializeFeed, subscribeHelperRules, user?.id]);
+
+  const canAccessStage = (step: string): boolean => {
+    if (!canStartStage(role, step)) return false;
+    if (role === 'supervisor' || role === 'admin') return true;
+    return isHelperAllowedForStage(user?.phone, step, helperRules);
+  };
 
   const orderById = useMemo(() => {
     const m = new Map<string, FeedOrder>();
@@ -144,10 +194,10 @@ function SupervisorFeed() {
   }, [orders]);
 
   const claimableOrders = useMemo(() => {
-    if (!canStartStage(role, 'tagging')) return [];
+    if (!canAccessStage('tagging')) return [];
     const claimed = new Set(processes.map(p => p.orderId));
     return orders.filter(o => o.status === 'pickup_completed' && !claimed.has(o.id));
-  }, [orders, processes, role]);
+  }, [orders, processes, role, user?.phone, helperRules]);
 
   const bucketOf = (p: OpsProcess): string | null => {
     const cur = currentStep(p);
@@ -173,7 +223,7 @@ function SupervisorFeed() {
         c[bucket].mine += 1;
       } else {
         const cur = currentStep(p);
-        if (cur && canStartStage(role, cur)) {
+        if (cur && canAccessStage(cur)) {
           const s = p.stages[cur];
           const isMachine = isMachineStep(cur);
           const isRunning = isMachine ? (!!s?.startedAt && !s?.completedAt) : (!!s?.assignee && !s?.completedAt);
@@ -187,15 +237,12 @@ function SupervisorFeed() {
     }
     c.tagging.pending += claimableOrders.length;
     return c;
-  }, [validProcesses, claimableOrders, role, user?.id]);
+  }, [validProcesses, claimableOrders, role, user?.id, user?.phone, helperRules]);
 
-  const sortQueueByExpress = (list: QueueItem[]): QueueItem[] =>
-    [...list].sort((a, b) => {
-      const aExp = isExpressOrder(orderById.get(a.orderId));
-      const bExp = isExpressOrder(orderById.get(b.orderId));
-      if (aExp !== bExp) return aExp ? -1 : 1;
-      return 0;
-    });
+  const sortQueueByOps = (list: QueueItem[]): QueueItem[] =>
+    [...list].sort((a, b) =>
+      compareOrdersForOps(orderById.get(a.orderId), orderById.get(b.orderId), 'ops_fifo', nowMs)
+    );
 
   const pendingItems = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
@@ -209,12 +256,12 @@ function SupervisorFeed() {
       const s = p.stages[cur];
       const isMachine = isMachineStep(cur);
       const isRunning = isMachine ? (!!s?.startedAt && !s?.completedAt) : (!!s?.assignee && !s?.completedAt);
-      if (isRunning || myInProgress(p, user?.id || '') || !canStartStage(role, cur)) continue;
+      if (isRunning || myInProgress(p, user?.id || '') || !canAccessStage(cur)) continue;
       if (!stepQueue(p, cur)) continue;
       items.push({ key: p.id, orderId: p.orderId, process: p });
     }
-    return sortQueueByExpress(items);
-  }, [selected, validProcesses, claimableOrders, role, user?.id, orderById]);
+    return sortQueueByOps(items);
+  }, [selected, validProcesses, claimableOrders, role, user?.id, user?.phone, helperRules, orderById, nowMs]);
 
   const myItems = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
@@ -223,9 +270,9 @@ function SupervisorFeed() {
       if (!myInProgress(p, user?.id || '')) continue;
       items.push({ key: p.id, orderId: p.orderId, process: p });
     }
-    return sortQueueByExpress(items);
-  }, [selected, validProcesses, user?.id, orderById]);
-  
+    return sortQueueByOps(items);
+  }, [selected, validProcesses, user?.id, orderById, nowMs]);
+
   const inProgressByOthers = useMemo<QueueItem[]>(() => {
     const items: QueueItem[] = [];
     if (role === 'helper') return items; // Helpers only see their own tasks
@@ -240,8 +287,59 @@ function SupervisorFeed() {
         items.push({ key: p.id, orderId: p.orderId, process: p });
       }
     }
-    return sortQueueByExpress(items);
-  }, [selected, validProcesses, role, user?.id, orderById]);
+    return sortQueueByOps(items);
+  }, [selected, validProcesses, role, user?.id, orderById, nowMs]);
+
+  const stageUrgencyCounts = useMemo(() => {
+    const visible = role === 'helper' ? myItems : [...myItems, ...inProgressByOthers, ...pendingItems];
+    let critical = 0;
+    let express = 0;
+    let aging24h = 0;
+    for (const item of visible) {
+      const urg = computeOrderUrgency(orderById.get(item.orderId), nowMs);
+      if (urg.isStalled48h || urg.isOverdue) critical += 1;
+      if (urg.isExpress) express += 1;
+      if (urg.isAging24h) aging24h += 1;
+    }
+    return { all: visible.length, critical, express, aging24h };
+  }, [role, myItems, inProgressByOthers, pendingItems, orderById, nowMs]);
+
+  const matchesFilters = (item: QueueItem): boolean => {
+    const order = orderById.get(item.orderId);
+    const p = item.process;
+
+    if (urgencyFilter !== 'all') {
+      const urg = computeOrderUrgency(order, nowMs);
+      if (urgencyFilter === 'critical' && !(urg.isStalled48h || urg.isOverdue)) return false;
+      if (urgencyFilter === 'express' && !urg.isExpress) return false;
+      if (urgencyFilter === 'aging24h' && !urg.isAging24h) return false;
+    }
+
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return true;
+
+    const cur = p ? currentStep(p) : null;
+    const curStage = p && cur ? stage(p, cur) : undefined;
+    const tokens = [
+      order?.shortId,
+      item.orderId,
+      p?.tokenNumber,
+      order?.tokenNumber,
+      ...(order?.tokens ? Object.values(order.tokens) : []),
+      order?.customerName,
+      order?.customerPhone,
+      order?.phone,
+      curStage?.assigneeName,
+      curStage?.machineName,
+      p?.serviceLabel,
+    ];
+    return tokens.some(v => typeof v === 'string' && v.toLowerCase().includes(q));
+  };
+
+  const filteredMyItems = useMemo(() => myItems.filter(matchesFilters), [myItems, searchQuery, urgencyFilter, orderById, nowMs]);
+  const filteredInProgress = useMemo(() => inProgressByOthers.filter(matchesFilters), [inProgressByOthers, searchQuery, urgencyFilter, orderById, nowMs]);
+  const filteredPending = useMemo(() => pendingItems.filter(matchesFilters), [pendingItems, searchQuery, urgencyFilter, orderById, nowMs]);
+  const hasActiveFilter = searchQuery.trim().length > 0 || urgencyFilter !== 'all';
 
   // Floating task state
   const activeFloatingProcess = useMemo(() => {
@@ -294,175 +392,216 @@ function SupervisorFeed() {
 
   const renderCard = (item: QueueItem) => {
     const order = orderById.get(item.orderId);
-    const pickupTimeStr = formatPickupTime(order);
+    const urgency = computeOrderUrgency(order, nowMs);
     const p = item.process;
     const cur = p ? currentStep(p) : null;
     const curStage = p && cur ? stage(p, cur) : undefined;
     const done = p ? isDone(p) : false;
     const isMachine = cur ? isMachineStep(cur) : false;
-    const isStarted = isMachine ? !!curStage?.startedAt : !!curStage?.assignee;
-    const startMs = curStage?.startedAt ? (typeof (curStage.startedAt as any).toMillis === 'function' ? (curStage.startedAt as any).toMillis() : new Date((curStage.startedAt as any) || Date.now()).getTime()) : 0;
-    const isCycleDone = isMachine && !!curStage?.startedAt && startMs > 0 && (Date.now() - startMs) >= 1800000; // >= 30 mins
+    const startMs = toEpochMs(curStage?.startedAt) ?? 0;
+    const isCycleDone = isMachine && !!curStage?.startedAt && startMs > 0 && (nowMs - startMs) >= 1_800_000; // >= 30 mins
 
-    const sla = cur && curStage?.startedAt ? STAGE_SLA_MINUTES[cur] : undefined;
-    const remaining = sla != null ? slaRemainingMinutes(curStage?.startedAt, sla) : undefined;
-    const tone = sla != null && remaining != null ? slaTone(remaining, sla, done) : 'muted';
-    const badge = p ? (
-      done ? 'Complete' :
-      isCycleDone ? 'Ready to Unload' :
-      (isMachine && !curStage?.startedAt) ? 'Queued' :
-      stepLabel(cur || '')
-    ) : 'Ready to tag';
-    
     const isMine = p && myInProgress(p, user?.id || '');
-    
-    // Find index of current step for workflow dots
     const stepArr = p?.steps || [];
     const currentIndex = cur ? stepArr.indexOf(cur) : (done ? stepArr.length : 0);
 
-    const matchingItems = p ? (order?.items?.filter(i => i.serviceType === p.serviceType) || []) : (order?.items || []);
-    const qty = matchingItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
-    const isUrgent = !!order?.isUrgent;
-    const isExpress = isExpressOrder(order);
-    const stationLabel = (() => {
-      if (cur === 'getting_washed') return curStage?.startedAt ? '🌀 In Washer' : '🧺 Washer Queue';
-      if (cur === 'getting_dried') return curStage?.startedAt ? '💨 In Dryer' : '🧺 Dryer Queue';
-      if (cur === 'getting_ironed') return '👔 Iron';
+    const serviceText = p?.serviceLabel || (order ? serviceSummary(order) : '');
+    const sToken = p?.tokenNumber || (p?.serviceType && order?.tokens?.[p.serviceType]) || order?.tokenNumber;
+    const loadTelemetry = getLoadTelemetry(order, p);
+
+    const stageEnteredMs = getStageEnteredMs(p, cur);
+    const stageDwellMs = stageEnteredMs !== null ? Math.max(0, nowMs - stageEnteredMs) : 0;
+    const showStageDwell = !!cur && !done && stageDwellMs >= 3_600_000;
+
+    const isCritical = urgency.isStalled48h || urgency.isOverdue;
+    const isExpressOnly = !isCritical && urgency.isExpress;
+    const isAgingOnly = !isCritical && !isExpressOnly && urgency.isAging24h;
+
+    const cardBorderClass = isCritical
+      ? 'border border-red-400 bg-white'
+      : isExpressOnly
+      ? 'border border-orange-400 bg-white'
+      : isAgingOnly
+      ? 'border border-amber-300 bg-white'
+      : 'border border-gray-200/80 bg-white';
+
+    const slaPillStyle = (() => {
+      if (isCritical) {
+        return {
+          wrap: 'bg-red-600 border border-red-700',
+          text: 'text-white',
+          label: urgency.isStalled48h ? '48h+ STALLED' : urgency.slaLabel,
+        };
+      }
+      if (urgency.remainingMs !== null && (urgency.isExpress || urgency.remainingMs <= 4 * 3_600_000)) {
+        return {
+          wrap: 'bg-amber-50 border border-amber-300',
+          text: 'text-amber-800',
+          label: urgency.slaLabel,
+        };
+      }
+      if (urgency.remainingMs !== null) {
+        return {
+          wrap: 'bg-emerald-50 border border-emerald-200',
+          text: 'text-emerald-700',
+          label: urgency.slaLabel,
+        };
+      }
       return null;
     })();
 
-    const accentBorderClass = isExpress
-      ? 'border-2 border-orange-500 bg-orange-50/25'
-      : isCycleDone
-      ? 'border border-gray-100 border-l-4 border-l-emerald-500 bg-white'
-      : (isMachine && curStage?.startedAt)
-      ? 'border border-gray-100 border-l-4 border-l-[#994bff] bg-white'
-      : cur === 'tagging'
-      ? 'border border-gray-100 border-l-4 border-l-blue-500 bg-white'
-      : cur === 'getting_ironed'
-      ? 'border border-gray-100 border-l-4 border-l-amber-500 bg-white'
-      : 'border border-gray-100 border-l-4 border-l-gray-200 bg-white';
+    const targetSlotText = [order?.deliveryDate, order?.deliverySlot || order?.deliveryTime]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+
+    const pickupNote = (p as any)?.pickupNote || order?.pickupNote;
 
     return (
       <TouchableOpacity
         key={item.key}
         onPress={() => handleItemPress(item)}
-        className={`rounded-2xl mb-3 overflow-hidden ${accentBorderClass} shadow-xs active:opacity-90`}
+        className={`rounded-2xl mb-2.5 overflow-hidden ${cardBorderClass} shadow-xs active:opacity-90`}
       >
-        {isExpress && (
-          <View className="bg-orange-600 px-4 py-1.5 flex-row items-center justify-between">
+        {/* Slim Top Priority Banner */}
+        {isCritical ? (
+          <View className="bg-red-600 px-3 py-1 flex-row items-center justify-between">
             <View className="flex-row items-center">
-              <Zap size={12} color="#ffffff" />
+              <AlertTriangle size={11} color="#ffffff" />
               <Text className="text-white font-black text-[10px] uppercase tracking-wider ml-1">
-                EXPRESS ORDER • 6–8H URGENT
+                {urgency.isStalled48h ? '48H+ STALLED — PRIORITIZE' : 'SLA OVERDUE — PRIORITIZE'}
               </Text>
             </View>
-            <Text className="text-orange-100 font-extrabold text-[9px] uppercase">
-              PROCESS FIRST
+            {urgency.isExpress && (
+              <Text className="text-red-100 font-extrabold text-[9px] uppercase">EXPRESS</Text>
+            )}
+          </View>
+        ) : isExpressOnly ? (
+          <View className="bg-orange-500 px-3 py-1 flex-row items-center justify-between">
+            <View className="flex-row items-center">
+              <Zap size={11} color="#ffffff" />
+              <Text className="text-white font-black text-[10px] uppercase tracking-wider ml-1">
+                EXPRESS 6–8H
+              </Text>
+            </View>
+            <Text className="text-orange-100 font-extrabold text-[9px] uppercase">PROCESS FIRST</Text>
+          </View>
+        ) : null}
+
+        <View className="p-3">
+          {/* Row 1: Order ID, Token, Service (once), Price */}
+          <View className="flex-row items-start justify-between gap-2">
+            <View className="flex-1 flex-row items-center flex-wrap gap-1">
+              <Text className="text-gray-900 font-extrabold text-sm" numberOfLines={1}>
+                #{order?.shortId?.toUpperCase() || item.orderId.substring(0, 6).toUpperCase()}
+                {p && p.siblingCount && p.siblingCount > 1
+                  ? `-${p.serviceType?.toUpperCase().substring(0, 2)}${p.loadCount && p.loadCount > 1 ? `-L${p.loadIndex || 1}` : ''}`
+                  : ''}
+              </Text>
+              {!!sToken && (
+                <View className="bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                  <Text className="text-amber-800 font-bold text-[11px]">T-{sToken}</Text>
+                </View>
+              )}
+              {!!serviceText && (
+                <View className="bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">
+                  <Text className="text-blue-700 font-bold text-[11px]" numberOfLines={1}>{serviceText}</Text>
+                </View>
+              )}
+              {isCycleDone && (
+                <View className="bg-emerald-500 px-1.5 py-0.5 rounded flex-row items-center gap-0.5">
+                  <Check size={10} color="#ffffff" />
+                  <Text className="text-white font-extrabold text-[10px] uppercase">Ready</Text>
+                </View>
+              )}
+            </View>
+            <Text className="text-gray-900 font-extrabold text-sm shrink-0">
+              ₹{order ? orderTotal(order) : '—'}
             </Text>
           </View>
-        )}
 
-        <View className="p-4">
-        {/* Top Header Row: Order ID, Tokens, Urgency & Status Badge */}
-        <View className="flex-row items-center justify-between mb-2">
-          <View className="flex-1 mr-2">
-            <View className="flex-row items-center flex-wrap gap-y-1 gap-x-1.5 mb-1">
-              <Text className="text-gray-900 font-extrabold text-base shrink-1" numberOfLines={1}>
-                #{order?.shortId?.toUpperCase() || item.orderId.substring(0,6).toUpperCase()}{p && p.siblingCount && p.siblingCount > 1 ? `-${p.serviceType?.toUpperCase().substring(0,2)}${p.loadCount && p.loadCount > 1 ? `-L${p.loadIndex || 1}` : ''}` : ''}
+          {/* Compact Workflow Progress */}
+          {p && (
+            <View className="mt-1.5">
+              <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />
+            </View>
+          )}
+
+          {/* Row 2: Customer + Phone & Delivery SLA Pill */}
+          <View className="flex-row items-center justify-between gap-2 mt-2">
+            <View className="flex-1 min-w-0">
+              <Text className="text-gray-900 font-bold text-sm" numberOfLines={1}>
+                {order?.customerName || 'Unknown Customer'}
               </Text>
-              {isExpress && (
-                <View className="bg-orange-100 border border-orange-400 px-2 py-0.5 rounded-full flex-row items-center">
-                  <Zap size={10} color="#c2410c" className="mr-0.5" />
-                  <Text className="text-orange-800 font-black text-[10px] uppercase">EXPRESS 6-8H</Text>
-                </View>
-              )}
-              {isUrgent && !isExpress && (
-                <View className="bg-red-500/15 border border-red-500/40 px-2 py-0.5 rounded-full flex-row items-center">
-                  <Zap size={10} color="#ef4444" className="mr-0.5" />
-                  <Text className="text-red-600 font-black text-[10px] uppercase">URGENT</Text>
-                </View>
-              )}
-              {!!p?.serviceLabel && (
-                <View className="bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                  <Text className="text-blue-700 font-bold text-xs">{p.serviceLabel}</Text>
-                </View>
-              )}
-              {(() => {
-                const sToken = p?.tokenNumber || (p?.serviceType && order?.tokens?.[p.serviceType]) || order?.tokenNumber;
-                if (!sToken) return null;
-                return (
-                  <View className="bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                    <Text className="text-amber-800 font-bold text-xs">T-{sToken}</Text>
-                  </View>
-                );
-              })()}
-              {!!stationLabel && (
-                <View className="bg-purple-50 px-2 py-0.5 rounded border border-purple-200">
-                  <Text className="text-[#994bff] font-bold text-xs">{stationLabel}</Text>
-                </View>
-              )}
-            </View>
-            {p && <WorkflowSteps steps={stepArr} currentIndex={currentIndex} />}
-          </View>
-          <View className="items-end justify-start shrink-0">
-            {isCycleDone ? (
-              <View className="bg-emerald-500 px-2.5 py-1 rounded-full flex-row items-center gap-1 shadow-xs">
-                <Check size={11} color="#ffffff" />
-                <Text className="text-white font-extrabold text-xs uppercase tracking-wider">Ready to Unload</Text>
-              </View>
-            ) : done ? (
-              <View className="bg-emerald-50 border border-emerald-200 px-2.5 py-1 rounded-full">
-                <Text className="text-emerald-700 font-bold text-xs">Complete</Text>
-              </View>
-            ) : (isMachine && !curStage?.startedAt) ? (
-              <View className="bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-full">
-                <Text className="text-slate-600 font-bold text-xs">Queued</Text>
-              </View>
-            ) : (
-              <View className="bg-[#994bff]/10 border border-[#994bff]/20 px-2.5 py-1 rounded-full">
-                <Text className="text-[#994bff] font-bold text-xs">{badge}</Text>
-              </View>
-            )}
-          </View>
-        </View>
-
-        {/* Customer & Staff / Machine Meta */}
-        <View className="flex-row items-start justify-between mb-2.5 border-b border-gray-100 pb-2.5">
-          <View className="flex-1 mr-2">
-            <Text className="text-gray-900 font-bold text-base mb-0.5">{order?.customerName || 'Unknown Customer'}</Text>
-            {!!order?.customerPhone && (
-              <TouchableOpacity
-                onPress={() => {
-                  Linking.openURL(`tel:${order.customerPhone}`);
-                }}
-                className="flex-row items-center self-start py-0.5"
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              >
-                <Phone size={12} color="#64748B" className="mr-1" />
-                <Text className="text-gray-500 text-xs">{order.customerPhone}</Text>
-              </TouchableOpacity>
-            )}
-            <View className="flex-row items-center mt-1 flex-wrap gap-1.5">
-              {!!p?.garments?.count && (
-                <View className="bg-purple-50 border border-purple-200 px-2 py-0.5 rounded-md flex-row items-center">
-                  <Shirt size={11} color="#994bff" className="mr-1" />
-                  <Text className="text-[#994bff] font-bold text-xs">{p.garments.count} garments</Text>
-                </View>
-              )}
-              {qty > 0 && !p?.garments?.count && (
-                <Text className="text-gray-500 text-xs bg-gray-100 px-1.5 py-0.5 rounded font-medium">{qty} units</Text>
-              )}
-              {!!pickupTimeStr && (
-                <View className="flex-row items-center bg-gray-100 px-2 py-0.5 rounded-md">
-                  <Clock size={11} color="#64748B" className="mr-1" />
-                  <Text className="text-gray-600 text-xs font-medium">{pickupTimeStr}</Text>
-                </View>
+              {!!order?.customerPhone && (
+                <TouchableOpacity
+                  onPress={() => Linking.openURL(`tel:${order.customerPhone}`)}
+                  className="flex-row items-center self-start mt-0.5"
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Phone size={11} color="#64748B" />
+                  <Text className="text-gray-500 text-[11px] ml-1">{order.customerPhone}</Text>
+                </TouchableOpacity>
               )}
             </View>
 
-            {/* Assigned Helper Chip & Machine Chip */}
-            <View className="flex-row items-center flex-wrap gap-1.5 mt-2">
+            {slaPillStyle && (
+              <View className={`px-2 py-0.5 rounded-full shrink-0 ${slaPillStyle.wrap}`}>
+                <Text className={`font-extrabold text-[11px] ${slaPillStyle.text}`}>
+                  {slaPillStyle.label}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* Row 3: Turnaround, Load & Dwell Telemetry */}
+          <View className="flex-row items-center flex-wrap gap-1.5 mt-2">
+            {urgency.pickedUpMs !== null && (
+              <View className="flex-row items-center bg-gray-100 px-2 py-0.5 rounded-md">
+                <Clock size={10} color="#64748B" />
+                <Text className="text-gray-700 text-[11px] font-medium ml-1">
+                  Picked: {urgency.pickedUpShort} · {urgency.ageLabel}
+                </Text>
+              </View>
+            )}
+
+            {!!loadTelemetry && (
+              <View className="flex-row items-center bg-purple-50 border border-purple-200/80 px-2 py-0.5 rounded-md">
+                <Shirt size={10} color="#7e22ce" />
+                <Text className="text-purple-800 font-bold text-[11px] ml-1">{loadTelemetry}</Text>
+              </View>
+            )}
+
+            {showStageDwell && cur && (
+              <View className="flex-row items-center bg-amber-50 border border-amber-200/80 px-2 py-0.5 rounded-md">
+                <Hourglass size={10} color="#b45309" />
+                <Text className="text-amber-800 font-semibold text-[11px] ml-1">
+                  In {stepLabel(cur)} · {formatCompactDuration(stageDwellMs)}
+                </Text>
+              </View>
+            )}
+
+            {!!targetSlotText && (
+              <View className="flex-row items-center bg-blue-50/80 border border-blue-200/60 px-2 py-0.5 rounded-md">
+                <MapPin size={10} color="#2563eb" />
+                <Text className="text-blue-800 font-semibold text-[11px] ml-1" numberOfLines={1}>
+                  {targetSlotText}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {Boolean(pickupNote) && (
+            <View className="bg-amber-50 border border-amber-200 rounded-lg px-2 py-1 mt-1.5">
+              <Text className="text-amber-900 text-[11px]" numberOfLines={2}>
+                <Text className="font-bold">Note: </Text>{pickupNote}
+              </Text>
+            </View>
+          )}
+
+          {/* Row 4: Footer — Assignee/Machine Chips & Action CTA */}
+          <View className="flex-row items-center justify-between gap-2 mt-2.5 pt-2 border-t border-gray-100">
+            <View className="flex-1 flex-row items-center flex-wrap gap-1.5">
               {curStage?.assignee ? (
                 <TouchableOpacity
                   disabled={role !== 'supervisor' && role !== 'admin'}
@@ -478,12 +617,12 @@ function SupervisorFeed() {
                     }
                   }}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  className="flex-row items-center bg-[#994bff]/10 px-2.5 py-1 rounded-full border border-[#994bff]/25 active:opacity-70"
+                  className="flex-row items-center bg-[#994bff]/10 px-2 py-1 rounded-full border border-[#994bff]/25 active:opacity-70"
                 >
-                  <User size={12} color="#994bff" className="mr-1.5" />
-                  <Text className="text-[#994bff] font-bold text-xs">
-                    Assigned: {curStage.assigneeName ? (curStage.assigneeName.charAt(0).toUpperCase() + curStage.assigneeName.slice(1)) : 'Staff'}
-                    {(role === 'supervisor' || role === 'admin') ? ' • Reassign' : ''}
+                  <User size={11} color="#994bff" />
+                  <Text className="text-[#994bff] font-bold text-[11px] ml-1">
+                    {curStage.assigneeName ? (curStage.assigneeName.charAt(0).toUpperCase() + curStage.assigneeName.slice(1)) : 'Staff'}
+                    {(role === 'supervisor' || role === 'admin') ? ' · Reassign' : ''}
                   </Text>
                 </TouchableOpacity>
               ) : p ? (
@@ -499,11 +638,11 @@ function SupervisorFeed() {
                     });
                   }}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  className="flex-row items-center bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200 active:opacity-70"
+                  className="flex-row items-center bg-slate-100 px-2 py-1 rounded-full border border-slate-200 active:opacity-70"
                 >
-                  <Clock size={12} color="#64748B" className="mr-1.5" />
-                  <Text className="text-slate-600 font-bold text-xs">
-                    {isMachine ? 'Waiting for Machine' : 'In Queue'} {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
+                  <Clock size={11} color="#64748B" />
+                  <Text className="text-slate-600 font-bold text-[11px] ml-1">
+                    {isMachine ? 'Waiting Machine' : 'Unassigned'}{(role === 'supervisor' || role === 'admin') ? ' · Assign' : ''}
                   </Text>
                 </TouchableOpacity>
               ) : (
@@ -519,85 +658,51 @@ function SupervisorFeed() {
                     });
                   }}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  className="flex-row items-center bg-purple-50 px-2.5 py-1 rounded-full border border-purple-200 active:opacity-70"
+                  className="flex-row items-center bg-purple-50 px-2 py-1 rounded-full border border-purple-200 active:opacity-70"
                 >
-                  <AlertTriangle size={12} color="#994bff" className="mr-1.5" />
-                  <Text className="text-[#994bff] font-bold text-xs">
-                    New Inbound • Ready for Tagging {(role === 'supervisor' || role === 'admin') ? '• Tap to assign' : ''}
+                  <AlertTriangle size={11} color="#994bff" />
+                  <Text className="text-[#994bff] font-bold text-[11px] ml-1">
+                    New Inbound{(role === 'supervisor' || role === 'admin') ? ' · Assign' : ''}
                   </Text>
                 </TouchableOpacity>
               )}
+
               {!!curStage?.machineName && (!isMachine || !!curStage?.startedAt) && (
-                <View className="flex-row items-center bg-teal-50 px-2.5 py-1 rounded-full border border-teal-200">
-                  <Text className="text-teal-700 font-bold text-xs">
+                <View className="flex-row items-center bg-teal-50 px-2 py-1 rounded-full border border-teal-200">
+                  <Text className="text-teal-700 font-bold text-[11px]">
                     {curStage.machineName.includes('Washer') ? '🫧 ' : curStage.machineName.includes('Dryer') ? '💨 ' : '👔 '}
                     {curStage.machineName}
                   </Text>
                 </View>
               )}
             </View>
-          </View>
 
-          <View className="items-end shrink-0">
-            <Text className="text-gray-900 font-extrabold text-base">₹{order ? orderTotal(order) : '—'}</Text>
-            <Text className="text-gray-400 text-xs">{p?.serviceLabel || (order ? serviceSummary(order) : '')}</Text>
-          </View>
-        </View>
-
-        {/* Footer: Target Slot, Pickup Notes, SLA & Live Clocks */}
-        <View className="flex-row items-center justify-between">
-          <View className="flex-1 mr-2">
-            {(order?.deliverySlot || order?.deliveryDate) ? (
-              <View className="flex-row items-center mb-1 bg-blue-50/80 border border-blue-200/60 px-2 py-0.5 rounded-md self-start">
-                <MapPin size={11} color="#2563eb" className="mr-1" />
-                <Text className="text-blue-800 font-semibold text-xs">
-                  Target: {order?.deliveryDate || ''} {order?.deliverySlot || order?.deliveryTime || ''}
-                </Text>
-              </View>
-            ) : null}
-
-            {Boolean((p as any)?.pickupNote || order?.pickupNote) && (
-              <View className="bg-amber-50 border border-amber-300 rounded-lg p-2 mb-1.5">
-                <Text className="text-amber-800 text-xs">
-                  <Text className="font-bold">📝 Note: </Text>{(p as any)?.pickupNote || order?.pickupNote}
-                </Text>
-              </View>
-            )}
-            
-            {/* Tagging SLA / Urgency */}
-            {!p && order?.createdAt && <UrgencyCountdown createdAt={order.createdAt} />}
-            
-            {/* Process SLAs */}
-            {sla != null && remaining != null && (isMachine ? !!curStage?.startedAt : !!curStage?.assignee) && (
-              <View className="flex-row items-center">
-                <Clock size={12} color={tone === 'error' ? '#ef4444' : '#94A3B8'} className="mr-1" />
-                <Text className={`text-xs font-bold ${TONE_CLASS[tone]}`}>
-                  {done ? 'Complete' : `${Math.ceil(remaining)}m left in SLA`}
-                </Text>
-              </View>
-            )}
-          </View>
-          
-          {/* Actions / Timers */}
-          {isCycleDone ? (
-            <TouchableOpacity
-              onPress={() => handleItemPress(item)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              className="bg-emerald-500 px-3.5 py-2 rounded-xl flex-row items-center gap-1.5 active:opacity-80 shadow-sm"
-            >
-              <Check size={14} color="#ffffff" />
-              <Text className="text-white font-extrabold text-xs">Unload</Text>
-            </TouchableOpacity>
-          ) : isMine && startMs > 0 ? (
-            <View className="bg-[#994bff]/10 border border-[#994bff]/20 px-3 py-1.5 rounded-xl flex-row items-center gap-2">
-              <View className="w-2 h-2 rounded-full bg-red-500" />
-              <LiveTimer startTimeMs={startMs} />
+            {/* Right Action / Live Clock */}
+            <View className="shrink-0">
+              {isCycleDone ? (
+                <TouchableOpacity
+                  onPress={() => handleItemPress(item)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  className="bg-emerald-500 px-3 py-1.5 rounded-xl flex-row items-center gap-1 active:opacity-80 shadow-xs"
+                >
+                  <Check size={13} color="#ffffff" />
+                  <Text className="text-white font-extrabold text-xs">Unload</Text>
+                </TouchableOpacity>
+              ) : isMine && startMs > 0 ? (
+                <View className="bg-[#994bff]/10 border border-[#994bff]/20 px-2.5 py-1 rounded-xl flex-row items-center gap-1.5">
+                  <View className="w-2 h-2 rounded-full bg-red-500" />
+                  <LiveTimer startTimeMs={startMs} />
+                </View>
+              ) : !isMine && (cur === 'tagging' || !p) ? (
+                <TouchableOpacity
+                  onPress={() => handleItemPress(item)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  className="bg-[#994bff] px-3 py-1.5 rounded-xl active:opacity-80"
+                >
+                  <Text className="text-white font-bold text-xs">Start Tagging</Text>
+                </TouchableOpacity>
+              ) : null}
             </View>
-            ) : !isMine && cur === 'tagging' ? (
-               <View className="bg-[#994bff] px-4 py-2 rounded-xl">
-                 <Text className="text-white font-bold text-xs">Start Tagging</Text>
-               </View>
-            ) : null}
           </View>
         </View>
       </TouchableOpacity>
@@ -614,21 +719,28 @@ function SupervisorFeed() {
   }
 
   const roleName = role === 'helper' ? 'Helper' : role === 'iron' ? 'Iron' : 'Supervisor';
+  const headerTitle = role === 'supervisor' || role === 'admin' ? 'Floor Board' : 'My Floor Tasks';
+  const cardColClass = isDesktop ? 'w-1/3 px-1.5' : isTablet ? 'w-1/2 px-1.5' : 'w-full';
+  const gridRowClass = isDesktop || isTablet ? 'flex-row flex-wrap -mx-1.5' : '';
+  const totalFilteredCount =
+    role === 'helper'
+      ? filteredMyItems.length
+      : filteredMyItems.length + filteredInProgress.length + filteredPending.length;
 
   return (
     <SafeAreaView className="flex-1 bg-gray-50" edges={['top']}>
       {/* Header */}
-      <View className="px-6 pt-4 pb-2 bg-white border-b border-gray-100 z-50">
+      <View className="px-6 pt-3.5 pb-2 bg-white border-b border-gray-100 z-50">
         <View style={maxContainerStyle} className="flex-row items-center justify-between">
-          <Text className="text-2xl font-bold text-gray-900">Orders</Text>
-          <View className="bg-[#994bff]/10 px-3 py-1.5 rounded-full">
+          <Text className="text-xl font-extrabold text-gray-900">{headerTitle}</Text>
+          <View className="bg-[#994bff]/10 px-3 py-1 rounded-full">
             <Text className="text-[#994bff] font-bold text-xs">{roleName}</Text>
           </View>
         </View>
       </View>
 
-      {/* Tabs */}
-      <View className="bg-white pb-3 pt-3">
+      {/* Stage Tabs */}
+      <View className="bg-white pt-2.5 pb-2 border-b border-gray-100">
         <View style={maxContainerStyle}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} className="px-6">
             <View className="flex-row">
@@ -640,14 +752,14 @@ function SupervisorFeed() {
                   <TouchableOpacity
                     key={step}
                     onPress={() => setSelected(step)}
-                    className={`mr-3 px-4 py-2.5 rounded-2xl flex-row items-center ${isSel ? 'bg-[#994bff]' : 'bg-gray-100'}`}
+                    className={`mr-2.5 px-3.5 py-2 rounded-xl flex-row items-center ${isSel ? 'bg-[#994bff]' : 'bg-gray-100'}`}
                   >
                     <Text className={`text-sm font-bold ${isSel ? 'text-white' : 'text-gray-600'}`}>
                       {tabLabel(step)}
                     </Text>
                     {bubbleCount > 0 && (
                       <View className={`ml-2 px-1.5 py-0.5 rounded-md ${isSel ? 'bg-white/20' : 'bg-gray-200'}`}>
-                        <Text className={`text-[10px] font-bold ${isSel ? 'text-white' : 'text-gray-500'}`}>
+                        <Text className={`text-[10px] font-bold ${isSel ? 'text-white' : 'text-gray-600'}`}>
                           {bubbleCount}
                         </Text>
                       </View>
@@ -657,20 +769,128 @@ function SupervisorFeed() {
               })}
             </View>
           </ScrollView>
+
+          {/* Compact Search + Urgency Filter Strip */}
+          <View className="px-6 pt-2.5 pb-0.5 flex-row flex-wrap items-center gap-2">
+            <View className={`flex-row items-center bg-gray-100 border border-gray-200/80 rounded-xl px-2.5 py-1.5 ${isDesktop || isTablet ? 'w-72' : 'w-full'}`}>
+              <Search size={14} color="#64748B" />
+              <TextInput
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search #, token, customer, phone, staff…"
+                placeholderTextColor="#94A3B8"
+                className="flex-1 text-xs text-gray-900 ml-2 py-0.5"
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity
+                  onPress={() => setSearchQuery('')}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <X size={14} color="#64748B" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} className="flex-1">
+              <View className="flex-row items-center gap-1.5">
+                <TouchableOpacity
+                  onPress={() => setUrgencyFilter('all')}
+                  className={`px-2.5 py-1.5 rounded-full border ${
+                    urgencyFilter === 'all'
+                      ? 'bg-gray-900 border-gray-900'
+                      : 'bg-white border-gray-200'
+                  }`}
+                >
+                  <Text className={`text-xs font-bold ${urgencyFilter === 'all' ? 'text-white' : 'text-gray-600'}`}>
+                    All ({stageUrgencyCounts.all})
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => setUrgencyFilter(urgencyFilter === 'critical' ? 'all' : 'critical')}
+                  className={`px-2.5 py-1.5 rounded-full border ${
+                    urgencyFilter === 'critical'
+                      ? 'bg-red-600 border-red-600'
+                      : stageUrgencyCounts.critical > 0
+                      ? 'bg-red-50 border-red-300'
+                      : 'bg-white border-gray-200'
+                  }`}
+                >
+                  <Text
+                    className={`text-xs font-bold ${
+                      urgencyFilter === 'critical'
+                        ? 'text-white'
+                        : stageUrgencyCounts.critical > 0
+                        ? 'text-red-700'
+                        : 'text-gray-400'
+                    }`}
+                  >
+                    Critical/48h+ ({stageUrgencyCounts.critical})
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => setUrgencyFilter(urgencyFilter === 'express' ? 'all' : 'express')}
+                  className={`px-2.5 py-1.5 rounded-full border ${
+                    urgencyFilter === 'express'
+                      ? 'bg-orange-500 border-orange-500'
+                      : stageUrgencyCounts.express > 0
+                      ? 'bg-orange-50 border-orange-300'
+                      : 'bg-white border-gray-200'
+                  }`}
+                >
+                  <Text
+                    className={`text-xs font-bold ${
+                      urgencyFilter === 'express'
+                        ? 'text-white'
+                        : stageUrgencyCounts.express > 0
+                        ? 'text-orange-700'
+                        : 'text-gray-400'
+                    }`}
+                  >
+                    Express ({stageUrgencyCounts.express})
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  onPress={() => setUrgencyFilter(urgencyFilter === 'aging24h' ? 'all' : 'aging24h')}
+                  className={`px-2.5 py-1.5 rounded-full border ${
+                    urgencyFilter === 'aging24h'
+                      ? 'bg-amber-500 border-amber-500'
+                      : stageUrgencyCounts.aging24h > 0
+                      ? 'bg-amber-50 border-amber-300'
+                      : 'bg-white border-gray-200'
+                  }`}
+                >
+                  <Text
+                    className={`text-xs font-bold ${
+                      urgencyFilter === 'aging24h'
+                        ? 'text-white'
+                        : stageUrgencyCounts.aging24h > 0
+                        ? 'text-amber-800'
+                        : 'text-gray-400'
+                    }`}
+                  >
+                    Aging 24h+ ({stageUrgencyCounts.aging24h})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          </View>
         </View>
       </View>
 
       {/* List */}
-      <ScrollView className="flex-1 px-4 pt-4" contentContainerStyle={{ paddingBottom: 170 }}>
+      <ScrollView className="flex-1 px-4 pt-3.5" contentContainerStyle={{ paddingBottom: 170 }}>
         <View style={maxContainerStyle}>
-          {myItems.length > 0 && (
-            <View className="mb-5">
-              <Text className="text-[#994bff] font-black text-xs mb-3 tracking-widest uppercase pl-1">
-                My Assigned Tasks ({myItems.length})
+          {filteredMyItems.length > 0 && (
+            <View className="mb-4">
+              <Text className="text-[#994bff] font-black text-xs mb-2.5 tracking-widest uppercase pl-1">
+                My Assigned Tasks ({filteredMyItems.length})
               </Text>
-              <View className={isDesktop || isTablet ? "flex-row flex-wrap -mx-2" : ""}>
-                {myItems.map(item => (
-                  <View key={item.key} className={isDesktop ? "w-1/2 px-2" : isTablet ? "w-1/2 px-2" : "w-full"}>
+              <View className={gridRowClass}>
+                {filteredMyItems.map(item => (
+                  <View key={item.key} className={cardColClass}>
                     {renderCard(item)}
                   </View>
                 ))}
@@ -678,24 +898,31 @@ function SupervisorFeed() {
             </View>
           )}
 
-          {/* Section 1: Running in Machines (for washing & drying) or Hands-on In Progress (for other tabs) */}
-          {role !== 'helper' && inProgressByOthers.length > 0 && (
-            <View className="mb-5">
-              <View className="flex-row items-center justify-between mb-3 px-1">
+          {/* Section 1: Running in Machines (for getting_washed & getting_dried) or Hands-on In Progress */}
+          {role !== 'helper' && filteredInProgress.length > 0 && (
+            <View className="mb-4">
+              <View className="flex-row items-center justify-between mb-2.5 px-1">
                 <Text className="text-emerald-600 font-black text-xs tracking-widest uppercase">
-                  {selected === 'washing' ? `🌀 In Washer (${inProgressByOthers.length} / ${resources.washers} Active)` :
-                   selected === 'drying' ? `💨 In Dryer (${inProgressByOthers.length} / ${resources.dryers} Active)` :
-                   `In Progress on Floor (${inProgressByOthers.length})`}
+                  {selected === 'getting_washed'
+                    ? `🌀 In Washer (${inProgressByOthers.length}/${resources.washers} Active)`
+                    : selected === 'getting_dried'
+                    ? `💨 In Dryer (${inProgressByOthers.length}/${resources.dryers} Active)`
+                    : `In Progress on Floor (${filteredInProgress.length})`}
                 </Text>
-                {selected === 'washing' && inProgressByOthers.length >= resources.washers && (
+                {selected === 'getting_washed' && inProgressByOthers.length >= resources.washers && (
                   <View className="bg-amber-100 border border-amber-200 px-2 py-0.5 rounded">
                     <Text className="text-amber-800 font-bold text-[10px] uppercase">All Washers Full</Text>
                   </View>
                 )}
+                {selected === 'getting_dried' && inProgressByOthers.length >= resources.dryers && (
+                  <View className="bg-amber-100 border border-amber-200 px-2 py-0.5 rounded">
+                    <Text className="text-amber-800 font-bold text-[10px] uppercase">All Dryers Full</Text>
+                  </View>
+                )}
               </View>
-              <View className={isDesktop || isTablet ? "flex-row flex-wrap -mx-2" : ""}>
-                {inProgressByOthers.map(item => (
-                  <View key={item.key} className={isDesktop ? "w-1/2 px-2" : isTablet ? "w-1/2 px-2" : "w-full"}>
+              <View className={gridRowClass}>
+                {filteredInProgress.map(item => (
+                  <View key={item.key} className={cardColClass}>
                     {renderCard(item)}
                   </View>
                 ))}
@@ -704,13 +931,15 @@ function SupervisorFeed() {
           )}
 
           {/* Section 2: Queued Outside Machines / Pending Work */}
-          {role !== 'helper' && pendingItems.length > 0 && (
-            <View className="mb-5">
-              <View className="flex-row items-center justify-between mb-3 px-1">
+          {role !== 'helper' && filteredPending.length > 0 && (
+            <View className="mb-4">
+              <View className="flex-row items-center justify-between mb-2.5 px-1">
                 <Text className="text-amber-600 font-black text-xs tracking-widest uppercase">
-                  {selected === 'washing' ? `🧺 Queued for Washer (${pendingItems.length} Waiting Outside)` :
-                   selected === 'drying' ? `🧺 Queued for Dryer (${pendingItems.length} Waiting Outside)` :
-                   `Pending Floor Work (${pendingItems.length})`}
+                  {selected === 'getting_washed'
+                    ? `🧺 Queued for Washer (${filteredPending.length} Waiting)`
+                    : selected === 'getting_dried'
+                    ? `🧺 Queued for Dryer (${filteredPending.length} Waiting)`
+                    : `Pending Floor Work (${filteredPending.length})`}
                 </Text>
                 {hasUnassignedPending && (role === 'supervisor' || role === 'admin') ? (
                   <TouchableOpacity
@@ -727,15 +956,19 @@ function SupervisorFeed() {
                       {drainingQueues ? 'Assigning…' : '⚡ Auto-Assign'}
                     </Text>
                   </TouchableOpacity>
-                ) : selected === 'washing' ? (
+                ) : selected === 'getting_washed' ? (
                   <Text className="text-slate-400 text-xs font-semibold">
-                    Staged in queue · will start when washer opens
+                    Staged in queue · starts when washer opens
+                  </Text>
+                ) : selected === 'getting_dried' ? (
+                  <Text className="text-slate-400 text-xs font-semibold">
+                    Staged in queue · starts when dryer opens
                   </Text>
                 ) : null}
               </View>
-              <View className={isDesktop || isTablet ? "flex-row flex-wrap -mx-2" : ""}>
-                {pendingItems.map(item => (
-                  <View key={item.key} className={isDesktop ? "w-1/2 px-2" : isTablet ? "w-1/2 px-2" : "w-full"}>
+              <View className={gridRowClass}>
+                {filteredPending.map(item => (
+                  <View key={item.key} className={cardColClass}>
                     {renderCard(item)}
                   </View>
                 ))}
@@ -743,13 +976,30 @@ function SupervisorFeed() {
             </View>
           )}
 
-          {(role === 'helper' ? myItems.length === 0 : (pendingItems.length === 0 && myItems.length === 0 && inProgressByOthers.length === 0)) && (
-            <View className="items-center justify-center mt-20 px-6 opacity-60">
-              <Inbox size={48} color="#94A3B8" />
-              <Text className="text-gray-400 text-lg font-bold mt-4">All Caught Up</Text>
-              <Text className="text-gray-400 text-center mt-2 text-sm">
-                {role === 'helper' ? 'You have no assigned tasks right now.' : `No orders waiting for ${tabLabel(selected)} right now.`}
+          {totalFilteredCount === 0 && (
+            <View className="items-center justify-center mt-16 px-6 opacity-75">
+              <Inbox size={44} color="#94A3B8" />
+              <Text className="text-gray-500 text-base font-bold mt-3">
+                {hasActiveFilter ? 'No Matching Orders' : 'All Caught Up'}
               </Text>
+              <Text className="text-gray-400 text-center mt-1.5 text-sm">
+                {hasActiveFilter
+                  ? 'Try adjusting your search or urgency filter.'
+                  : role === 'helper'
+                  ? 'You have no assigned tasks right now.'
+                  : `No orders waiting for ${tabLabel(selected)} right now.`}
+              </Text>
+              {hasActiveFilter && (
+                <TouchableOpacity
+                  onPress={() => {
+                    setSearchQuery('');
+                    setUrgencyFilter('all');
+                  }}
+                  className="mt-3 bg-[#994bff]/10 border border-[#994bff]/30 px-4 py-1.5 rounded-full"
+                >
+                  <Text className="text-[#994bff] font-bold text-xs">Clear Filters</Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
         </View>

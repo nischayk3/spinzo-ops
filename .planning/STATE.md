@@ -1,6 +1,6 @@
 # SpinZo Ops — Active GSD Session State
 
-**Last Updated:** 2026-11-19
+**Last Updated:** 2026-11-22
 **Active Sync:** Antigravity (Tech Owner) ↔ Claude Code (`@AGENTS.md` + `.planning/`)
 **Deep Architecture & Risk Audit:** `docs/STATE.md`
 
@@ -9,10 +9,35 @@
 ## 1. Verification Baseline
 
 - **TypeScript (`npx tsc --noEmit`)**: PASS (0 errors)
-- **Unit Tests (`npm run test`)**: PASS (15 test files, 205/205 tests passing)
-- **Cloud Functions (`node --check` + `node --test`)**: PASS (`ops/functions/index.js`, `ops/functions/dispatch.js`, 42/42 dispatch tests passing)
+- **Unit Tests (`npm run test`)**: PASS (18 test files, 244/244 tests passing)
+- **Cloud Functions (`node --check` + `node --test`)**: PASS (`ops/functions/index.js`, `ops/functions/dispatch.js`, 48/48 dispatch tests passing)
 
 ## 2. Recently Shipped Baseline
+
+- **Phase 16 — End-to-End Assignment, High-Priority FCM & Android Over-App Overlay Hardening**:
+  - **Backend FCM (`ops/functions/index.js`)**: Eliminated all 6 double-FCM rider assignment paths (`fcmSent: true` guard in `onOpsTaskWritten`/`onDeliveryTaskWritten`), fixed missed FCMs in `onShiftCatchUp` & `markOutForDelivery`, bumped `android.ttl` to `300s`, added APNs priority-10 headers, added stale-token auto-cleanup, ordered `drainWaitingOpsQueues` before `checkUnstartedMachineNudges`, raised query limits (`25` → `100`), added `resolveUrgentRecipient` so 3m detergent / 21m softener / 36m+40m unload nudges aren't silently dropped, parallelized idle alerts, and extended `snoozeNudge` break-coverage to `tagging`/`packaging`.
+  - **Android Native Overlay (`modules/spinzo-overlay/.../SpinzoOverlayManager.kt`, `SpinzoMessagingService.kt`)**: Fixed Express Delivery misidentification (`taskType.contains("delivery")` checked before `isInstant`), mapped human-readable helper stage labels & non-blank fallback bodies, fixed `#R_IDLE` & double-emoji on `idle_alert`, added `R.raw.alarm` + `bypassDnd` + vibration + WakeLock to fallback notification channel, added 45s audio/vibration auto-stop failsafe, and acquired a Doze-safe `PARTIAL_WAKE_LOCK` in `onMessageReceived`.
+  - **Client Modals, Channels & Token Sync (`GlobalAssignmentModal`, `HelperAssignmentModal`, `StageNudgeModal`, `WasherReminderModal`, `systemNotifications.ts`, `opsProcessStore.ts`, `helperEligibility.ts`, `RootNavigator.tsx`)**: Fixed cross-modal `stopAlarm()`/`dismissOverlay()` collision via `wasAlertingRef`, prevented foreground native double-overlay (`AppState.currentState !== 'active'`), added missing `curStep`/`processId`/`step` effect deps & 5s nudge polling, passed `channelId: 'order_assignment'` on Android `expo-notifications` triggers, fixed `hands_on` OS timer key & remaining delay calculation, guarded helper overlay tap in `RootNavigator`, added foreground `syncFCMToken` re-sync, and enforced zero off-shift alerts while preserving on-shift break supervisor override. *(Pending `firebase deploy --only functions` & native Android rebuild for `modules/spinzo-overlay` changes.)*
+
+- **Phase 15 — Autopilot v2 (Drum-Buffer-Rope Machine Starvation Prevention, Idle Machine Alerts, Spatial Rider Batching & 2-Opt Smart Routing)**:
+  - **Washer Starvation Override (`ops/functions/dispatch.js`, `ops/functions/index.js`, `src/utils/helperEligibility.ts`)**: Exported `isWashRequiringService` (`wash_fold`, `wash_iron`, `blanket_wash`, `blanket_wash_single`, `blanket_wash_double`, `premium_laundry`, `dry_clean`). Whenever a washer is empty and no wash queue is waiting, wash-requiring `tagging` orders immediately pull a helper occupied in `packaging` (1st choice) or `getting_ironed` (2nd choice) while respecting `config/helperAssignmentRules` and never double-assigning an active tagger or machine-loader.
+  - **Bottleneck-First Queue Draining & Idle Machine FCM Alerts (`ops/functions/index.js`)**: `drainWaitingOpsQueues` drains in strict Drum-Buffer-Rope order (`getting_washed` → `getting_dried` → starving wash `tagging` → `getting_ironed` → other `tagging` → `packaging`, Express + oldest FIFO within each tier). `checkUnstartedMachineNudges` fires throttled (10m via `config/autopilotAlerts`) high-priority FCM alerts to supervisors + available floor helpers whenever a washer or dryer sits idle while eligible orders wait on the floor.
+  - **Spatial-Batching Rider Dispatch (`ops/functions/dispatch.js`, `ops/functions/index.js`)**: Upgraded `pickRider` / `selectRider` with Haversine proximity + load + 5-task capacity cap + `-1500m` cluster batching bonus for stops within `1.2 km` (Zomato/Flipkart style).
+  - **2-Opt Multi-Order Smart Route (`src/utils/smartRoute.ts`)**: Replaced static origin-distance sorting with Priority-Tiered Nearest-Neighbor + 2-Opt Local Search (`optimizeStopSequence2Opt`) preserving `<=90 min` slot precedence and computing `legDistanceMeters` & `cumulativeDistanceMeters`. *(Pending `firebase deploy --only functions`.)*
+
+- **Phase 14 — Floor Board, Orders Tab, Order Detail & Settings UX + Turnaround Priority Overhaul**:
+  - **Shared Turnaround & Aging Engine (`src/utils/orderUrgency.ts`, 13 unit tests)**: Unified 8h Express / 24h Standard / scheduled delivery SLA calculations, `Today`/`Yesterday`/`DD Mon` pickup timestamps, 48h+ stalled & overdue severity tiers, and `compareOrdersForOps` (`ops_fifo`, `pickup_schedule`, `delivery_schedule`).
+  - **Floor Board (`src/screens/Helper/ProcessingScreen.tsx`)**: Fixed `"Orders"` → `"Floor Board"` title and `'getting_washed'`/`'getting_dried'` machine capacity section headers; replaced broken 30m `0m left in SLA` with real delivery turnaround SLA countdowns; switched to 3-column desktop / 2-column tablet compact cards with pickup date/age, load telemetry, stage dwell, search + urgency filter strip, and strict `ops_fifo` sorting (48h+ stalled & overdue first).
+  - **Order Detail (`src/screens/Helper/OrderDetailScreen.tsx`)**: Added 4-tile Operational Lifecycle Telemetry Strip (`Placed`, `Picked Up + Rider`, `Delivery SLA Countdown`, `Stage Dwell / Weight`) and decluttered duplicate header/banner spacing.
+  - **Orders Tab (`src/screens/Queue/FloorBoardScreen.tsx`)**: Added tab-aware ops sorting (pickup schedule / ops FIFO with 48h+ stalled top priority / delivery schedule), upfront pickup + SLA telemetry row, red accent highlighting for delayed orders, and 1-tap urgency filter pills.
+  - **Settings Workspace (`src/screens/Settings/SettingsScreen.tsx`)**: Replaced endless vertical stack with a 4-tab segmented workspace (`Assignment Rules` | `Attendance` | `Stations & Staff` | `Account`), fixed inaccurate `h.activeHelperTask` occupancy by wiring `getHelperLiveTasks` + live machine active counts + tappable helper/rider modals, added zebra-striping & live status column in Assignment Rules, and tucked numeric test accounts behind a toggle.
+
+- **Phases 9–13 — Team Operational Feedback Overhaul (`R15`–`R22`)** ([09-01-SUMMARY.md](.planning/phases/09-ops-feedback-overhaul/09-01-SUMMARY.md)):
+  - **Unassign Hold & Delivery Status Parity (`R15`–`R16`)**: `unassignPickup`/`unassignDelivery` clear all stale rider fields and set `manualHold: true` / `status: 'manual_hold'` (`manualDeliveryHold: true`) so auto-dispatch never re-assigns manually unassigned tasks; delivery auto-assign immediately sets `order.status = 'out_for_delivery'` and `ops_delivery_tasks.status = 'out_for_delivery'`; Supervisor Dashboard displays `Not Assigned` cleanly.
+  - **Cycle Timings & Hands-On Reminders (`R17`–`R18`)**: Wash = 36m, Dry = 40m, Detergent = 3m, Softener = 21m (15m left), 30m completion lock preserved; added Tagging & Packaging 10m initial + 5m repeat reminders across client & backend FCM.
+  - **Multi-Load (>8kg) Aggregation & Separate Timings (`R19`)**: Aggregated garments, bundles, photos, and per-load videos across sibling `ops_process` docs (`src/utils/multiLoad.ts` + `buildAggregatedOrderOpsFields` in `ops/functions/index.js`) and rendered separate per-load timing stage sections in `OrderDetailScreen`.
+  - **Tagging Pre-Existing Damage Reports (`R20`)**: Added **Report** button in Tagging headers opening `DamageReportModal` (Photo / Record Video + note → `damage_reports/{orderId}`), `reportDamage` callable, Pre-Existing Damage Reports card on `OrderDetailScreen`, and Damage badge on `FloorBoardScreen`.
+  - **Floor Roster Multi-Order Modal & Dynamic Assignment Rules Matrix (`R21`–`R22`)**: Added `getHelperLiveTasks` + `SupervisorHelperTasksModal` + centered `SupervisorRiderRouteModal` with live multi-order count badges; built interactive 5-column (`Tag | Wash | Dry | Iron | Pack`) Assignment Rules toggle matrix in `SettingsScreen` persisted to `config/helperAssignmentRules` and enforced by both `selectHelperForStage` (backend) and `helperEligibility.ts` (client), plus compact mobile UI polish across Settings, Attendance, Rider cards, FloorBoard, and Supervisor Dashboard. *(Pending `firebase deploy --only functions`.)*
 
 - **Quick Task — Onboard Helper Tahirul (`+919707275674`) Across Auto-Dispatch, Client Eligibility & Attendance**:
   - **Firebase Verification (`spin-it-a135a`)**: Verified `config/opsStaff` already maps `+919707275674` → `role: "helper"`, `name: "Tahirul"`. Confirmed Auth user and `ops_staff/{uid}` will be created automatically on his first OTP login + QR clock-in.
@@ -47,4 +72,4 @@
 
 ## 3. Active Focus
 
-- Phase 8 fully implemented and verified against all TypeScript, Vitest, and Cloud Function syntax gates. Ready for field test with riders and deployment.
+- Phases 9–13 (`R15`–`R22`) implemented and verified against all TypeScript, Vitest (221/221), and Cloud Functions (45/45) gates. Pending `firebase deploy --only functions` for backend Cloud Function changes.

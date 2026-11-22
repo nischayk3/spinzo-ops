@@ -20,6 +20,8 @@ export interface SmartRouteStop {
   isInstant: boolean;
   isExpress?: boolean;
   distanceMeters?: number;
+  legDistanceMeters?: number;
+  cumulativeDistanceMeters?: number;
   status: string;
   totalAmount?: number;
   paymentStatus?: string;
@@ -193,6 +195,150 @@ export const LOCALITY_COORDINATES: Record<string, LatLng> = {
 };
 
 /**
+ * Resolve coordinates for distance math ONLY (never mutates stop.latitude/longitude).
+ */
+function resolveStopCoordForMath(stop: SmartRouteStop): LatLng | null {
+  if (isValidCoord(stop.latitude, stop.longitude)) {
+    return { latitude: stop.latitude!, longitude: stop.longitude! };
+  }
+  const loc = LOCALITY_COORDINATES[stop.locality];
+  if (loc && isValidCoord(loc.latitude, loc.longitude)) {
+    return loc;
+  }
+  return null;
+}
+
+function legDistanceForMath(a: LatLng | null, b: LatLng | null): number {
+  if (!a || !b) return 5000; // Neutral fallback for ungeocoded stops
+  return haversineMeters(a, b);
+}
+
+/**
+ * 2-Opt Multi-Order Shortest-Path Route Optimization.
+ * Step 1: Nearest-Neighbor construction minimizing `legMeters + slotPenalty`.
+ * Step 2: 2-Opt local search reversing sub-segments `[i..j]` whenever total open-path
+ *         distance strictly decreases by >10m without violating >90 min earlier-slot precedence.
+ * Never mutates `stop.latitude` or `stop.longitude`.
+ */
+export function optimizeStopSequence2Opt(
+  stops: SmartRouteStop[],
+  startCoord: LatLng
+): SmartRouteStop[] {
+  if (stops.length <= 1) return [...stops];
+
+  const SLOT_PENALTY_METERS_PER_MIN = 10;
+  const MAX_SLOT_INVERSION_MIN = 90;
+  const MIN_IMPROVEMENT_METERS = 10;
+
+  interface Node {
+    stop: SmartRouteStop;
+    coord: LatLng | null;
+    slotWeight: number;
+  }
+
+  const remaining: Node[] = stops.map(stop => ({
+    stop,
+    coord: resolveStopCoordForMath(stop),
+    slotWeight: parseSlotTimeWeight(stop.slotText),
+  }));
+
+  // Step 1: Nearest-Neighbor Construction with gentle slot-window penalty
+  const route: Node[] = [];
+  let curCoord: LatLng = startCoord;
+
+  while (remaining.length > 0) {
+    let minRemainingSlot = Infinity;
+    for (const r of remaining) {
+      if (r.slotWeight < minRemainingSlot) minRemainingSlot = r.slotWeight;
+    }
+
+    let bestIdx = 0;
+    let bestCost = Infinity;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const cand = remaining[i];
+      const legMeters = legDistanceForMath(curCoord, cand.coord);
+      const slotDeltaMin = Math.max(0, cand.slotWeight - minRemainingSlot);
+      const slotPenalty = slotDeltaMin * SLOT_PENALTY_METERS_PER_MIN;
+      const cost = legMeters + slotPenalty;
+
+      if (cost < bestCost) {
+        bestCost = cost;
+        bestIdx = i;
+      }
+    }
+
+    const [chosen] = remaining.splice(bestIdx, 1);
+    route.push(chosen);
+    if (chosen.coord) {
+      curCoord = chosen.coord;
+    }
+  }
+
+  // Step 2: 2-Opt Local Search on open path starting from startCoord
+  const n = route.length;
+  if (n >= 2) {
+    const maxPasses = 20;
+    let improved = true;
+    let pass = 0;
+
+    while (improved && pass < maxPasses) {
+      improved = false;
+      pass++;
+
+      for (let i = 0; i < n - 1; i++) {
+        const prevCoord = i === 0 ? startCoord : (route[i - 1].coord || startCoord);
+
+        for (let j = i + 1; j < n; j++) {
+          const nextCoord = j + 1 < n ? route[j + 1].coord : null;
+
+          const currentEdges =
+            legDistanceForMath(prevCoord, route[i].coord) +
+            (nextCoord ? legDistanceForMath(route[j].coord, nextCoord) : 0);
+
+          const swappedEdges =
+            legDistanceForMath(prevCoord, route[j].coord) +
+            (nextCoord ? legDistanceForMath(route[i].coord, nextCoord) : 0);
+
+          if (currentEdges - swappedEdges <= MIN_IMPROVEMENT_METERS) {
+            continue;
+          }
+
+          // Check slot precedence on the reversed segment [i..j]:
+          // Reject if reversal places a stop >90 min later before an earlier-slot stop.
+          let violatesSlotPrecedence = false;
+          for (let a = j; a > i && !violatesSlotPrecedence; a--) {
+            for (let b = a - 1; b >= i; b--) {
+              // In reversed order, route[a] comes BEFORE route[b]
+              if (route[a].slotWeight - route[b].slotWeight > MAX_SLOT_INVERSION_MIN) {
+                violatesSlotPrecedence = true;
+                break;
+              }
+            }
+          }
+
+          if (violatesSlotPrecedence) continue;
+
+          // Reverse segment [i..j] in place
+          let left = i;
+          let right = j;
+          while (left < right) {
+            const tmp = route[left];
+            route[left] = route[right];
+            route[right] = tmp;
+            left++;
+            right--;
+          }
+          improved = true;
+        }
+      }
+    }
+  }
+
+  return route.map(node => node.stop);
+}
+
+/**
  * Generates an automated, clustered, shortest-path delivery & pickup route (Zepto/Swiggy style).
  */
 export function buildSmartRoute({
@@ -352,49 +498,59 @@ export function buildSmartRoute({
     }
   });
 
-  // 3. Multi-tier Clustering & Sequencing Algorithm:
-  // - Tier 0: Live customer tasks first before returning to store
-  // - Tier 1: Instant / Urgent Pickups (<30m SLA)
-  // - Tier 2: Nearest distance / Locality cluster
-  // - Tier 3: Time-slot chronological order
-  stops.sort((a, b) => {
-    // 0. Active customer pickups & deliveries before returning to store
-    const aIsStoreDrop = a.type === 'store_dropoff';
-    const bIsStoreDrop = b.type === 'store_dropoff';
-    if (aIsStoreDrop !== bIsStoreDrop) {
-      return aIsStoreDrop ? 1 : -1;
+  // 3. Priority-Tiered 2-Opt Route Sequencing:
+  // - Tier 0: Express / Instant / Urgent customer stops (optimized from origin)
+  // - Tier 1: Standard customer pickups & deliveries (optimized chained from last Tier 0 stop)
+  // - Tier 2: Store Drop-off stops at the end
+  const tier0Urgent: SmartRouteStop[] = [];
+  const tier1Standard: SmartRouteStop[] = [];
+  const tier2StoreDropoff: SmartRouteStop[] = [];
+
+  for (const s of stops) {
+    if (s.type === 'store_dropoff') {
+      tier2StoreDropoff.push(s);
+    } else if (s.isExpress || s.isInstant || s.isUrgent) {
+      tier0Urgent.push(s);
+    } else {
+      tier1Standard.push(s);
+    }
+  }
+
+  const orderedTier0 = optimizeStopSequence2Opt(tier0Urgent, origin);
+
+  let tier1StartCoord: LatLng = origin;
+  for (let i = orderedTier0.length - 1; i >= 0; i--) {
+    const c = resolveStopCoordForMath(orderedTier0[i]);
+    if (c) {
+      tier1StartCoord = c;
+      break;
+    }
+  }
+  const orderedTier1 = optimizeStopSequence2Opt(tier1Standard, tier1StartCoord);
+
+  const sequenced = [...orderedTier0, ...orderedTier1, ...tier2StoreDropoff];
+
+  // Compute legDistanceMeters, cumulativeDistanceMeters, and sequential stopNumber
+  let prevCoord: LatLng = origin;
+  let cumulativeMeters = 0;
+
+  return sequenced.map((s, index) => {
+    const stopCoord = resolveStopCoordForMath(s);
+    let legDistanceMeters: number | undefined;
+    let cumulativeDistanceMeters: number | undefined;
+
+    if (stopCoord) {
+      legDistanceMeters = Math.round(haversineMeters(prevCoord, stopCoord));
+      cumulativeMeters += legDistanceMeters;
+      cumulativeDistanceMeters = cumulativeMeters;
+      prevCoord = stopCoord;
     }
 
-    // 1. Express / Instant / Urgent priority (Express 6–8h orders get top dispatch priority)
-    const aUrgentScore = (a.isExpress ? 5000 : 0) + (a.isInstant ? 2000 : 0) + (a.isUrgent ? 1000 : 0);
-    const bUrgentScore = (b.isExpress ? 5000 : 0) + (b.isInstant ? 2000 : 0) + (b.isUrgent ? 1000 : 0);
-    if (aUrgentScore !== bUrgentScore) return bUrgentScore - aUrgentScore;
-
-    // 2. Distance proximity from origin (or store hub)
-    if (typeof a.distanceMeters === 'number' && typeof b.distanceMeters === 'number') {
-      const distDiff = a.distanceMeters - b.distanceMeters;
-      // If significantly different (>500m), choose the closer stop
-      if (Math.abs(distDiff) > 500) {
-        return distDiff;
-      }
-    }
-
-    // 3. Locality clustering (keep same neighborhoods grouped together)
-    if (a.locality !== b.locality) {
-      return a.locality.localeCompare(b.locality);
-    }
-
-    // 4. Time slot within the same neighborhood
-    const aTime = parseSlotTimeWeight(a.slotText);
-    const bTime = parseSlotTimeWeight(b.slotText);
-    if (aTime !== bTime) return aTime - bTime;
-
-    return 0;
+    return {
+      ...s,
+      stopNumber: index + 1,
+      legDistanceMeters,
+      cumulativeDistanceMeters,
+    };
   });
-
-  // Assign sequential stop numbers (1, 2, 3...)
-  return stops.map((s, index) => ({
-    ...s,
-    stopNumber: index + 1,
-  }));
 }

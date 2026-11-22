@@ -1,8 +1,8 @@
 import { create } from 'zustand';
 import { db, collection, onSnapshot, functions, httpsCallable } from '../config/firebase';
-import { parseOpsProcess, OpsProcess, myInProgress, GarmentLabel, currentStep } from '../utils/opsProcess';
+import { parseOpsProcess, OpsProcess, myInProgress, GarmentLabel, currentStep, StageRecord } from '../utils/opsProcess';
 import { scheduleStageNudgeTimer, cancelStageNudgeTimer } from '../utils/systemNotifications';
-import { STAGE_NUDGE_RULES } from '../utils/stageNudges';
+import { STAGE_NUDGE_RULES, toMillis } from '../utils/stageNudges';
 
 export type OpsProcessingResult =
   | { ok: true; currentIndex?: number; status?: string; step?: string; count?: number; labels?: GarmentLabel[]; seq?: number }
@@ -35,6 +35,7 @@ interface OpsProcessState {
   tagAllGarments: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
   unregisterGarment: (orderId: string, seq: number, processId?: string) => Promise<OpsProcessingResult>;
   submitTagging: (orderId: string, processId?: string) => Promise<OpsProcessingResult>;
+  reportDamage: (processId: string, photos: string[], videos: string[], note?: string) => Promise<void>;
   markChemicalAdded: (orderId: string, processId: string, chemical: 'detergent' | 'softener') => Promise<OpsProcessingResult>;
   pickupDelivery: (orderId: string) => Promise<OpsProcessingResult>;
   // Simulation-only: registers all of an order's labels in one call by scanning
@@ -54,12 +55,44 @@ interface OpsProcessState {
   unassignStep: (orderId: string, processId: string, userId: string, clearStartedAt?: boolean) => Promise<SupervisorActionResult>;
   markOutForDelivery: (orderId: string, userId: string) => Promise<SupervisorActionResult>;
   drainWaitingOpsQueues: (stage?: string, force?: boolean) => Promise<SupervisorActionResult>;
-  snoozeNudge: (orderId: string, step: 'getting_washed' | 'getting_dried', phase: 'accepted' | 'started', processId?: string) => Promise<OpsProcessingResult>;
+  snoozeNudge: (orderId: string, step: 'getting_washed' | 'getting_dried' | 'tagging' | 'packaging', phase: 'accepted' | 'started' | 'hands_on', processId?: string) => Promise<OpsProcessingResult>;
   reset: () => void;
 }
 
 let unsub: (() => void) | null = null;
 let activeUid: string | null = null;
+const scheduledHandsOnTimers = new Set<string>();
+
+const HANDS_ON_NUDGE_DELAY_SECONDS = 10 * 60; // 10 minutes initial reminder for tagging/packaging
+
+function scheduleHandsOnStageReminder(
+  orderId: string,
+  processId: string,
+  step: 'tagging' | 'packaging',
+  stageData?: StageRecord
+) {
+  const rule = STAGE_NUDGE_RULES[`${step}_hands_on`] || STAGE_NUDGE_RULES[`${step}_accepted`] || STAGE_NUDGE_RULES[`${step}_started`];
+  const initialDelayMs = rule ? rule.initialDelayMs : HANDS_ON_NUDGE_DELAY_SECONDS * 1000;
+  const assignedOrAcceptedMs = toMillis(stageData?.assignedAt || stageData?.acceptedAt);
+  const elapsedMs = assignedOrAcceptedMs > 0 ? Math.max(0, Date.now() - assignedOrAcceptedMs) : 0;
+  const delaySeconds = Math.max(10, Math.ceil((initialDelayMs - elapsedMs) / 1000));
+  const title = rule?.title || (step === 'tagging' ? 'Tagging Reminder' : 'Packaging Reminder');
+  const message =
+    rule?.message ||
+    (step === 'tagging'
+      ? 'It has been 10+ minutes since this order was assigned for tagging. Please finish tagging and submit.'
+      : 'It has been 10+ minutes since this order was assigned for packaging. Please finish packaging and complete.');
+
+  scheduleStageNudgeTimer({
+    orderId,
+    processId,
+    step: step as any,
+    phase: 'hands_on',
+    delaySeconds,
+    title,
+    message,
+  });
+}
 
 const callOps = () =>
   httpsCallable<{ orderId: string; processId?: string; action: string; garmentCount?: number; qr?: string; seq?: number; qualityMedia?: any; count?: number; garments?: any; userId?: string; vendorId?: string; tokenNumber?: string }, OpsProcessingResult>(
@@ -92,7 +125,35 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
       (snap) => {
         const list: OpsProcess[] = [];
         snap.forEach((d) => list.push(parseOpsProcess(d.id, d.data())));
-        set({ processes: list, myProcesses: list.filter((p) => myInProgress(p, uid)), isLoading: false });
+        const myList = list.filter((p) => myInProgress(p, uid));
+        set({ processes: list, myProcesses: myList, isLoading: false });
+
+        // Schedule 10m initial OS reminders for tagging / packaging tasks assigned to this helper,
+        // and cancel any previously scheduled reminders once no longer active for this helper.
+        const activeKeys = new Set<string>();
+        for (const p of myList) {
+          const cur = currentStep(p);
+          if (cur === 'tagging' || cur === 'packaging') {
+            const st = p.stages?.[cur];
+            if (st && st.assignee === uid && !st.completedAt) {
+              const key = `${p.id}::${cur}`;
+              activeKeys.add(key);
+              if (!scheduledHandsOnTimers.has(key)) {
+                scheduledHandsOnTimers.add(key);
+                scheduleHandsOnStageReminder(p.orderId, p.id, cur, st);
+              }
+            }
+          }
+        }
+        for (const key of Array.from(scheduledHandsOnTimers)) {
+          if (!activeKeys.has(key)) {
+            scheduledHandsOnTimers.delete(key);
+            const [procId, step] = key.split('::');
+            if (procId && step) {
+              cancelStageNudgeTimer(procId, step);
+            }
+          }
+        }
       },
       (err) => set({ error: String(err), isLoading: false })
     );
@@ -127,6 +188,10 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
               message: rule.message,
             });
           }
+        } else if (cur === 'tagging' || cur === 'packaging') {
+          const key = `${targetProcessId || orderId}::${cur}`;
+          scheduledHandsOnTimers.add(key);
+          scheduleHandsOnStageReminder(orderId, targetProcessId || orderId, cur, proc?.stages?.[cur]);
         }
       }
       return res.data;
@@ -182,6 +247,10 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
       const cleanOrderId = orderId.includes('__') ? orderId.split('__')[0] : orderId;
       const targetProcessId = processId || getProcessId(orderId) || cleanOrderId;
       const res = await callOps()({ orderId: cleanOrderId, processId: targetProcessId, action: 'completePackaging', qualityMedia });
+      if (res.data?.ok) {
+        scheduledHandsOnTimers.delete(`${targetProcessId}::packaging`);
+        cancelStageNudgeTimer(targetProcessId, 'packaging');
+      }
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
@@ -204,7 +273,7 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
           scheduleStageNudgeTimer({
             orderId: cleanOrderId,
             processId: targetProcessId || cleanOrderId,
-            step,
+            step: step as any,
             phase,
             delaySeconds: Math.floor(rule.repeatIntervalMs / 1000),
             title: rule.title,
@@ -259,10 +328,30 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
   },
   submitTagging: async (orderId, processId) => {
     try {
-      const res = await callOps()({ orderId, processId: processId || getProcessId(orderId), action: 'submitTagging' });
+      const targetProcessId = processId || getProcessId(orderId);
+      const res = await callOps()({ orderId, processId: targetProcessId, action: 'submitTagging' });
+      if (res.data?.ok) {
+        scheduledHandsOnTimers.delete(`${targetProcessId}::tagging`);
+        cancelStageNudgeTimer(targetProcessId, 'tagging');
+      }
       return res.data;
     } catch (e: any) {
       return { ok: false, error: e?.message || 'request_failed' };
+    }
+  },
+  reportDamage: async (processId, photos, videos, note) => {
+    const proc = get().processes.find((p: OpsProcess) => p.id === processId);
+    const orderId = proc?.orderId || (processId.includes('__') ? processId.split('__')[0] : processId);
+    const res = await callOps()({
+      orderId,
+      processId,
+      action: 'reportDamage',
+      photos,
+      videos,
+      note,
+    } as any);
+    if (!res.data?.ok) {
+      throw new Error((res.data as any)?.error || 'damage_report_failed');
     }
   },
   markOutForDelivery: async (orderId, userId) => {
@@ -409,6 +498,7 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     unsub?.();
     unsub = null;
     activeUid = null;
+    scheduledHandsOnTimers.clear();
     set({ processes: [], myProcesses: [], isLoading: false, error: null });
   },
 }));

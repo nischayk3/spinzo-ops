@@ -139,28 +139,28 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
   return (
     <View
-      className={`bg-white rounded-3xl mb-5 border overflow-hidden shadow-md ${
+      className={`bg-white rounded-2xl mb-3.5 border overflow-hidden shadow-sm ${
         p.isExpress
-          ? 'border-2 border-orange-500 shadow-lg shadow-orange-500/25'
+          ? 'border-2 border-orange-500 shadow-md shadow-orange-500/20'
           : isCurrentActive
-          ? 'border-2 border-purple-600 shadow-lg shadow-purple-600/20'
+          ? 'border-2 border-purple-600 shadow-md shadow-purple-600/20'
           : isInTransit
-          ? 'border border-emerald-400 shadow-md shadow-emerald-500/15'
-          : 'border border-slate-200/90 shadow-md shadow-slate-300/50'
+          ? 'border border-emerald-400 shadow-sm shadow-emerald-500/15'
+          : 'border border-slate-200/90 shadow-sm shadow-slate-300/40'
       }`}
     >
       {/* Express 6–8h Urgent Priority Top Banner */}
       {p.isExpress && (
-        <View className="bg-orange-600 px-4 py-2 flex-row items-center justify-between">
+        <View className="bg-orange-600 px-3.5 py-1.5 flex-row items-center justify-between">
           <View className="flex-row items-center">
-            <Zap size={13} color="#FFFFFF" />
-            <Text className="text-white font-black text-xs uppercase tracking-wider ml-1.5">
-              EXPRESS ORDER • 6–8H URGENT
+            <Zap size={12} color="#FFFFFF" />
+            <Text className="text-white font-black text-[11px] uppercase tracking-wider ml-1">
+              EXPRESS • 6–8H
             </Text>
           </View>
           <View className="bg-white/20 px-2 py-0.5 rounded-full">
             <Text className="text-white font-extrabold text-[10px] uppercase tracking-wide">
-              {isCurrentActive ? 'STOP 1 • TOP PRIORITY' : 'TOP PRIORITY'}
+              {isCurrentActive ? 'STOP 1 • PRIORITY' : 'TOP PRIORITY'}
             </Text>
           </View>
         </View>
@@ -168,14 +168,14 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
       {/* Active Mission Top Banner (non-express) */}
       {isCurrentActive && !p.isExpress && (
-        <View className="bg-purple-600 px-4 py-2 flex-row items-center justify-between">
+        <View className="bg-purple-600 px-3.5 py-1.5 flex-row items-center justify-between">
           <View className="flex-row items-center">
-            <Zap size={13} color="#FFFFFF" />
-            <Text className="text-white font-black text-xs uppercase tracking-wider ml-1.5">
-              CURRENT MISSION • STOP 1
+            <Zap size={12} color="#FFFFFF" />
+            <Text className="text-white font-black text-[11px] uppercase tracking-wider ml-1">
+              CURRENT • STOP 1
             </Text>
           </View>
-          <Text className="text-purple-100 font-extrabold text-[11px] uppercase tracking-wide">
+          <Text className="text-purple-100 font-extrabold text-[10px] uppercase tracking-wide">
             {isInTransit ? 'Store Handover' : 'Next Action'}
           </Text>
         </View>
@@ -183,7 +183,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
       {/* Customer Identity Hero Header: Unmistakable distinct visual anchor */}
       <View
-        className={`px-4 py-3.5 border-b flex-row items-center justify-between ${
+        className={`px-3.5 py-2.5 border-b flex-row items-center justify-between ${
           p.isExpress
             ? 'bg-orange-50/90 border-orange-200'
             : isInTransit
@@ -196,7 +196,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         <View className="flex-row items-center flex-1 mr-2">
           {/* Avatar with Customer Initial or Store Icon */}
           <View
-            className={`w-11 h-11 rounded-2xl items-center justify-center mr-3 shadow-xs ${
+            className={`w-9 h-9 rounded-xl items-center justify-center mr-2.5 shadow-xs ${
               isInTransit
                 ? 'bg-emerald-600'
                 : isPickup
@@ -205,9 +205,9 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             }`}
           >
             {isInTransit ? (
-              <Store size={20} color="#FFFFFF" />
+              <Store size={18} color="#FFFFFF" />
             ) : (
-              <Text className="text-white font-black text-base uppercase">
+              <Text className="text-white font-black text-sm uppercase">
                 {getInitials(p.customerName)}
               </Text>
             )}
@@ -218,7 +218,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             <View className="flex-row items-center flex-wrap gap-1.5 mb-0.5">
               {p.stopNumber ? (
                 <View
-                  className={`px-2 py-0.5 rounded-md shadow-xs ${
+                  className={`px-1.5 py-0.5 rounded-md ${
                     isInTransit
                       ? 'bg-emerald-700'
                       : isPickup
@@ -226,20 +226,20 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
                       : 'bg-blue-700'
                   }`}
                 >
-                  <Text className="text-white font-black text-[11px] tracking-wider">
+                  <Text className="text-white font-black text-[10px] tracking-wider">
                     STOP {p.stopNumber}
                   </Text>
                 </View>
               ) : null}
 
-              <Text className="text-slate-700 font-black text-xs tracking-tight">
+              <Text className="text-slate-700 font-black text-[11px] tracking-tight">
                 #{p.orderNumber}
               </Text>
 
               {orderDateTimeStr ? (
                 <View className="flex-row items-center gap-1">
                   <Calendar size={10} color="#64748B" />
-                  <Text className="text-slate-600 font-bold text-[11px]">
+                  <Text className="text-slate-600 font-semibold text-[11px]">
                     {orderDateTimeStr}
                     {orderAgeStr ? ` (${orderAgeStr})` : ''}
                   </Text>
@@ -247,33 +247,33 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
               ) : null}
             </View>
 
-            <Text className="text-slate-950 font-black text-lg tracking-tight" numberOfLines={1}>
+            <Text className="text-slate-950 font-black text-base tracking-tight" numberOfLines={1}>
               {p.customerName || (isInTransit ? 'SpinZo Store Hub' : 'Customer')}
             </Text>
 
-            {p.customerPhone ? (
-              <Pressable
-                onPress={() => Linking.openURL(`tel:${p.customerPhone}`)}
-                accessibilityLabel={`Call ${p.customerName || p.customerPhone}`}
-                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                className="self-start mt-1 bg-white border border-slate-300 px-2.5 py-1 rounded-lg flex-row items-center active:bg-slate-100"
-              >
-                <Phone size={11} color="#059669" className="mr-1.5" />
-                <Text className="text-slate-900 font-extrabold text-xs tracking-wide">
-                  {formatDisplayPhone(p.customerPhone)}
-                </Text>
-              </Pressable>
-            ) : null}
+            <View className="flex-row items-center flex-wrap gap-1.5 mt-1">
+              {p.customerPhone ? (
+                <Pressable
+                  onPress={() => Linking.openURL(`tel:${p.customerPhone}`)}
+                  accessibilityLabel={`Call ${p.customerName || p.customerPhone}`}
+                  hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                  className="bg-white border border-slate-300 px-2 py-0.5 rounded-md flex-row items-center active:bg-slate-100"
+                >
+                  <Phone size={10} color="#059669" className="mr-1" />
+                  <Text className="text-slate-900 font-extrabold text-[11px] tracking-wide">
+                    {formatDisplayPhone(p.customerPhone)}
+                  </Text>
+                </Pressable>
+              ) : null}
 
-            <View className="flex-row items-center flex-wrap gap-2 mt-1">
               {p.locality ? (
-                <Text className="text-slate-500 font-extrabold text-[11px] uppercase tracking-wide" numberOfLines={1}>
+                <Text className="text-slate-500 font-bold text-[11px] uppercase tracking-wide" numberOfLines={1}>
                   📍 {p.locality}
                 </Text>
               ) : null}
               {assignedTimeStr && assignedTimeStr !== orderDateTimeStr ? (
-                <Text className="text-slate-400 font-bold text-[10px]">
-                  • Assigned: {assignedTimeStr}
+                <Text className="text-slate-400 font-semibold text-[10px]">
+                  • {assignedTimeStr}
                 </Text>
               ) : null}
             </View>
@@ -281,9 +281,9 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         </View>
 
         {/* Right Action: Direct Phone Call button + Store pill */}
-        <View className="items-end gap-1.5">
+        <View className="items-end gap-1">
           {isInTransit ? (
-            <View className="bg-emerald-600 px-2.5 py-1 rounded-xl shadow-xs">
+            <View className="bg-emerald-600 px-2 py-0.5 rounded-lg">
               <Text className="text-white font-black text-[10px] uppercase tracking-wider">
                 STORE DROP
               </Text>
@@ -293,107 +293,109 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             <Pressable
               onPress={() => Linking.openURL(`tel:${p.customerPhone}`)}
               accessibilityLabel={`Call ${p.customerName || p.customerPhone}`}
-              className="w-10 h-10 rounded-2xl bg-emerald-500 active:bg-emerald-600 items-center justify-center shadow-xs"
+              className="w-9 h-9 rounded-xl bg-emerald-500 active:bg-emerald-600 items-center justify-center shadow-xs"
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
-              <Phone size={16} color="#FFFFFF" />
+              <Phone size={15} color="#FFFFFF" />
             </Pressable>
           ) : null}
         </View>
       </View>
 
       {/* Card Body Container */}
-      <View className="p-4">
+      <View className="p-3.5">
         {/* Overdue Alert Strip (Inside Card) */}
         {p.isOverdue && (
-          <View className="bg-red-50 border border-red-200 rounded-xl px-3 py-2 mb-3 flex-row items-center">
-            <AlertTriangle size={14} color="#DC2626" className="mr-2 shrink-0" />
-            <Text className="text-red-700 font-black text-xs uppercase tracking-wide">
-              Overdue — Priority Delivery Required
+          <View className="bg-red-50 border border-red-200 rounded-xl px-2.5 py-1.5 mb-2.5 flex-row items-center">
+            <AlertTriangle size={13} color="#DC2626" className="mr-1.5 shrink-0" />
+            <Text className="text-red-700 font-black text-[11px] uppercase tracking-wide">
+              Overdue — Priority Delivery
             </Text>
           </View>
         )}
 
         {/* Unpaid Warning Strip (Inside Card) */}
         {typeof p.unpaidAmount === 'number' && p.unpaidAmount > 0 && (
-          <View className="bg-amber-50 border border-amber-300 rounded-xl px-3 py-2 mb-3 flex-row items-center justify-between">
+          <View className="bg-amber-50 border border-amber-300 rounded-xl px-2.5 py-1.5 mb-2.5 flex-row items-center justify-between">
             <View className="flex-row items-center flex-1 mr-2">
-              <AlertTriangle size={14} color="#D97706" className="mr-1.5 shrink-0" />
-              <Text className="text-amber-950 font-black text-xs">
+              <AlertTriangle size={13} color="#D97706" className="mr-1.5 shrink-0" />
+              <Text className="text-amber-950 font-black text-[11px]">
                 UNPAID: ₹{p.unpaidAmount}
               </Text>
             </View>
-            <Text className="text-amber-800 text-[11px] font-bold">Collect Cash / UPI</Text>
+            <Text className="text-amber-800 text-[11px] font-bold">Cash / UPI</Text>
           </View>
         )}
 
         {/* Quick Status & Micro-Badges Bar */}
-        <View className="flex-row items-center flex-wrap gap-1.5 mb-3">
-          {p.isExpress ? (
-            <View className="bg-orange-600 px-2.5 py-1 rounded-lg flex-row items-center shadow-xs">
-              <Zap size={10} color="#FFFFFF" className="mr-1" />
-              <Text className="text-white font-black text-[10px] uppercase">EXPRESS • 6–8H URGENT</Text>
-            </View>
-          ) : null}
+        {(p.isExpress || p.isUrgent || (p.loadUnits && p.loadUnits > 1) || p.onToggleUrgent || p.onEditPickupNote) && (
+          <View className="flex-row items-center flex-wrap gap-1.5 mb-2.5">
+            {p.isExpress ? (
+              <View className="bg-orange-600 px-2 py-0.5 rounded-md flex-row items-center">
+                <Zap size={10} color="#FFFFFF" className="mr-1" />
+                <Text className="text-white font-black text-[10px] uppercase">EXPRESS 6–8H</Text>
+              </View>
+            ) : null}
 
-          {p.isUrgent && !p.isExpress ? (
-            <View className="bg-red-600 px-2.5 py-1 rounded-lg flex-row items-center shadow-xs">
-              <Zap size={10} color="#FFFFFF" className="mr-1" />
-              <Text className="text-white font-black text-[10px] uppercase">URGENT</Text>
-            </View>
-          ) : null}
+            {p.isUrgent && !p.isExpress ? (
+              <View className="bg-red-600 px-2 py-0.5 rounded-md flex-row items-center">
+                <Zap size={10} color="#FFFFFF" className="mr-1" />
+                <Text className="text-white font-black text-[10px] uppercase">URGENT</Text>
+              </View>
+            ) : null}
 
-          {p.loadUnits && p.loadUnits > 1 ? (
-            <View className="bg-purple-100 border border-purple-300 px-2.5 py-1 rounded-lg">
-              <Text className="text-purple-950 font-black text-[10px] uppercase">🐘 BULKY LOAD</Text>
-            </View>
-          ) : null}
+            {p.loadUnits && p.loadUnits > 1 ? (
+              <View className="bg-purple-100 border border-purple-300 px-2 py-0.5 rounded-md">
+                <Text className="text-purple-950 font-black text-[10px] uppercase">🐘 BULKY</Text>
+              </View>
+            ) : null}
 
-          {p.onToggleUrgent && !p.isExpress && (
-            <Pressable
-              onPress={p.onToggleUrgent}
-              className={`flex-row items-center px-2.5 py-1 rounded-lg border active:opacity-80 ${
-                p.isUrgent
-                  ? 'bg-red-50 border-red-300'
-                  : 'bg-slate-50 border-slate-200 active:bg-slate-100'
-              }`}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Zap size={11} color={p.isUrgent ? '#DC2626' : '#64748B'} className="mr-1" />
-              <Text className={`text-[10px] font-black uppercase ${
-                p.isUrgent ? 'text-red-700' : 'text-slate-600'
-              }`}>
-                {p.isUrgent ? 'Marked Urgent' : 'Mark Urgent'}
-              </Text>
-            </Pressable>
-          )}
+            {p.onToggleUrgent && !p.isExpress && (
+              <Pressable
+                onPress={p.onToggleUrgent}
+                className={`flex-row items-center px-2 py-0.5 rounded-md border active:opacity-80 ${
+                  p.isUrgent
+                    ? 'bg-red-50 border-red-300'
+                    : 'bg-slate-50 border-slate-200 active:bg-slate-100'
+                }`}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Zap size={10} color={p.isUrgent ? '#DC2626' : '#64748B'} className="mr-1" />
+                <Text className={`text-[10px] font-black uppercase ${
+                  p.isUrgent ? 'text-red-700' : 'text-slate-600'
+                }`}>
+                  {p.isUrgent ? 'Urgent' : 'Mark Urgent'}
+                </Text>
+              </Pressable>
+            )}
 
-          {p.onEditPickupNote && (
-            <Pressable
-              onPress={p.onEditPickupNote}
-              className={`flex-row items-center px-2.5 py-1 rounded-lg border active:opacity-80 ${
-                p.pickupNote
-                  ? 'bg-amber-100 border-amber-300'
-                  : 'bg-slate-50 border-slate-200 active:bg-slate-100'
-              }`}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            >
-              <Edit3 size={11} color={p.pickupNote ? '#B45309' : '#64748B'} className="mr-1" />
-              <Text className={`text-[10px] font-black ${
-                p.pickupNote ? 'text-amber-950' : 'text-slate-600'
-              }`}>
-                {p.pickupNote ? 'Edit Note' : 'Add Note'}
-              </Text>
-            </Pressable>
-          )}
-        </View>
+            {p.onEditPickupNote && (
+              <Pressable
+                onPress={p.onEditPickupNote}
+                className={`flex-row items-center px-2 py-0.5 rounded-md border active:opacity-80 ${
+                  p.pickupNote
+                    ? 'bg-amber-100 border-amber-300'
+                    : 'bg-slate-50 border-slate-200 active:bg-slate-100'
+                }`}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Edit3 size={10} color={p.pickupNote ? '#B45309' : '#64748B'} className="mr-1" />
+                <Text className={`text-[10px] font-black ${
+                  p.pickupNote ? 'text-amber-950' : 'text-slate-600'
+                }`}>
+                  {p.pickupNote ? 'Edit Note' : 'Add Note'}
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        )}
 
         {/* Pickup Note Card (Amber callout with tap-to-edit) */}
         {p.pickupNote ? (
           <Pressable
             onPress={p.onEditPickupNote}
             hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-            className="bg-amber-50 border border-amber-300 p-3 rounded-2xl mb-3 active:bg-amber-100"
+            className="bg-amber-50 border border-amber-300 px-2.5 py-2 rounded-xl mb-2.5 active:bg-amber-100"
           >
             <View className="flex-row items-center justify-between mb-0.5">
               <Text className="text-amber-950 font-black text-[10px] uppercase tracking-wider">📝 Pickup Note</Text>
@@ -408,12 +410,12 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         {/* Time Slot Pill (Pickup / Delivery Date + Time Window) */}
         {slotInfo.text ? (
           <View
-            className={`flex-row items-center mb-2.5 px-3 py-2 rounded-xl border ${
+            className={`flex-row items-center mb-2.5 px-2.5 py-1.5 rounded-xl border ${
               slotInfo.isInstant ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'
             }`}
           >
-            {slotInfo.isInstant ? <Zap size={14} color="#B45309" /> : <Clock size={14} color="#475569" />}
-            <Text className={`font-black text-xs ml-1.5 flex-1 ${slotInfo.isInstant ? 'text-amber-950' : 'text-slate-800'}`}>
+            {slotInfo.isInstant ? <Zap size={13} color="#B45309" /> : <Clock size={13} color="#475569" />}
+            <Text className={`font-black text-[11px] ml-1.5 flex-1 ${slotInfo.isInstant ? 'text-amber-950' : 'text-slate-800'}`}>
               {slotInfo.label}:{' '}
               <Text className="font-bold text-slate-700">
                 {slotInfo.text}
@@ -425,58 +427,58 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         {/* Destination Section: Store Drop vs Customer Pickup/Delivery */}
         {isInTransit ? (
           /* Store Drop Strip + Customer Origin Address */
-          <View className="mb-3 bg-emerald-50 border border-emerald-200 p-3 rounded-2xl">
+          <View className="mb-2.5 bg-emerald-50 border border-emerald-200 p-2.5 rounded-xl">
             <View className="flex-row items-center justify-between">
               <View className="flex-row items-center flex-1 mr-2">
-                <View className="w-8 h-8 rounded-xl bg-emerald-600 items-center justify-center mr-2.5">
-                  <Store size={15} color="#FFFFFF" />
+                <View className="w-7 h-7 rounded-lg bg-emerald-600 items-center justify-center mr-2">
+                  <Store size={14} color="#FFFFFF" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-emerald-950 font-black text-xs">Drop at SpinZo Store Hub</Text>
-                  <Text className="text-emerald-800 text-[11px] font-semibold mt-0.5" numberOfLines={1}>
-                    {p.customerName ? `From ${p.customerName}${p.locality ? ` • ${p.locality}` : ''}` : 'In bag ready for store'}
+                  <Text className="text-emerald-950 font-black text-xs">Drop at SpinZo Store</Text>
+                  <Text className="text-emerald-800 text-[11px] font-semibold" numberOfLines={1}>
+                    {p.customerName ? `From ${p.customerName}${p.locality ? ` • ${p.locality}` : ''}` : 'Ready for store handover'}
                   </Text>
                 </View>
               </View>
               <Pressable
                 onPress={() => openDirections(targetAddress, targetLat, targetLng)}
-                className="bg-emerald-600 px-3 py-2 rounded-xl flex-row items-center active:bg-emerald-700 shadow-xs"
+                className="bg-emerald-600 px-2.5 py-1.5 rounded-lg flex-row items-center active:bg-emerald-700"
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Navigation size={12} color="#FFFFFF" className="mr-1" />
-                <Text className="text-white text-xs font-black">Directions</Text>
+                <Navigation size={11} color="#FFFFFF" className="mr-1" />
+                <Text className="text-white text-[11px] font-black">Navigate</Text>
               </Pressable>
             </View>
             {p.pickupAddress ? (
-              <Text className="text-emerald-900 text-[11px] font-semibold mt-2 pt-2 border-t border-emerald-200/70 leading-4">
-                Picked up from: {p.pickupAddress}
+              <Text className="text-emerald-900 text-[11px] font-semibold mt-1.5 pt-1.5 border-t border-emerald-200/70 leading-4" numberOfLines={2}>
+                From: {p.pickupAddress}
               </Text>
             ) : null}
           </View>
         ) : targetAddress ? (
           /* Customer Address with integrated Directions Action */
-          <View className="mb-3 bg-slate-50 border border-slate-200 p-3 rounded-2xl">
+          <View className="mb-2.5 bg-slate-50 border border-slate-200 p-2.5 rounded-xl">
             <View className="flex-row items-start justify-between">
               <View className="flex-row items-start flex-1 mr-2">
-                <View className="w-6 h-6 rounded-lg bg-blue-600 items-center justify-center mr-2 mt-0.5 shadow-xs">
+                <View className="w-6 h-6 rounded-lg bg-blue-600 items-center justify-center mr-2 mt-0.5">
                   <MapPin size={12} color="#FFFFFF" />
                 </View>
                 <View className="flex-1">
-                  <Text className="text-slate-400 font-black text-[9px] uppercase tracking-wider mb-0.5">
-                    {isPickup ? 'Pickup Location' : 'Delivery Location'}
+                  <Text className="text-slate-400 font-black text-[10px] uppercase tracking-wider mb-0.5">
+                    {isPickup ? 'Pickup Address' : 'Delivery Address'}
                   </Text>
-                  <Text className="text-slate-900 text-xs font-bold leading-5">
+                  <Text className="text-slate-900 text-xs font-bold leading-4">
                     {targetAddress}
                   </Text>
                 </View>
               </View>
               <Pressable
                 onPress={() => openDirections(targetAddress, targetLat, targetLng)}
-                className="bg-blue-600 active:bg-blue-700 px-3 py-2 rounded-xl flex-row items-center shadow-xs self-start"
+                className="bg-blue-600 active:bg-blue-700 px-2.5 py-1.5 rounded-lg flex-row items-center self-start"
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
               >
-                <Navigation size={12} color="#FFFFFF" className="mr-1" />
-                <Text className="text-white text-xs font-black">Directions</Text>
+                <Navigation size={11} color="#FFFFFF" className="mr-1" />
+                <Text className="text-white text-[11px] font-black">Navigate</Text>
               </Pressable>
             </View>
           </View>
@@ -484,28 +486,28 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
         {/* Order items + breakdown */}
         {p.items && p.items.length > 0 ? (
-          <View className="mb-3 pt-2.5 border-t border-slate-100">
-            <Text className="text-slate-500 text-[10px] font-black uppercase tracking-wider mb-1.5">
-              Order Items ({p.items.length})
+          <View className="mb-2.5 pt-2 border-t border-slate-100">
+            <Text className="text-slate-500 text-[10px] font-black uppercase tracking-wider mb-1">
+              Items ({p.items.length})
             </Text>
-            <View className="gap-1.5 mb-2">
+            <View className="gap-1">
               {(p.items as any[]).map((it, idx) => {
                 const { title, details, price, notes } = formatItemSummary(it);
                 const sid = String(it.serviceType || it.serviceId || '').toLowerCase();
                 const itemToken = p.tokens?.[it.serviceType] || p.tokens?.[it.serviceId] || p.tokens?.[sid];
                 return (
-                  <View key={idx} className="bg-slate-50/80 p-2.5 rounded-xl border border-slate-200">
+                  <View key={idx} className="bg-slate-50/80 px-2.5 py-1.5 rounded-xl border border-slate-200">
                     <View className="flex-row items-center justify-between">
                       <View className="flex-1 mr-2">
-                        <View className="flex-row items-center flex-wrap gap-1.5">
+                        <View className="flex-row items-center flex-wrap gap-1">
                           <Text className="text-slate-950 font-extrabold text-xs">{title}</Text>
                           {details ? (
-                            <View className="bg-blue-600 px-1.5 py-0.2 rounded">
+                            <View className="bg-blue-600 px-1.5 py-0.5 rounded">
                               <Text className="text-white text-[10px] font-black">{details}</Text>
                             </View>
                           ) : null}
                           {itemToken ? (
-                            <View className="bg-amber-400 px-1.5 py-0.2 rounded shadow-xs">
+                            <View className="bg-amber-400 px-1.5 py-0.5 rounded">
                               <Text className="text-slate-950 text-[10px] font-black">T-{itemToken}</Text>
                             </View>
                           ) : null}
@@ -534,11 +536,11 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
           if (!hasTokens && !hasNotes) return null;
 
           return (
-            <View className="mb-3 gap-1.5">
+            <View className="mb-2.5 gap-1">
               {hasTokens && (
                 <View className="flex-row flex-wrap items-center gap-1">
                   {tokenChips.map((c, idx) => (
-                    <View key={idx} className="bg-amber-400 px-2 py-0.5 rounded-md flex-row items-center shadow-xs">
+                    <View key={idx} className="bg-amber-400 px-2 py-0.5 rounded-md flex-row items-center">
                       <Tag size={10} color="#0F172A" className="mr-1" />
                       <Text className="text-slate-950 text-[11px] font-black">
                         T-{c.token}
@@ -550,9 +552,9 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
               )}
 
               {hasNotes && (
-                <View className="bg-amber-50 border border-amber-200 p-2 rounded-lg">
+                <View className="bg-amber-50 border border-amber-200 px-2.5 py-1.5 rounded-lg">
                   <Text className="text-amber-950 text-[11px] font-semibold">
-                    <Text className="font-black uppercase">Instructions: </Text>{p.notes}
+                    <Text className="font-black uppercase">Note: </Text>{p.notes}
                   </Text>
                 </View>
               )}
@@ -562,7 +564,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
 
         {/* Bundle labels strip when available */}
         {p.bundleLabels && p.bundleLabels.length > 0 ? (
-          <View className="flex-row flex-wrap gap-1.5 mb-2.5">
+          <View className="flex-row flex-wrap gap-1 mb-2">
             {p.bundleLabels.map((bl, idx) => {
               const txt = typeof bl === 'string' ? bl : (bl?.qr || (bl?.seq !== undefined ? `Bundle #${bl.seq}` : `Bundle #${idx + 1}`));
               if (!txt) return null;
@@ -576,17 +578,17 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
         ) : null}
 
         {/* Total, Payment Status & Bundles Row */}
-        <View className="flex-row items-center justify-between pt-2.5 mb-3.5 border-t border-slate-100">
+        <View className="flex-row items-center justify-between pt-2 mb-3 border-t border-slate-100">
           <View className="flex-row items-center">
             {typeof p.totalAmount === 'number' && (
-              <View className="flex-row items-center mr-3">
-                <Text className="text-slate-400 text-[11px] uppercase font-black mr-1">Total:</Text>
-                <Text className="text-slate-950 font-black text-base">₹{p.totalAmount}</Text>
+              <View className="flex-row items-center mr-2.5">
+                <Text className="text-slate-400 text-[11px] uppercase font-bold mr-1">Total:</Text>
+                <Text className="text-slate-950 font-black text-sm">₹{p.totalAmount}</Text>
               </View>
             )}
             {typeof p.bundleCount === 'number' && (
-              <View className="bg-blue-600 px-2.5 py-0.5 rounded-lg shadow-xs">
-                <Text className="text-white text-[11px] font-black">
+              <View className="bg-blue-600 px-2 py-0.5 rounded-md">
+                <Text className="text-white text-[10px] font-black">
                   {p.bundleCount} bundle{p.bundleCount !== 1 ? 's' : ''}
                 </Text>
               </View>
@@ -598,7 +600,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             const modeText = p.paymentMode ? String(p.paymentMode).trim().toUpperCase() : '';
             return (
               <View
-                className={`px-3 py-1 rounded-lg ${
+                className={`px-2.5 py-0.5 rounded-md ${
                   isPaid
                     ? 'bg-emerald-100 border border-emerald-300'
                     : 'bg-amber-100 border border-amber-300'
@@ -610,8 +612,8 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
                   }`}
                 >
                   {isPaid
-                    ? `PAID${modeText ? ` • ${modeText}` : ' ONLINE'}`
-                    : `COLLECT ${modeText || 'CASH / UPI'}`}
+                    ? `PAID${modeText ? ` • ${modeText}` : ''}`
+                    : `COLLECT ${modeText || 'CASH/UPI'}`}
                 </Text>
               </View>
             );
@@ -624,7 +626,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             <Pressable
               onPress={p.onEdit}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              className="bg-amber-50 active:bg-amber-100 border border-amber-300 rounded-2xl h-12 px-4 items-center justify-center active:opacity-80"
+              className="bg-amber-50 active:bg-amber-100 border border-amber-300 rounded-xl h-12 px-3.5 items-center justify-center active:opacity-80"
             >
               <Text className="text-amber-950 font-black text-xs uppercase tracking-wide">Edit</Text>
             </Pressable>
@@ -633,7 +635,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
             <Pressable
               onPress={p.onPrimary}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-              className={`flex-1 h-12 items-center justify-center rounded-2xl shadow-md active:opacity-80 ${
+              className={`flex-1 h-12 items-center justify-center rounded-xl shadow-sm active:opacity-80 ${
                 isInTransit
                   ? 'bg-emerald-600 active:bg-emerald-700 shadow-emerald-600/30'
                   : isPickup
@@ -641,7 +643,7 @@ function RiderTaskCardInner(p: RiderTaskCardProps) {
                   : 'bg-blue-600 active:bg-blue-700 shadow-blue-600/30'
               }`}
             >
-              <Text className="text-white font-black text-sm uppercase tracking-wider">
+              <Text className="text-white font-black text-xs uppercase tracking-wider">
                 {p.primaryLabel}
               </Text>
             </Pressable>

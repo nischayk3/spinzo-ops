@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
-import { Clock, Play, CheckCircle, X } from 'lucide-react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform, AppState } from 'react-native';
+import { useNavigation } from '@react-navigation/native';
+import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import { Clock, Play, CheckCircle, X, ExternalLink } from 'lucide-react-native';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useAuthStore } from '../store/authStore';
 import { useOpsStaffStore } from '../store/opsStaffStore';
@@ -9,8 +11,10 @@ import { getActiveStageNudge, ActiveStageNudge, recordLocalSnooze } from '../uti
 import { dramaticChime, stopAlarm } from '../utils/alerts';
 import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
+import type { RootStackParamList } from '../navigation/RootNavigator';
 
 export function StageNudgeModal() {
+  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
   const user = useAuthStore(s => s.user);
   const activeRole = useAuthStore(s => s.activeRole);
   const staffDoc = useOpsStaffStore(s => s.staffDoc);
@@ -19,6 +23,7 @@ export function StageNudgeModal() {
   const [activeNudge, setActiveNudge] = useState<ActiveStageNudge | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const wasAlertingRef = useRef(false);
 
   const isOnShift = staffDoc?.onShift === true;
   const isOnBreak = Boolean(
@@ -61,13 +66,14 @@ export function StageNudgeModal() {
     };
 
     check();
-    const interval = setInterval(check, 10000);
+    const interval = setInterval(check, 5000);
     return () => clearInterval(interval);
   }, [processes, user?.id, activeRole, isOnShift, isOnBreak, rosterHelpers]);
 
   // Alert triggers: Single non-looping chime + system heads-up notification + Android over-the-app overlay
   useEffect(() => {
     if (activeNudge && !busy) {
+      wasAlertingRef.current = true;
       dramaticChime(true);
       triggerStageNudgeNotification({
         orderId: activeNudge.orderId,
@@ -78,7 +84,7 @@ export function StageNudgeModal() {
         phase: activeNudge.phase,
       });
 
-      if (Platform.OS === 'android') {
+      if (Platform.OS === 'android' && AppState.currentState !== 'active') {
         SpinzoOverlay.showOverlay({
           orderId: activeNudge.orderId,
           taskType: 'stage_nudge',
@@ -88,23 +94,30 @@ export function StageNudgeModal() {
         });
       }
     } else if (!activeNudge) {
-      stopAlarm();
-      clearAssignmentNotifications();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        clearAssignmentNotifications();
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.dismissOverlay();
+        }
       }
     }
     return () => {
-      stopAlarm();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.dismissOverlay();
+        }
       }
     };
-  }, [activeNudge?.orderId, activeNudge?.phase, busy]);
+  }, [activeNudge?.processId, activeNudge?.orderId, activeNudge?.step, activeNudge?.phase, busy]);
 
   if (!activeNudge) return null;
 
   const handleDismiss = () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -116,6 +129,7 @@ export function StageNudgeModal() {
   };
 
   const handleSnooze = async () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -129,8 +143,8 @@ export function StageNudgeModal() {
     try {
       await snoozeNudge(
         current.orderId,
-        current.step,
-        current.phase,
+        current.step as any,
+        current.phase as any,
         current.processId
       );
     } catch (e: any) {
@@ -138,10 +152,29 @@ export function StageNudgeModal() {
     }
   };
 
+  const isHandsOn = activeNudge.phase === 'hands_on' || activeNudge.step === 'tagging' || activeNudge.step === 'packaging';
+
   const handleAction = async () => {
+    wasAlertingRef.current = false;
     stopAlarm();
-    setBusy(true);
     setActionError(null);
+
+    if (isHandsOn) {
+      const current = activeNudge;
+      clearAssignmentNotifications();
+      if (Platform.OS === 'android') {
+        SpinzoOverlay.dismissOverlay();
+      }
+      recordLocalSnooze(`${current.processId || current.orderId}_${current.step}_${current.phase}`);
+      setActiveNudge(null);
+      navigation.navigate('OrderDetail', {
+        orderId: current.orderId,
+        processId: current.processId,
+      });
+      return;
+    }
+
+    setBusy(true);
     try {
       let res;
       if (activeNudge.phase === 'accepted') {
@@ -232,6 +265,8 @@ export function StageNudgeModal() {
                 <>
                   {isComplete ? (
                     <CheckCircle size={18} color="#fff" className="mr-2" />
+                  ) : isHandsOn ? (
+                    <ExternalLink size={18} color="#fff" className="mr-2" />
                   ) : (
                     <Play size={18} color="#fff" className="mr-2" />
                   )}

@@ -4,7 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { 
   Search, ChevronRight, Truck, Users, AlertTriangle, IndianRupee, Timer, X, Zap,
   Phone, Clock, ArrowRight, ShieldCheck, Flame, RefreshCw, CheckCircle2, PackageOpen, Tag,
-  WashingMachine, Sparkles, Filter, Layers, ArrowUpRight, Calendar, KeyRound, Video
+  WashingMachine, Sparkles, Filter, Layers, ArrowUpRight, Calendar, KeyRound, Video, SlidersHorizontal
 } from 'lucide-react-native';
 import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useAuthStore } from '../../store/authStore';
@@ -13,11 +13,12 @@ import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
 import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo, isTodayPickup, sortByPickupTimeAsc, isExpressOrder } from '../../utils/orderFeed';
 import { announceSkippedOrder } from '../../utils/alerts';
-import { stepLabel, currentStep, isDone } from '../../utils/opsProcess';
+import { getHelperLiveTasks } from '../../utils/rosterTasks';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
 import { OperationsRecordSheet } from './OperationsRecordSheet';
 import { SupervisorRiderRouteModal } from '../../components/Supervisor/SupervisorRiderRouteModal';
+import { SupervisorHelperTasksModal } from '../../components/Supervisor/SupervisorHelperTasksModal';
 import { AssignRiderModal } from '../../components/Supervisor/AssignRiderModal';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../../navigation/RootNavigator';
@@ -68,6 +69,7 @@ export function SupervisorDashboardScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [inboundFilter, setInboundFilter] = useState<'today_pickups' | 'all' | 'urgent' | 'transit' | 'tagging' | 'in_ride'>('today_pickups');
   const [selectedRosterRider, setSelectedRosterRider] = useState<StaffMember | null>(null);
+  const [selectedRosterHelper, setSelectedRosterHelper] = useState<StaffMember | null>(null);
   const [benchmarkFilter, setBenchmarkFilter] = useState<'1d' | '7d' | '15d' | '30d'>('1d');
   // Inline rider assign from card view
   const [showCardAssignRider, setShowCardAssignRider] = useState(false);
@@ -155,77 +157,29 @@ export function SupervisorDashboardScreen() {
     return inbound.filter(o => !o.isUrgent || isExpressOrder(o));
   }, [inbound, inboundFilter, orders]);
 
-  // Helper token identifier: prefers Token # (e.g. T-65, T-17), falls back to order shortId (#ATIWMR)
-  const getOrderTokenTag = (orderId: string, processToken?: string) => {
-    const o = orders.find(ord => ord.id === orderId);
-    const chips = parseOrderTokens(o?.tokens, o?.tokenNumber || processToken, o?.items);
-    if (chips.length > 0) {
-      return chips.map(c => `T-${c.token}`).join(', ');
-    }
-    if (processToken && String(processToken).trim()) {
-      const clean = String(processToken).trim().toUpperCase();
-      return clean.startsWith('T-') ? clean : `T-${clean}`;
-    }
-    return `#${orderId.slice(-6).toUpperCase()}`;
-  };
+  const selectedHelperTasks = useMemo(
+    () => (selectedRosterHelper ? getHelperLiveTasks(selectedRosterHelper, processes) : []),
+    [selectedRosterHelper, processes]
+  );
 
-  // Helper live task sync: checks processes for active stages assigned to helper
-  const getHelperLiveTask = (h: StaffMember) => {
-    // 1. Check currently active floor stage
-    for (const p of processes) {
-      if (isDone(p)) continue;
-      const cur = currentStep(p);
-      if (!cur) continue;
-      const s = p.stages[cur];
-      if (!s || s.completedAt) continue;
-
-      const isMatch = (s.assignee && s.assignee === h.uid) ||
-                      (s.assigneeName && h.name && s.assigneeName.trim().toLowerCase() === h.name.trim().toLowerCase()) ||
-                      (h.phone && (s as any).assigneePhone === h.phone);
-
-      if (isMatch) {
-        return {
-          step: cur,
-          label: stepLabel(cur),
-          orderId: p.orderId,
-          shortId: p.orderId.slice(-6).toUpperCase(),
-          tokenTag: getOrderTokenTag(p.orderId, p.tokenNumber),
-        };
+  // Live active pickup & delivery order counts per rider
+  const getRiderActiveCounts = (riderUid: string) => {
+    let pickups = 0;
+    let deliveries = 0;
+    for (const o of orders) {
+      if (
+        (o.status === 'placed' || o.status === 'confirmed' || o.status === 'in_transit_to_store') &&
+        o.riderId === riderUid
+      ) {
+        pickups += 1;
+      } else if (
+        (o.status === 'ready' || o.status === 'out_for_delivery') &&
+        o.deliveryRiderId === riderUid
+      ) {
+        deliveries += 1;
       }
     }
-
-    // 2. Check any stage in incomplete process with helper assigned
-    for (const p of processes) {
-      if (isDone(p)) continue;
-      for (const [stepKey, s] of Object.entries(p.stages || {})) {
-        if (!s || s.completedAt) continue;
-        const isMatch = (s.assignee && s.assignee === h.uid) ||
-                        (s.assigneeName && h.name && s.assigneeName.trim().toLowerCase() === h.name.trim().toLowerCase()) ||
-                        (h.phone && (s as any).assigneePhone === h.phone);
-        if (isMatch) {
-          return {
-            step: stepKey,
-            label: stepLabel(stepKey),
-            orderId: p.orderId,
-            shortId: p.orderId.slice(-6).toUpperCase(),
-            tokenTag: getOrderTokenTag(p.orderId, p.tokenNumber),
-          };
-        }
-      }
-    }
-
-    // 3. Fallback: ops_staff activeHelperTask
-    if (h.activeHelperTask) {
-      return {
-        step: h.activeHelperTask.step,
-        label: stepLabel(h.activeHelperTask.step),
-        orderId: h.activeHelperTask.orderId,
-        shortId: h.activeHelperTask.orderId ? h.activeHelperTask.orderId.slice(-6).toUpperCase() : '',
-        tokenTag: getOrderTokenTag(h.activeHelperTask.orderId),
-      };
-    }
-
-    return null;
+    return { pickups, deliveries, total: pickups + deliveries };
   };
 
   // Pipeline breakdown: active workflow stages + true today's delivered count
@@ -554,27 +508,49 @@ export function SupervisorDashboardScreen() {
         <View className="pt-1 border-t border-slate-100 flex-row items-center justify-between">
           <View className="flex-1 mr-2 flex-row items-center flex-wrap gap-1">
             {(() => {
-              const assignedRider = o.riderId ? roster.riders.find(r => r.uid === o.riderId) : null;
-              const rName = assignedRider?.name || (o as any).riderName;
-              if (rName) {
-                return (
-                  <View className="bg-blue-50 border border-blue-200 px-1.5 py-0.2 rounded flex-row items-center">
-                    <Truck size={8} color="#2563eb" className="mr-0.5" />
-                    <Text className="text-blue-700 font-bold text-[9px]">{rName}</Text>
-                  </View>
-                );
+              const isDeliveryStage = o.status === 'ready' || o.status === 'out_for_delivery';
+              const isPickupStage = o.status === 'placed' || o.status === 'confirmed' || o.status === 'in_transit_to_store';
+
+              if (!isDeliveryStage && !isPickupStage) return null;
+
+              let rName: string | undefined;
+              if (isDeliveryStage) {
+                const delRiderId = o.deliveryRiderId;
+                const assignedDelRider = delRiderId
+                  ? roster.riders.find(r => r.uid === delRiderId)
+                  : null;
+                rName = assignedDelRider?.name || (o as any).deliveryRiderName || undefined;
+              } else {
+                const pickRiderId = o.riderId;
+                const assignedPickRider = pickRiderId
+                  ? roster.riders.find(r => r.uid === pickRiderId)
+                  : null;
+                rName = assignedPickRider?.name || o.riderName || undefined;
               }
-              if (o.status === 'placed' || o.status === 'confirmed' || o.status === 'ready') {
+
+              if (rName && String(rName).trim()) {
                 return (
-                  <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.2 rounded flex-row items-center">
-                    <AlertTriangle size={8} color="#d97706" className="mr-0.5" />
-                    <Text className="text-amber-800 font-bold text-[9px]">
-                      {o.status === 'ready' ? 'Delivery Unassigned' : 'Unassigned'}
+                  <View className={`px-1.5 py-0.5 rounded border flex-row items-center ${
+                    isDeliveryStage
+                      ? 'bg-emerald-50 border-emerald-200'
+                      : 'bg-blue-50 border-blue-200'
+                  }`}>
+                    <Truck size={8} color={isDeliveryStage ? '#059669' : '#2563eb'} className="mr-0.5" />
+                    <Text className={`font-bold text-[9px] ${
+                      isDeliveryStage ? 'text-emerald-700' : 'text-blue-700'
+                    }`}>
+                      {formatStaffName(String(rName).trim())}
                     </Text>
                   </View>
                 );
               }
-              return null;
+
+              return (
+                <View className="bg-amber-50 border border-amber-300 px-1.5 py-0.5 rounded flex-row items-center">
+                  <AlertTriangle size={8} color="#d97706" className="mr-0.5" />
+                  <Text className="text-amber-800 font-bold text-[9px]">Not Assigned</Text>
+                </View>
+              );
             })()}
             {(() => {
               const pInfo = getPickupInfo(o);
@@ -616,19 +592,21 @@ export function SupervisorDashboardScreen() {
             )}
           </View>
 
-          {(o.status === 'placed' || o.status === 'confirmed') && (
+          {(o.status === 'placed' || o.status === 'confirmed' || o.status === 'ready') && (
             <TouchableOpacity
               onPress={(e) => {
                 e?.stopPropagation?.();
                 setCardAssignOrderId(o.id);
                 setCardAssignUserId(o.userId);
-                setCardAssignIsDelivery(false);
+                setCardAssignIsDelivery(o.status === 'ready');
                 setShowCardAssignRider(true);
               }}
               className="bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded flex-row items-center mr-1 active:bg-blue-100"
             >
               <Truck size={8} color="#2563eb" className="mr-0.5" />
-              <Text className="text-blue-700 font-bold text-[10px]">Assign Rider</Text>
+              <Text className="text-blue-700 font-bold text-[10px]">
+                {o.status === 'ready' ? 'Assign Delivery' : 'Assign Rider'}
+              </Text>
             </TouchableOpacity>
           )}
           <View className="bg-purple-50 border border-purple-200 px-1.5 py-0.5 rounded flex-row items-center">
@@ -992,65 +970,131 @@ export function SupervisorDashboardScreen() {
 
               {/* Widget 2: Floor Roster Deployment */}
               <View className="bg-white rounded-2xl p-3.5 border border-slate-200/90 mb-3 shadow-2xs">
-                <View className="flex-row items-center justify-between mb-2">
+                <View className="flex-row items-center justify-between mb-2.5">
                   <View className="flex-row items-center">
                     <Users size={14} color="#994bff" className="mr-1.5" />
                     <Text className="text-slate-900 font-extrabold text-xs">Floor Roster Deployment</Text>
                   </View>
-                  <Text className="text-slate-400 text-[11px] font-bold">{roster.helpers.length} active</Text>
+                  <Text className="text-slate-500 text-[10px] font-bold">
+                    {roster.helpers.length} Helpers · {roster.riders.length} Riders
+                  </Text>
                 </View>
+
                 <View className="gap-1.5">
                   {roster.helpers.map(h => {
-                    const liveTask = getHelperLiveTask(h);
+                    const liveTasks = getHelperLiveTasks(h, processes);
+                    const topTask = liveTasks[0];
+                    const topSummary = topTask
+                      ? `${topTask.stageLabel} · ${topTask.tokens.length > 0 ? `T-${topTask.tokens[0]}` : `#${topTask.orderNumber}`}`
+                      : h.phone || 'On floor shift';
+
                     return (
-                      <View key={h.uid} className="flex-row items-center justify-between bg-slate-50 px-2.5 py-1.5 rounded-xl border border-slate-100">
-                        <View className="flex-row items-center">
-                          <View className="w-6 h-6 rounded-full bg-purple-100 items-center justify-center mr-2 border border-purple-200">
-                            <Text className="text-purple-800 font-black text-[10px]">{h.name ? h.name.charAt(0).toUpperCase() : 'H'}</Text>
-                          </View>
-                          <View>
-                            <Text className="text-slate-900 font-bold text-[11px]">{formatStaffName(h.name, 'Helper')}</Text>
-                            <Text className="text-slate-400 text-[9px]">{h.phone}</Text>
-                          </View>
-                        </View>
-                        {liveTask ? (
-                          <View className="bg-purple-100 border border-purple-200 px-2 py-0.5 rounded-md">
-                            <Text className="text-purple-800 font-extrabold text-[9px] uppercase">
-                              {liveTask.label} ({liveTask.tokenTag})
+                      <TouchableOpacity
+                        key={h.uid}
+                        onPress={() => setSelectedRosterHelper(h)}
+                        activeOpacity={0.8}
+                        className="flex-row items-center justify-between bg-slate-50 px-2.5 py-2 rounded-xl border border-slate-200/80 active:bg-slate-100"
+                      >
+                        <View className="flex-row items-center flex-1 mr-2">
+                          <View className="w-7 h-7 rounded-full bg-purple-100 items-center justify-center mr-2 border border-purple-200 shrink-0">
+                            <Text className="text-purple-800 font-black text-[10px]">
+                              {h.name ? h.name.charAt(0).toUpperCase() : 'H'}
                             </Text>
                           </View>
-                        ) : (
-                          <View className="bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
-                            <Text className="text-emerald-700 font-bold text-[9px] uppercase">Available</Text>
+                          <View className="flex-1">
+                            <Text className="text-slate-900 font-bold text-xs" numberOfLines={1}>
+                              {formatStaffName(h.name, 'Helper')}
+                            </Text>
+                            <Text
+                              className={`text-[10px] mt-0.5 ${
+                                topTask ? 'text-purple-700 font-semibold' : 'text-slate-400 font-medium'
+                              }`}
+                              numberOfLines={1}
+                            >
+                              {topSummary}
+                            </Text>
                           </View>
-                        )}
-                      </View>
+                        </View>
+
+                        <View className="flex-row items-center gap-1 shrink-0">
+                          {liveTasks.length > 0 ? (
+                            <View className="bg-purple-100 border border-purple-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-purple-800 font-extrabold text-[10px]">
+                                {liveTasks.length} {liveTasks.length === 1 ? 'Order' : 'Orders'}
+                              </Text>
+                            </View>
+                          ) : (
+                            <View className="bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-emerald-700 font-bold text-[10px]">Idle</Text>
+                            </View>
+                          )}
+                          <ChevronRight size={12} color="#64748B" />
+                        </View>
+                      </TouchableOpacity>
                     );
                   })}
-                  {roster.riders.map(r => (
-                    <TouchableOpacity
-                      key={r.uid}
-                      onPress={() => setSelectedRosterRider(r)}
-                      activeOpacity={0.8}
-                      className="flex-row items-center justify-between bg-slate-50 hover:bg-slate-100/80 px-2.5 py-1.5 rounded-xl border border-slate-100 cursor-pointer active:bg-slate-100"
-                    >
-                      <View className="flex-row items-center">
-                        <View className="w-6 h-6 rounded-full bg-blue-100 items-center justify-center mr-2 border border-blue-200">
-                          <Truck size={11} color="#1d4ed8" />
+
+                  {roster.riders.map(r => {
+                    const counts = getRiderActiveCounts(r.uid);
+                    const breakdown =
+                      counts.total > 0
+                        ? [
+                            counts.pickups > 0 ? `${counts.pickups} Pickup${counts.pickups > 1 ? 's' : ''}` : null,
+                            counts.deliveries > 0 ? `${counts.deliveries} Deliv.` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')
+                        : r.phone || 'Delivery partner';
+
+                    return (
+                      <TouchableOpacity
+                        key={r.uid}
+                        onPress={() => setSelectedRosterRider(r)}
+                        activeOpacity={0.8}
+                        className="flex-row items-center justify-between bg-slate-50 px-2.5 py-2 rounded-xl border border-slate-200/80 active:bg-slate-100"
+                      >
+                        <View className="flex-row items-center flex-1 mr-2">
+                          <View className="w-7 h-7 rounded-full bg-blue-100 items-center justify-center mr-2 border border-blue-200 shrink-0">
+                            <Truck size={12} color="#1d4ed8" />
+                          </View>
+                          <View className="flex-1">
+                            <Text className="text-slate-900 font-bold text-xs" numberOfLines={1}>
+                              {formatStaffName(r.name, 'Rider')}
+                            </Text>
+                            <Text
+                              className={`text-[10px] mt-0.5 ${
+                                counts.total > 0 ? 'text-blue-700 font-semibold' : 'text-slate-400 font-medium'
+                              }`}
+                              numberOfLines={1}
+                            >
+                              {breakdown}
+                            </Text>
+                          </View>
                         </View>
-                        <View>
-                          <Text className="text-slate-900 font-bold text-[11px]">{formatStaffName(r.name, 'Rider')}</Text>
-                          <Text className="text-slate-400 text-[9px]">{r.phone}</Text>
+
+                        <View className="flex-row items-center gap-1 shrink-0">
+                          {counts.total > 0 ? (
+                            <View className="bg-blue-100 border border-blue-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-blue-800 font-extrabold text-[10px]">
+                                {counts.total} {counts.total === 1 ? 'Order' : 'Orders'}
+                              </Text>
+                            </View>
+                          ) : (
+                            <View className="bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
+                              <Text className="text-emerald-700 font-bold text-[10px]">Idle</Text>
+                            </View>
+                          )}
+                          <ChevronRight size={12} color="#64748B" />
                         </View>
-                      </View>
-                      <View className="flex-row items-center gap-1.5">
-                        <View className="bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-md">
-                          <Text className="text-blue-700 font-bold text-[9px] uppercase">Smart Route</Text>
-                        </View>
-                        <ChevronRight size={11} color="#64748B" />
-                      </View>
-                    </TouchableOpacity>
-                  ))}
+                      </TouchableOpacity>
+                    );
+                  })}
+
+                  {roster.helpers.length === 0 && roster.riders.length === 0 && (
+                    <View className="py-4 items-center justify-center bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                      <Text className="text-slate-400 text-[11px] font-medium">No staff currently clocked in</Text>
+                    </View>
+                  )}
                 </View>
               </View>
 
@@ -1134,27 +1178,33 @@ export function SupervisorDashboardScreen() {
                 </View>
               </View>
 
-              {/* Widget 4: Smart Autopilot Routing Rules Matrix */}
-              <View className="bg-white rounded-2xl p-3 border border-slate-200/90 shadow-2xs">
+              {/* Widget 4: Auto-Assignment Rules (managed dynamically in Settings) */}
+              <View className="bg-bgSurface rounded-2xl p-3.5 border border-white/10 shadow-2xs">
                 <View className="flex-row items-center justify-between mb-1.5">
                   <View className="flex-row items-center">
-                    <Zap size={12} color="#994bff" className="mr-1" />
-                    <Text className="text-slate-500 text-[10px] uppercase font-extrabold tracking-wider">Autopilot Routing Rules</Text>
+                    <Zap size={13} color="#994BFF" className="mr-1.5" />
+                    <Text className="text-textPrimary text-xs font-extrabold tracking-tight">
+                      Auto-Assignment Rules
+                    </Text>
                   </View>
-                  <View className="bg-emerald-50 border border-emerald-200 px-1.5 py-0.2 rounded">
-                    <Text className="text-emerald-700 font-bold text-[9px]">OPTIMAL</Text>
-                  </View>
-                </View>
-                <View className="gap-1">
-                  <View className="flex-row items-center justify-between">
-                    <Text className="text-slate-600 text-[10px] font-medium">Tagging & Packaging</Text>
-                    <Text className="text-purple-700 font-bold text-[10px]">→ Abdul & Tahirul (Primary)</Text>
-                  </View>
-                  <View className="flex-row items-center justify-between">
-                    <Text className="text-slate-600 text-[10px] font-medium">Ironing Station 1 & 2</Text>
-                    <Text className="text-amber-800 font-bold text-[10px]">→ Samsul & Abdur</Text>
+                  <View className="bg-emerald-500/15 border border-emerald-400/30 px-2 py-0.5 rounded-full">
+                    <Text className="text-emerald-300 font-bold text-[9px] uppercase">Dynamic</Text>
                   </View>
                 </View>
+                <Text className="text-textSecondary text-[11px] leading-4 mb-2.5">
+                  Stage-to-staff routing rules are configured live in Settings and automatically apply to new floor tasks.
+                </Text>
+                <TouchableOpacity
+                  onPress={() => (navigation as any).navigate('Settings')}
+                  activeOpacity={0.85}
+                  className="bg-bgSurfaceLight border border-white/10 rounded-xl px-3 py-2 flex-row items-center justify-between active:opacity-80"
+                >
+                  <View className="flex-row items-center gap-1.5">
+                    <SlidersHorizontal size={13} color="#994BFF" />
+                    <Text className="text-textPrimary font-bold text-xs">Open Settings</Text>
+                  </View>
+                  <ChevronRight size={14} color="#94A3B8" />
+                </TouchableOpacity>
               </View>
 
             </View>
@@ -1163,6 +1213,17 @@ export function SupervisorDashboardScreen() {
 
         </View>
       </ScrollView>
+
+      <SupervisorHelperTasksModal
+        visible={!!selectedRosterHelper}
+        helper={selectedRosterHelper}
+        tasks={selectedHelperTasks}
+        onClose={() => setSelectedRosterHelper(null)}
+        onSelectOrder={(orderId, processId) => {
+          setSelectedRosterHelper(null);
+          navigation.navigate('OrderDetail', { orderId, processId });
+        }}
+      />
 
       <SupervisorRiderRouteModal
         visible={!!selectedRosterRider}

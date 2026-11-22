@@ -67,7 +67,7 @@ export function useLifecycleNotifications() {
     });
   }, [orders, isOrdersLoading, isSupervisorOrAdmin]);
 
-  // 3. Washing Machine Chemical Alarms (13m Detergent, 21m Softener, 35m Complete) - Active Working Helper ONLY
+  // 3. Washing Machine Chemical Alarms (3m Detergent, 21m Softener, 36m Complete) - Active Working Helper ONLY
   const rosterHelpers = useStaffRosterStore(s => s.roster.helpers);
   const isOnShift = staffDoc?.onShift === true;
   const isOnBreak = Boolean(
@@ -124,9 +124,9 @@ export function useLifecycleNotifications() {
         if (!startMs || isNaN(startMs)) return;
         const elapsedMinutes = (now - startMs) / (60 * 1000);
 
-        // Milestone 1: Detergent at 13 minutes
+        // Milestone 1: Detergent at 3 minutes
         const detKey = `${p.id}_detergent`;
-        if (elapsedMinutes >= 13 && !stage.detergentAddedAt) {
+        if (elapsedMinutes >= 3 && !stage.detergentAddedAt) {
           useWasherReminderStore.getState().showReminder({
             orderId: p.orderId,
             processId: p.id,
@@ -154,9 +154,9 @@ export function useLifecycleNotifications() {
           }
         }
 
-        // Milestone 3: Cycle Complete at 35 minutes
+        // Milestone 3: Cycle Complete at 36 minutes
         const compKey = `${p.id}_complete`;
-        if (elapsedMinutes >= 35) {
+        if (elapsedMinutes >= 36) {
           useWasherReminderStore.getState().showReminder({
             orderId: p.orderId,
             processId: p.id,

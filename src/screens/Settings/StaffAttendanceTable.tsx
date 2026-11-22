@@ -359,21 +359,21 @@ export function StaffAttendanceTable() {
     let badgeText = 'text-rose-700';
 
     if (shift?.status === 'working') {
-      remarkText = 'Working (On Shift)';
+      remarkText = 'Working';
       badgeBg = 'bg-emerald-50 border-emerald-300';
       badgeText = 'text-emerald-800';
     } else if (shift?.status === 'lunch') {
-      remarkText = 'On Lunch Break';
+      remarkText = 'On Lunch';
       badgeBg = 'bg-amber-50 border-amber-300';
       badgeText = 'text-amber-800';
     } else if (shift?.status === 'short_break') {
-      remarkText = 'On Short Break';
+      remarkText = 'Short Break';
       badgeBg = 'bg-blue-50 border-blue-300';
       badgeText = 'text-blue-800';
     } else if (shift?.logoutAt) {
       const totalWorkMs = shift.totalWorkMs || 0;
       if (totalWorkMs >= 7 * 3600 * 1000) {
-        remarkText = 'Full Shift Done';
+        remarkText = 'Full Shift';
         badgeBg = 'bg-emerald-50 border-emerald-300';
         badgeText = 'text-emerald-800';
       } else if (totalWorkMs > 0 && totalWorkMs < 4 * 3600 * 1000) {
@@ -381,12 +381,12 @@ export function StaffAttendanceTable() {
         badgeBg = 'bg-amber-50 border-amber-300';
         badgeText = 'text-amber-800';
       } else {
-        remarkText = 'Shift Completed';
+        remarkText = 'Shift Done';
         badgeBg = 'bg-purple-50 border-purple-300';
         badgeText = 'text-purple-800';
       }
     } else if (isPresent) {
-      remarkText = 'Working (On Shift)';
+      remarkText = 'Working';
       badgeBg = 'bg-emerald-50 border-emerald-300';
       badgeText = 'text-emerald-800';
     }
@@ -414,46 +414,46 @@ export function StaffAttendanceTable() {
   const totalDailyFines = rows.reduce((sum, r) => sum + r.finesTotal, 0);
 
   return (
-    <View className="bg-white rounded-3xl p-5 mb-5 border border-gray-200/80 shadow-xs">
+    <View className="bg-white rounded-2xl p-3.5 mb-4 border border-gray-200/80 shadow-xs">
       {/* Top Header & Day Navigation */}
-      <View className="flex-row items-center justify-between mb-3.5 flex-wrap gap-2">
+      <View className="flex-row items-center justify-between mb-3 flex-wrap gap-2">
         <View className="flex-row items-center">
-          <View className="w-10 h-10 rounded-2xl bg-purple-100 items-center justify-center mr-3 border border-purple-200">
-            <ClipboardList size={20} color="#994bff" />
+          <View className="w-8 h-8 rounded-xl bg-purple-100 items-center justify-center mr-2.5 border border-purple-200">
+            <ClipboardList size={16} color="#994bff" />
           </View>
           <View>
-            <Text className="text-gray-900 font-black text-lg">Staff Attendance & Shift Ledger</Text>
-            <Text className="text-gray-500 text-xs font-semibold">
+            <Text className="text-gray-900 font-black text-base">Staff Attendance & Shift Ledger</Text>
+            <Text className="text-gray-500 text-[11px] font-semibold">
               {formatFullDateHeader(selectedDate)}
             </Text>
           </View>
         </View>
 
         {/* Step Day Buttons */}
-        <View className="flex-row items-center gap-1.5 bg-gray-100/90 p-1 rounded-2xl border border-gray-200">
+        <View className="flex-row items-center gap-1 bg-gray-100/90 p-1 rounded-xl border border-gray-200">
           <TouchableOpacity
             onPress={() => handleStepDay(-1)}
             disabled={pastDates.indexOf(selectedDate) >= pastDates.length - 1}
-            className={`p-1.5 rounded-xl ${pastDates.indexOf(selectedDate) >= pastDates.length - 1 ? 'opacity-30' : 'bg-white shadow-2xs active:bg-gray-50'}`}
+            className={`p-1 rounded-lg ${pastDates.indexOf(selectedDate) >= pastDates.length - 1 ? 'opacity-30' : 'bg-white shadow-2xs active:bg-gray-50'}`}
           >
-            <ChevronLeft size={16} color="#334155" />
+            <ChevronLeft size={14} color="#334155" />
           </TouchableOpacity>
-          <Text className="text-xs font-bold text-gray-700 px-2 min-w-[75px] text-center">
+          <Text className="text-[11px] font-bold text-gray-700 px-1.5 min-w-[68px] text-center">
             {formatDatePillLabel(selectedDate)}
           </Text>
           <TouchableOpacity
             onPress={() => handleStepDay(1)}
             disabled={pastDates.indexOf(selectedDate) <= 0}
-            className={`p-1.5 rounded-xl ${pastDates.indexOf(selectedDate) <= 0 ? 'opacity-30' : 'bg-white shadow-2xs active:bg-gray-50'}`}
+            className={`p-1 rounded-lg ${pastDates.indexOf(selectedDate) <= 0 ? 'opacity-30' : 'bg-white shadow-2xs active:bg-gray-50'}`}
           >
-            <ChevronRight size={16} color="#334155" />
+            <ChevronRight size={14} color="#334155" />
           </TouchableOpacity>
         </View>
       </View>
 
       {/* Date Pill Strip (Last 7 Days) */}
-      <View className="mb-4">
-        <ScrollView horizontal={true} showsHorizontalScrollIndicator={false} className="gap-2">
+      <View className="mb-3">
+        <ScrollView horizontal={true} showsHorizontalScrollIndicator={false} className="gap-1.5">
           {pastDates.map((dStr) => {
             const isSel = dStr === selectedDate;
             const label = formatDatePillLabel(dStr);
@@ -461,14 +461,14 @@ export function StaffAttendanceTable() {
               <TouchableOpacity
                 key={dStr}
                 onPress={() => setSelectedDate(dStr)}
-                className={`px-3.5 py-1.5 rounded-full border mr-1.5 flex-row items-center ${
+                className={`px-2.5 py-1 rounded-full border mr-1.5 flex-row items-center ${
                   isSel
                     ? 'bg-[#994bff] border-[#994bff] shadow-xs'
                     : 'bg-gray-50 border-gray-200 active:bg-gray-100'
                 }`}
               >
-                <Calendar size={11} color={isSel ? '#ffffff' : '#64748b'} className="mr-1.5" />
-                <Text className={`text-xs font-black ${isSel ? 'text-white' : 'text-gray-600'}`}>
+                <Calendar size={10} color={isSel ? '#ffffff' : '#64748b'} className="mr-1" />
+                <Text className={`text-[11px] font-black ${isSel ? 'text-white' : 'text-gray-600'}`}>
                   {label}
                 </Text>
               </TouchableOpacity>
@@ -478,38 +478,38 @@ export function StaffAttendanceTable() {
       </View>
 
       {/* Metric Summary Cards */}
-      <View className="flex-row gap-3 mb-4 flex-wrap">
-        <View className="flex-1 min-w-[100px] bg-emerald-50/80 border border-emerald-200/80 p-3 rounded-2xl">
+      <View className="flex-row gap-2 mb-3 flex-wrap">
+        <View className="flex-1 min-w-[92px] bg-emerald-50/80 border border-emerald-200/80 p-2.5 rounded-xl">
           <View className="flex-row items-center justify-between mb-0.5">
             <Text className="text-emerald-700 text-[10px] font-black uppercase tracking-wider">Present</Text>
-            <CheckCircle2 size={13} color="#059669" />
+            <CheckCircle2 size={12} color="#059669" />
           </View>
-          <Text className="text-emerald-950 font-black text-xl">{presentCount} <Text className="text-xs font-semibold text-emerald-700">/ 5 Staff</Text></Text>
+          <Text className="text-emerald-950 font-black text-lg">{presentCount} <Text className="text-[11px] font-semibold text-emerald-700">/ {rows.length}</Text></Text>
         </View>
 
-        <View className="flex-1 min-w-[100px] bg-rose-50/80 border border-rose-200/80 p-3 rounded-2xl">
+        <View className="flex-1 min-w-[92px] bg-rose-50/80 border border-rose-200/80 p-2.5 rounded-xl">
           <View className="flex-row items-center justify-between mb-0.5">
             <Text className="text-rose-700 text-[10px] font-black uppercase tracking-wider">Absent</Text>
-            <AlertCircle size={13} color="#e11d48" />
+            <AlertCircle size={12} color="#e11d48" />
           </View>
-          <Text className="text-rose-950 font-black text-xl">{absentCount} <Text className="text-xs font-semibold text-rose-700">/ 5 Staff</Text></Text>
+          <Text className="text-rose-950 font-black text-lg">{absentCount} <Text className="text-[11px] font-semibold text-rose-700">/ {rows.length}</Text></Text>
         </View>
 
-        <View className="flex-1 min-w-[130px] bg-purple-50/80 border border-purple-200/80 p-3 rounded-2xl">
+        <View className="flex-1 min-w-[116px] bg-purple-50/80 border border-purple-200/80 p-2.5 rounded-xl">
           <View className="flex-row items-center justify-between mb-0.5">
-            <Text className="text-purple-700 text-[10px] font-black uppercase tracking-wider">Day Payout</Text>
-            <IndianRupee size={13} color="#994bff" />
+            <Text className="text-purple-700 text-[10px] font-black uppercase tracking-wider">Payout</Text>
+            <IndianRupee size={12} color="#994bff" />
           </View>
-          <Text className="text-purple-950 font-black text-xl">₹{totalDailyPayout.toLocaleString('en-IN')}</Text>
+          <Text className="text-purple-950 font-black text-lg">₹{totalDailyPayout.toLocaleString('en-IN')}</Text>
           {totalDailyFines > 0 && (
-            <Text className="text-rose-600 font-bold text-[10px] mt-0.5">Fines: ₹{totalDailyFines}</Text>
+            <Text className="text-rose-600 font-bold text-[10px]">Fines: ₹{totalDailyFines}</Text>
           )}
         </View>
       </View>
 
       {/* Horizontal Scrollable Table */}
       {loading ? (
-        <View className="py-8 items-center justify-center">
+        <View className="py-6 items-center justify-center">
           <ActivityIndicator size="small" color="#994bff" />
           <Text className="text-gray-400 text-xs mt-2 font-medium">Loading store attendance...</Text>
         </View>
@@ -517,19 +517,19 @@ export function StaffAttendanceTable() {
         <ScrollView
           horizontal={true}
           showsHorizontalScrollIndicator={true}
-          className="border border-gray-200 rounded-2xl overflow-hidden"
+          className="border border-gray-200 rounded-xl overflow-hidden"
         >
           <View>
             {/* Table Header */}
-            <View className="flex-row bg-gray-100/90 border-b border-gray-200 py-3 px-3.5 items-center">
-              <Text className="w-[155px] text-[11px] font-black text-gray-700 uppercase tracking-wider">NAME</Text>
-              <Text className="w-[100px] text-[11px] font-black text-gray-700 uppercase tracking-wider">LOGIN TIME</Text>
-              <Text className="w-[105px] text-[11px] font-black text-gray-700 uppercase tracking-wider">LUNCH TIME</Text>
-              <Text className="w-[95px] text-[11px] font-black text-gray-700 uppercase tracking-wider">BREAK</Text>
-              <Text className="w-[100px] text-[11px] font-black text-gray-700 uppercase tracking-wider">LOG OUT</Text>
-              <Text className="w-[85px] text-[11px] font-black text-gray-700 uppercase tracking-wider">FEE</Text>
-              <Text className="w-[65px] text-[11px] font-black text-gray-700 uppercase tracking-wider">FINES</Text>
-              <Text className="w-[140px] text-[11px] font-black text-gray-700 uppercase tracking-wider">REMARK</Text>
+            <View className="flex-row bg-gray-100/90 border-b border-gray-200 py-2 px-2.5 items-center">
+              <Text className="w-[132px] text-[10px] font-black text-gray-700 uppercase tracking-wider">NAME</Text>
+              <Text className="w-[82px] text-[10px] font-black text-gray-700 uppercase tracking-wider">LOGIN</Text>
+              <Text className="w-[88px] text-[10px] font-black text-gray-700 uppercase tracking-wider">LUNCH</Text>
+              <Text className="w-[76px] text-[10px] font-black text-gray-700 uppercase tracking-wider">BREAK</Text>
+              <Text className="w-[82px] text-[10px] font-black text-gray-700 uppercase tracking-wider">LOG OUT</Text>
+              <Text className="w-[60px] text-[10px] font-black text-gray-700 uppercase tracking-wider">FEE</Text>
+              <Text className="w-[62px] text-[10px] font-black text-gray-700 uppercase tracking-wider">FINES</Text>
+              <Text className="w-[104px] text-[10px] font-black text-gray-700 uppercase tracking-wider">STATUS</Text>
             </View>
 
             {/* Table Rows */}
@@ -539,90 +539,97 @@ export function StaffAttendanceTable() {
               return (
                 <View
                   key={row.target.key}
-                  className={`flex-row items-center border-b border-gray-100 py-3.5 px-3.5 ${
+                  className={`flex-row items-center border-b border-gray-100 py-2.5 px-2.5 ${
                     isEven ? 'bg-white' : 'bg-gray-50/60'
                   }`}
                 >
                   {/* 1. NAME */}
-                  <View className="w-[155px] pr-2">
-                    <Text className="text-gray-900 font-black text-sm" numberOfLines={1}>
+                  <View className="w-[132px] pr-2">
+                    <Text className="text-gray-900 font-black text-xs" numberOfLines={1}>
                       {row.target.displayName}
                     </Text>
-                    <View className="flex-row items-center mt-1">
-                      <View className={`px-2 py-0.5 rounded ${
+                    <View className="flex-row items-center mt-0.5">
+                      <View className={`px-1.5 py-0.5 rounded ${
                         row.target.role === 'rider'
                           ? 'bg-blue-100 border border-blue-200'
                           : 'bg-purple-100 border border-purple-200'
                       }`}>
-                        <Text className={`text-[9px] font-black tracking-wider ${
+                        <Text className={`text-[9px] font-black tracking-wide ${
                           row.target.role === 'rider' ? 'text-blue-800' : 'text-purple-800'
-                        }`}>
+                        }`} numberOfLines={1}>
                           {row.target.roleDisplay}
                         </Text>
                       </View>
-                      <Text className="text-gray-400 text-[10px] ml-1.5 font-bold">
-                        • {row.phoneHint}
+                      <Text className="text-gray-400 text-[10px] ml-1 font-bold" numberOfLines={1}>
+                        •{row.phoneHint}
                       </Text>
                     </View>
                   </View>
 
                   {/* 2. LOGIN TIME */}
-                  <View className="w-[100px] pr-2">
-                    <Text className={`text-xs font-black ${row.isPresent ? 'text-gray-900' : 'text-gray-400'}`}>
+                  <View className="w-[82px] pr-1.5">
+                    <Text className={`text-[11px] font-bold ${row.isPresent ? 'text-gray-900' : 'text-gray-400'}`} numberOfLines={1}>
                       {row.loginTime}
                     </Text>
                   </View>
 
                   {/* 3. LUNCH TIME */}
-                  <View className="w-[105px] pr-2">
+                  <View className="w-[88px] pr-1.5">
                     {row.lunchTime !== '—' ? (
-                      <View className="flex-row items-center">
-                        <Text className={`text-xs font-bold ${row.isLunchOverdue ? 'text-amber-700' : 'text-gray-800'}`}>
-                          {row.lunchTime}
-                        </Text>
-                      </View>
+                      <Text className={`text-[11px] font-bold ${row.isLunchOverdue ? 'text-amber-700' : 'text-gray-800'}`} numberOfLines={1}>
+                        {row.lunchTime}
+                      </Text>
                     ) : (
-                      <Text className="text-xs font-semibold text-gray-400">—</Text>
+                      <Text className="text-[11px] font-semibold text-gray-400">—</Text>
                     )}
                   </View>
 
                   {/* 4. BREAK */}
-                  <View className="w-[95px] pr-2">
-                    <Text className={`text-xs font-semibold ${row.breakTime !== '—' ? 'text-blue-700' : 'text-gray-400'}`}>
+                  <View className="w-[76px] pr-1.5">
+                    <Text className={`text-[11px] font-semibold ${row.breakTime !== '—' ? 'text-blue-700' : 'text-gray-400'}`} numberOfLines={1}>
                       {row.breakTime}
                     </Text>
                   </View>
 
                   {/* 5. LOG OUT */}
-                  <View className="w-[100px] pr-2">
-                    <Text className={`text-xs font-black ${
-                      row.logoutTime === 'On Shift'
-                        ? 'text-emerald-700'
-                        : row.logoutTime !== '—'
-                        ? 'text-gray-900'
-                        : 'text-gray-400'
-                    }`}>
+                  <View className="w-[82px] pr-1.5">
+                    <Text
+                      className={`text-[11px] font-bold ${
+                        row.logoutTime === 'On Shift'
+                          ? 'text-emerald-700'
+                          : row.logoutTime !== '—'
+                          ? 'text-gray-900'
+                          : 'text-gray-400'
+                      }`}
+                      numberOfLines={1}
+                    >
                       {row.logoutTime}
                     </Text>
                   </View>
 
                   {/* 6. FEE */}
-                  <View className="w-[85px] pr-2">
-                    <Text className={`text-xs font-black ${row.isPresent ? 'text-gray-900' : 'text-gray-400'}`}>
+                  <View className="w-[60px] pr-1.5">
+                    <Text className={`text-[11px] font-black ${row.isPresent ? 'text-gray-900' : 'text-gray-400'}`} numberOfLines={1}>
                       {row.isPresent ? `₹${row.fee}` : '₹0'}
                     </Text>
                   </View>
 
                   {/* 7. FINES */}
-                  <View className="w-[65px] pr-2">
-                    <Text className={`text-xs font-black ${row.finesTotal > 0 ? 'text-rose-700' : 'text-gray-400'}`}>
-                      {row.finesTotal > 0 ? `₹${row.finesTotal}` : '—'}
-                    </Text>
+                  <View className="w-[62px] pr-1.5">
+                    {row.finesTotal > 0 ? (
+                      <View className="bg-rose-50 border border-rose-200 px-1.5 py-0.5 rounded-md self-start">
+                        <Text className="text-[10px] font-black text-rose-700" numberOfLines={1}>
+                          ₹{row.finesTotal}
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text className="text-[11px] font-semibold text-gray-400">—</Text>
+                    )}
                   </View>
 
                   {/* 8. REMARK */}
-                  <View className="w-[140px] pr-2">
-                    <View className={`px-2.5 py-1 rounded-xl border self-start ${row.badgeBg}`}>
+                  <View className="w-[104px] pr-1">
+                    <View className={`px-2 py-0.5 rounded-lg border self-start ${row.badgeBg}`}>
                       <Text className={`text-[10px] font-black ${row.badgeText}`} numberOfLines={1}>
                         {row.remarkText}
                       </Text>

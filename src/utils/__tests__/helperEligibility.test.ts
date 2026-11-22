@@ -1,5 +1,15 @@
 import { describe, it, expect } from 'vitest';
-import { getTopEligibleTask } from '../helperEligibility';
+import {
+  getTopEligibleTask,
+  isHelperEligible,
+  isHelperAllowedForStage,
+  isWashRequiringService,
+  DEFAULT_HELPER_STAGE_RULES,
+  ABDUL_PHONE,
+  TAHIRUL_PHONE,
+  SAMSUL_PHONE,
+} from '../helperEligibility';
+import type { HelperAssignmentRules } from '../../store/helperRulesStore';
 import { OpsProcess } from '../opsProcess';
 
 const makeProcess = (overrides: Partial<OpsProcess> = {}): OpsProcess => ({
@@ -64,10 +74,14 @@ describe('getTopEligibleTask', () => {
       },
     });
     const orders = [{ id: 'o1', status: 'processing', userId: 'u1', vendorId: 'v1' }];
-    const result = getTopEligibleTask([pushedProcess], orders, 'h1', 'helper', null, resources, false);
-    expect(result).not.toBeNull();
-    expect(result!.isPushedToMe).toBe(true);
-    expect(result!.orderId).toBe('o1');
+    // Off-shift helpers must receive zero alerts (even for supervisor push)
+    const offShiftResult = getTopEligibleTask([pushedProcess], orders, 'h1', 'helper', null, resources, false, undefined, false);
+    expect(offShiftResult).toBeNull();
+    // On-shift helpers on break still receive supervisor manual overrides
+    const onBreakOverride = getTopEligibleTask([pushedProcess], orders, 'h1', 'helper', null, resources, true, undefined, true);
+    expect(onBreakOverride).not.toBeNull();
+    expect(onBreakOverride!.isPushedToMe).toBe(true);
+    expect(onBreakOverride!.orderId).toBe('o1');
   });
 
   it('prioritizes getting_dried and getting_washed over packaging and tagging when machines are available', () => {
@@ -790,6 +804,343 @@ describe('getTopEligibleTask', () => {
       );
       expect(washRes).not.toBeNull();
       expect(washRes?.orderId).toBe('o_wash2');
+    });
+  });
+
+  describe('Dynamic Helper Assignment Rules (R22)', () => {
+    it('falls back to DEFAULT_HELPER_STAGE_RULES when no custom rules exist', () => {
+      expect(DEFAULT_HELPER_STAGE_RULES(TAHIRUL_PHONE)).toEqual({
+        tagging: true,
+        getting_washed: true,
+        getting_dried: true,
+        getting_ironed: false,
+        packaging: true,
+      });
+      expect(DEFAULT_HELPER_STAGE_RULES(SAMSUL_PHONE).getting_ironed).toBe(true);
+      expect(isHelperAllowedForStage(TAHIRUL_PHONE, 'getting_ironed', {})).toBe(false);
+      expect(isHelperAllowedForStage(SAMSUL_PHONE, 'getting_ironed', {})).toBe(true);
+      expect(isHelperAllowedForStage(ABDUL_PHONE, 'tagging', {})).toBe(true);
+    });
+
+    it('enables ironing for Tahirul when supervisor toggles getting_ironed ON in helperRules', () => {
+      const ironProc = makeProcess({
+        id: 'p_iron',
+        orderId: 'o_iron',
+        steps: ['getting_ironed'],
+        currentIndex: 0,
+        status: 'getting_ironed',
+        stages: {},
+      });
+      const rules: HelperAssignmentRules = {
+        [TAHIRUL_PHONE]: {
+          tagging: true,
+          getting_washed: true,
+          getting_dried: true,
+          getting_ironed: true,
+          packaging: true,
+        },
+      };
+
+      expect(isHelperEligible(ironProc, 'helper', false, TAHIRUL_PHONE, rules)).toBe(true);
+      const task = getTopEligibleTask(
+        [ironProc],
+        [{ id: 'o_iron', status: 'processing', userId: 'u1' }],
+        'h_tahirul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        TAHIRUL_PHONE,
+        false,
+        rules
+      );
+      expect(task).not.toBeNull();
+      expect(task?.orderId).toBe('o_iron');
+    });
+
+    it('blocks tagging (both process & unclaimed pickup_completed) for Abdul when tagging is toggled OFF', () => {
+      const rules: HelperAssignmentRules = {
+        [ABDUL_PHONE]: {
+          tagging: false,
+          getting_washed: true,
+          getting_dried: true,
+          getting_ironed: false,
+          packaging: true,
+        },
+      };
+
+      const tagProc = makeProcess({
+        id: 'p_tag',
+        orderId: 'o_tag',
+        steps: ['tagging'],
+        currentIndex: 0,
+        status: 'tagging',
+        stages: {},
+      });
+
+      expect(isHelperEligible(tagProc, 'helper', false, ABDUL_PHONE, rules)).toBe(false);
+
+      const task = getTopEligibleTask(
+        [tagProc],
+        [
+          { id: 'o_tag', status: 'processing', userId: 'u1' },
+          { id: 'o_unclaimed', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_fold' },
+        ],
+        'h_abdul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE,
+        false,
+        rules
+      );
+      expect(task).toBeNull();
+    });
+
+    it('matches 10-digit phone keys in helperRules and blocks packaging overflow when packaging is OFF', () => {
+      const digits10 = ABDUL_PHONE.slice(-10);
+      const rules: HelperAssignmentRules = {
+        [digits10]: {
+          tagging: true,
+          getting_washed: true,
+          getting_dried: true,
+          getting_ironed: false,
+          packaging: false,
+        },
+      };
+
+      const pkgs = ['pkg1', 'pkg2', 'pkg3', 'pkg4'].map((id, i) =>
+        makeProcess({
+          id,
+          orderId: id,
+          steps: ['packaging'],
+          currentIndex: 0,
+          status: 'packaging',
+          stages: { packaging: { queuedAt: (i + 1) * 1000 } as any },
+        })
+      );
+      const orders = pkgs.map(p => ({ id: p.orderId, status: 'processing', userId: 'u1' }));
+
+      const task = getTopEligibleTask(
+        pkgs,
+        orders,
+        'h_abdul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE,
+        false,
+        rules
+      );
+      expect(task).toBeNull();
+    });
+  });
+
+  describe('Client Washer Starvation Parity (Autopilot v2)', () => {
+    it('isWashRequiringService covers all wash-requiring service types and excludes ironing/shoe_clean', () => {
+      expect(isWashRequiringService('wash_fold')).toBe(true);
+      expect(isWashRequiringService('wash_iron')).toBe(true);
+      expect(isWashRequiringService('blanket_wash')).toBe(true);
+      expect(isWashRequiringService('blanket_wash_single')).toBe(true);
+      expect(isWashRequiringService('blanket_wash_double')).toBe(true);
+      expect(isWashRequiringService('premium_laundry')).toBe(true);
+      expect(isWashRequiringService('dry_clean')).toBe(true);
+
+      expect(isWashRequiringService('ironing')).toBe(false);
+      expect(isWashRequiringService('shoe_clean')).toBe(false);
+      expect(isWashRequiringService(null)).toBe(false);
+      expect(isWashRequiringService(undefined)).toBe(false);
+    });
+
+    it.each(['wash_fold', 'blanket_wash', 'premium_laundry'])(
+      'pulls a packaging helper for a %s tagging order when a washer is empty and no wash queue is waiting',
+      serviceType => {
+        const activePackaging = makeProcess({
+          id: 'p_pack',
+          orderId: 'o_pack',
+          steps: ['packaging'],
+          currentIndex: 0,
+          status: 'packaging',
+          stages: {
+            packaging: {
+              assignee: 'h_abdul',
+              startedAt: Date.now() - 30_000,
+            },
+          },
+        });
+
+        const orders = [
+          { id: 'o_pack', status: 'processing', userId: 'u1' },
+          { id: 'o_wash_new', status: 'pickup_completed', userId: 'u2', serviceType },
+        ];
+
+        const result = getTopEligibleTask(
+          [activePackaging],
+          orders,
+          'h_abdul',
+          'helper',
+          null,
+          { washers: 2, dryers: 2, ironingStations: 2 },
+          true,
+          ABDUL_PHONE
+        );
+
+        expect(result).not.toBeNull();
+        expect(result?.orderId).toBe('o_wash_new');
+        expect(result?.status).toBe('tagging');
+      }
+    );
+
+    it('pulls an ironing helper for a wash-requiring tagging order when washer is empty', () => {
+      const activeIroning = makeProcess({
+        id: 'p_iron',
+        orderId: 'o_iron',
+        steps: ['getting_ironed'],
+        currentIndex: 0,
+        status: 'getting_ironed',
+        stages: {
+          getting_ironed: {
+            assignee: 'h_samsul',
+            startedAt: Date.now() - 30_000,
+          },
+        },
+      });
+
+      const orders = [
+        { id: 'o_iron', status: 'processing', userId: 'u1' },
+        { id: 'o_wash_new', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_iron' },
+      ];
+
+      const result = getTopEligibleTask(
+        [activeIroning],
+        orders,
+        'h_samsul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        SAMSUL_PHONE
+      );
+
+      expect(result).not.toBeNull();
+      expect(result?.orderId).toBe('o_wash_new');
+      expect(result?.status).toBe('tagging');
+    });
+
+    it('respects helperRules when tagging is disabled for a packaging helper even if washer is empty', () => {
+      const activePackaging = makeProcess({
+        id: 'p_pack',
+        orderId: 'o_pack',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: {
+          packaging: {
+            assignee: 'h_abdul',
+            startedAt: Date.now() - 30_000,
+          },
+        },
+      });
+
+      const rules: HelperAssignmentRules = {
+        [ABDUL_PHONE]: {
+          tagging: false,
+          getting_washed: true,
+          getting_dried: true,
+          getting_ironed: false,
+          packaging: true,
+        },
+      };
+
+      const orders = [
+        { id: 'o_pack', status: 'processing', userId: 'u1' },
+        { id: 'o_wash_new', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_fold' },
+      ];
+
+      const result = getTopEligibleTask(
+        [activePackaging],
+        orders,
+        'h_abdul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE,
+        false,
+        rules
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('does NOT pull a packaging helper for ironing-only orders when washer is empty', () => {
+      const activePackaging = makeProcess({
+        id: 'p_pack',
+        orderId: 'o_pack',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: {
+          packaging: {
+            assignee: 'h_abdul',
+            startedAt: Date.now() - 30_000,
+          },
+        },
+      });
+
+      const orders = [
+        { id: 'o_pack', status: 'processing', userId: 'u1' },
+        { id: 'o_iron_only', status: 'pickup_completed', userId: 'u2', serviceType: 'ironing' },
+      ];
+
+      const result = getTopEligibleTask(
+        [activePackaging],
+        orders,
+        'h_abdul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE
+      );
+
+      expect(result).toBeNull();
+    });
+
+    it('does NOT pull a helper who is already doing tagging', () => {
+      const activeTagging = makeProcess({
+        id: 'p_tag_cur',
+        orderId: 'o_tag_cur',
+        steps: ['tagging', 'getting_washed', 'getting_dried', 'packaging'],
+        currentIndex: 0,
+        status: 'tagging',
+        stages: {
+          tagging: {
+            assignee: 'h_abdul',
+            startedAt: Date.now() - 30_000,
+          },
+        },
+      });
+
+      const orders = [
+        { id: 'o_tag_cur', status: 'processing', userId: 'u1', serviceType: 'wash_fold' },
+        { id: 'o_wash_new', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_fold' },
+      ];
+
+      const result = getTopEligibleTask(
+        [activeTagging],
+        orders,
+        'h_abdul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE
+      );
+
+      expect(result).toBeNull();
     });
   });
 });

@@ -1,5 +1,6 @@
 package com.nischayk3.spinzoops.overlay
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -11,6 +12,8 @@ import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -33,6 +36,22 @@ object SpinzoOverlayManager {
     private var pendingAcceptedOrderId: String? = null
     private var pendingIsDelivery: Boolean = false
     private var pendingTaskType: String? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val autoStopRunnable = Runnable {
+        Log.d("SpinzoOverlay", "45s auto-stop failsafe triggered — stopping alarm & vibration")
+        stopAudioAndVibration()
+    }
+
+    private fun formatStepLabel(raw: String): String {
+        return when (raw.trim().lowercase()) {
+            "getting_washed" -> "Washing"
+            "getting_dried" -> "Drying"
+            "getting_ironed" -> "Ironing"
+            "tagging" -> "Tagging"
+            "packaging" -> "Packaging"
+            else -> raw.trim().replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        }
+    }
 
     fun getPendingAcceptedOrder(): Map<String, Any>? {
         val id = pendingAcceptedOrderId ?: return null
@@ -63,11 +82,21 @@ object SpinzoOverlayManager {
         val orderId = data["orderId"] ?: ""
         val shortId = if (orderId.length >= 6) orderId.takeLast(6).uppercase() else orderId.uppercase()
         val taskType = data["taskType"] ?: "pickup"
-        val isDelivery = taskType.equals("delivery", ignoreCase = true)
+        val isDelivery = taskType.contains("delivery", ignoreCase = true)
         val isInstant = data["isInstant"].equals("true", ignoreCase = true)
-        val address = data["address"] ?: "Customer Address"
         val slot = data["slot"] ?: ""
         val stepName = data["stepName"] ?: ""
+        val formattedStep = if (stepName.isNotEmpty()) formatStepLabel(stepName) else ""
+        val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
+        val isIdleAlert = data["phase"] == "idle_alert"
+
+        val rawAddress = data["address"]
+        val address = when {
+            !rawAddress.isNullOrBlank() -> rawAddress
+            isIdleAlert -> "Check idle machine on store floor"
+            stepName.isNotEmpty() -> "Order #$shortId • Floor Task"
+            else -> "Customer Address"
+        }
 
         val tvTitle = overlayView.findViewById<TextView>(R.id.tvTitle)
         val tvSubtitle = overlayView.findViewById<TextView>(R.id.tvSubtitle)
@@ -76,23 +105,33 @@ object SpinzoOverlayManager {
         val btnAccept = overlayView.findViewById<Button>(R.id.btnAccept)
         val btnClose = overlayView.findViewById<TextView>(R.id.btnClose)
 
-        val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
-
         if (isNudge) {
-            val titleText = data["customerName"] ?: data["title"]
-            tvTitle.text = if (!titleText.isNullOrEmpty()) "⏰ $titleText" else if (stepName.isNotEmpty()) "⏰ $stepName" else "⏰ Operations Check"
-            tvSubtitle.text = "#$shortId • Status Check"
-            btnAccept.text = if (stepName.isNotEmpty()) stepName.uppercase() else "OPEN & RESPOND"
+            val titleText = data["customerName"]?.takeIf { it.isNotBlank() }
+                ?: data["title"]?.takeIf { it.isNotBlank() }
+            tvTitle.text = when {
+                !titleText.isNullOrEmpty() -> {
+                    if (titleText.startsWith("⚡") || titleText.startsWith("⏰")) titleText else "⏰ $titleText"
+                }
+                formattedStep.isNotEmpty() -> "⏰ $formattedStep"
+                else -> "⏰ Operations Check"
+            }
+            tvSubtitle.text = if (isIdleAlert) "Store Floor • Idle Machine" else "#$shortId • Status Check"
+            btnAccept.text = if (formattedStep.isNotEmpty()) formattedStep.uppercase() else "OPEN & RESPOND"
+        } else if (isDelivery) {
+            if (isInstant) {
+                tvTitle.text = "⚡ Express Delivery!"
+                tvSubtitle.text = "#$shortId • Express Delivery"
+            } else {
+                tvTitle.text = "📦 Delivery Assigned!"
+                tvSubtitle.text = "#$shortId • Delivery"
+            }
+            btnAccept.text = "ACCEPT ORDER"
         } else if (isInstant) {
             tvTitle.text = "⚡ Instant Pickup!"
             tvSubtitle.text = "#$shortId • Instant Pickup"
             btnAccept.text = "ACCEPT ORDER"
-        } else if (isDelivery) {
-            tvTitle.text = "📦 Delivery Assigned!"
-            tvSubtitle.text = "#$shortId • Delivery"
-            btnAccept.text = "ACCEPT ORDER"
-        } else if (stepName.isNotEmpty()) {
-            tvTitle.text = "⚙️ $stepName Assigned!"
+        } else if (formattedStep.isNotEmpty()) {
+            tvTitle.text = "⚙️ $formattedStep Assigned!"
             tvSubtitle.text = "#$shortId • Process Stage"
             btnAccept.text = "ACCEPT ORDER"
         } else {
@@ -241,9 +280,12 @@ object SpinzoOverlayManager {
         } catch (e: Exception) {
             Log.w("SpinzoOverlay", "Vibration error: ${e.message}")
         }
+
+        mainHandler.postDelayed(autoStopRunnable, 45_000L)
     }
 
     fun stopAudioAndVibration() {
+        mainHandler.removeCallbacks(autoStopRunnable)
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()
@@ -261,6 +303,11 @@ object SpinzoOverlayManager {
         val channelId = "order_assignment"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val soundUri = Uri.parse("android.resource://${context.packageName}/${R.raw.alarm}")
+            val audioAttrs = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
             val channel = NotificationChannel(
                 channelId,
                 "Order Assignments",
@@ -268,21 +315,58 @@ object SpinzoOverlayManager {
             ).apply {
                 description = "High-priority order assignment alerts"
                 enableVibration(true)
+                vibrationPattern = longArrayOf(0, 500, 250, 500, 250, 500)
                 enableLights(true)
                 lightColor = Color.rgb(153, 75, 255)
+                setSound(soundUri, audioAttrs)
+                setBypassDnd(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             nm.createNotificationChannel(channel)
         }
 
         val orderId = data["orderId"] ?: ""
         val shortId = if (orderId.length >= 6) orderId.takeLast(6).uppercase() else orderId.uppercase()
-        val isNudge = (data["taskType"] ?: "").equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
-        val notifTitle = if (isNudge) "⏰ Status Check: #$shortId" else "New Order Assigned: #$shortId"
-        val notifBody = data["address"] ?: (if (isNudge) "Tap to open and respond" else "Tap to accept order")
+        val taskType = data["taskType"] ?: "pickup"
+        val isDelivery = taskType.contains("delivery", ignoreCase = true)
+        val isInstant = data["isInstant"].equals("true", ignoreCase = true)
+        val stepName = data["stepName"] ?: ""
+        val formattedStep = if (stepName.isNotEmpty()) formatStepLabel(stepName) else ""
+        val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
+        val isIdleAlert = data["phase"] == "idle_alert"
+
+        val notifTitle = when {
+            isNudge && isIdleAlert -> {
+                val titleText = data["customerName"]?.takeIf { it.isNotBlank() }
+                    ?: data["title"]?.takeIf { it.isNotBlank() }
+                if (!titleText.isNullOrEmpty()) {
+                    if (titleText.startsWith("⚡") || titleText.startsWith("⏰")) titleText else "⏰ $titleText"
+                } else {
+                    "⏰ Idle Machine Alert"
+                }
+            }
+            isNudge -> "⏰ Status Check: #$shortId"
+            isDelivery && isInstant -> "⚡ Express Delivery: #$shortId"
+            isDelivery -> "📦 Delivery Assigned: #$shortId"
+            isInstant -> "⚡ Instant Pickup: #$shortId"
+            formattedStep.isNotEmpty() -> "⚙️ $formattedStep Assigned: #$shortId"
+            else -> "New Order Assigned: #$shortId"
+        }
+
+        val rawAddress = data["address"]
+        val notifBody = when {
+            !rawAddress.isNullOrBlank() -> rawAddress
+            isIdleAlert -> "Store Floor • Idle Machine — tap to respond"
+            isNudge -> "Tap to open and respond"
+            formattedStep.isNotEmpty() -> "Order #$shortId • $formattedStep — tap to accept"
+            else -> "Tap to accept order"
+        }
 
         val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             putExtra("acceptedOrderId", orderId)
+            putExtra("isDelivery", isDelivery)
+            putExtra("taskType", taskType)
         }
         val pendingIntent = PendingIntent.getActivity(
             context,
@@ -303,5 +387,21 @@ object SpinzoOverlayManager {
             .build()
 
         nm.notify((System.currentTimeMillis() % 10000).toInt(), notification)
+
+        try {
+            val appContext = context.applicationContext ?: context
+            val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (pm != null) {
+                @Suppress("DEPRECATION")
+                val fallbackWakeLock = pm.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "SpinzoOps:FallbackNotifWakeLock"
+                )
+                fallbackWakeLock.setReferenceCounted(false)
+                fallbackWakeLock.acquire(10_000L)
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "Fallback WakeLock error: ${e.message}")
+        }
     }
 }

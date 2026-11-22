@@ -232,7 +232,7 @@ export function announceStageTransition(orderId: string, stageName: string) {
   speak(`Order ${shortId} moved to ${stageName}`);
 }
 
-/** Alert for washing machine chemical additions (13m detergent, 21m softener, 35m complete) */
+/** Alert for washing machine chemical additions (3m detergent, 21m softener, 36m complete) */
 export function announceWasherMilestone(orderId: string, milestone: 'detergent' | 'softener' | 'complete') {
   const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
   if (milestone === 'detergent') {

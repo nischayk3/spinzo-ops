@@ -1,8 +1,11 @@
 import { OpsProcess, currentStep, isHelperDoingHandsOn } from './opsProcess';
 
+export type StageNudgeStep = 'getting_washed' | 'getting_dried' | 'tagging' | 'packaging';
+export type StageNudgePhase = 'accepted' | 'started' | 'hands_on';
+
 export interface StageNudgeRule {
-  step: 'getting_washed' | 'getting_dried';
-  phase: 'accepted' | 'started';
+  step: StageNudgeStep;
+  phase: StageNudgePhase;
   initialDelayMs: number;
   repeatIntervalMs: number;
   title: string;
@@ -25,10 +28,10 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_washed_started: {
     step: 'getting_washed',
     phase: 'started',
-    initialDelayMs: 35 * 60 * 1000, // 35 minutes wash cycle
+    initialDelayMs: 36 * 60 * 1000, // 36 minutes wash cycle
     repeatIntervalMs: 5 * 60 * 1000,  // 5 minutes snooze
     title: 'Washing Cycle Complete',
-    message: 'The 35-minute wash cycle has elapsed. Has the washing machine finished and been unloaded?',
+    message: 'The 36-minute wash cycle has elapsed. Has the washing machine finished and been unloaded?',
     snoozeLabel: 'Still running (+5m)',
     actionLabel: 'Complete & Unload',
   },
@@ -45,20 +48,40 @@ export const STAGE_NUDGE_RULES: Record<string, StageNudgeRule> = {
   getting_dried_started: {
     step: 'getting_dried',
     phase: 'started',
-    initialDelayMs: 45 * 60 * 1000, // 45 minutes dry cycle
+    initialDelayMs: 40 * 60 * 1000, // 40 minutes dry cycle
     repeatIntervalMs: 5 * 60 * 1000,  // 5 minutes snooze
     title: 'Drying Cycle Complete',
-    message: 'The 45-minute dry cycle has elapsed. Has the dryer finished and been unloaded?',
+    message: 'The 40-minute dry cycle has elapsed. Has the dryer finished and been unloaded?',
     snoozeLabel: 'Still running (+5m)',
     actionLabel: 'Complete & Unload',
+  },
+  tagging_hands_on: {
+    step: 'tagging',
+    phase: 'hands_on',
+    initialDelayMs: 10 * 60 * 1000, // 10 minutes initial reminder
+    repeatIntervalMs: 5 * 60 * 1000, // 5 minutes repeating reminder
+    title: 'Tagging Pending (10+ min)',
+    message: 'It has been 10+ minutes since this tagging task was assigned. Please finish tagging garments and submit to keep the washers fed.',
+    snoozeLabel: 'Still Tagging (+5m)',
+    actionLabel: 'Open Order',
+  },
+  packaging_hands_on: {
+    step: 'packaging',
+    phase: 'hands_on',
+    initialDelayMs: 10 * 60 * 1000, // 10 minutes initial reminder
+    repeatIntervalMs: 5 * 60 * 1000, // 5 minutes repeating reminder
+    title: 'Packaging Pending (10+ min)',
+    message: 'It has been 10+ minutes since this packaging task was assigned. Please finish packing and mark the order ready for delivery.',
+    snoozeLabel: 'Still Packaging (+5m)',
+    actionLabel: 'Open Order',
   },
 };
 
 export interface ActiveStageNudge {
   processId: string;
   orderId: string;
-  step: 'getting_washed' | 'getting_dried';
-  phase: 'accepted' | 'started';
+  step: StageNudgeStep;
+  phase: StageNudgePhase;
   title: string;
   message: string;
   snoozeLabel: string;
@@ -99,7 +122,14 @@ export function getProcessNudge(
   workingHelperIds?: Set<string>
 ): ActiveStageNudge | null {
   const cur = currentStep(process);
-  if (cur !== 'getting_washed' && cur !== 'getting_dried') return null;
+  if (
+    cur !== 'getting_washed' &&
+    cur !== 'getting_dried' &&
+    cur !== 'tagging' &&
+    cur !== 'packaging'
+  ) {
+    return null;
+  }
 
   const stage = process.stages?.[cur] as any;
   if (!stage) return null;
@@ -117,6 +147,43 @@ export function getProcessNudge(
 
   // If already completed, no nudge
   if (stage.completedAt) return null;
+
+  // Hands-on stages (tagging & packaging): 10m initial, 5m repeat anchored on assignedAt || acceptedAt
+  if (cur === 'tagging' || cur === 'packaging') {
+    const anchorTs = stage.assignedAt || stage.acceptedAt;
+    if (!anchorTs) return null;
+
+    const ruleKey = `${cur}_hands_on`;
+    const rule = STAGE_NUDGE_RULES[ruleKey];
+    if (!rule) return null;
+
+    const anchorMs = toMillis(anchorTs);
+    if (!anchorMs) return null;
+
+    const nudgeKey = `${process.id || process.orderId}_${cur}_hands_on`;
+    const lastSnoozeMs = toMillis(stage.nudge?.hands_on?.lastSnoozedAt);
+    const localSnoozeMs = localSnoozeTimestamps.get(nudgeKey) || 0;
+    const effectiveSnoozeMs = Math.max(lastSnoozeMs, localSnoozeMs);
+
+    const isDue = effectiveSnoozeMs
+      ? now >= effectiveSnoozeMs + rule.repeatIntervalMs
+      : now >= anchorMs + rule.initialDelayMs;
+
+    if (isDue) {
+      return {
+        processId: process.id,
+        orderId: process.orderId,
+        step: cur,
+        phase: 'hands_on',
+        title: rule.title,
+        message: rule.message,
+        snoozeLabel: rule.snoozeLabel,
+        actionLabel: rule.actionLabel,
+        elapsedMinutes: Math.max(1, Math.round((now - anchorMs) / 60000)),
+      };
+    }
+    return null;
+  }
 
   if (stage.startedAt) {
     const ruleKey = `${cur}_started`;
@@ -190,8 +257,9 @@ export function getProcessNudge(
 }
 
 /**
- * Returns the first active nudge among all processes belonging to a user (or all processes for supervisors).
- * Completely silenced if the helper is actively doing hands-on work (tagging, ironing, packaging).
+ * Returns the first active nudge among all processes belonging to a user.
+ * Machine nudges are silenced if the helper is actively doing hands-on work (tagging, ironing, packaging),
+ * while the helper's own tagging/packaging 10m+ reminder is exempt from suppression.
  */
 export function getActiveStageNudge(
   processes: OpsProcess[],
@@ -214,14 +282,22 @@ export function getActiveStageNudge(
     return null;
   }
 
-  // If helper is actively busy with hands-on work, NEVER disturb them with reminder alarms
-  if (isHelperDoingHandsOn(processes, uid)) {
-    return null;
-  }
+  const doingHandsOn = isHelperDoingHandsOn(processes, uid);
 
   for (const process of processes) {
     const nudge = getProcessNudge(process, uid, now, role, options?.workingHelperIds);
-    if (nudge) return nudge;
+    if (!nudge) continue;
+
+    // If helper is actively busy with hands-on work, silence machine/other reminders,
+    // but exempt the helper's own tagging/packaging 10m+ reminder.
+    if (doingHandsOn) {
+      const isOwnHandsOnNudge =
+        (nudge.step === 'tagging' || nudge.step === 'packaging') &&
+        process.stages?.[nudge.step]?.assignee === uid;
+      if (!isOwnHandsOnNudge) continue;
+    }
+
+    return nudge;
   }
   return null;
 }

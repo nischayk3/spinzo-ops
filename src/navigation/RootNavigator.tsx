@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { useAuthStore } from '../store/authStore';
-import { useOpsStaffStore } from '../store/opsStaffStore';
+import { useOpsStaffStore, syncFCMToken } from '../store/opsStaffStore';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
@@ -170,6 +170,10 @@ export function RootNavigator() {
     const sub = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         checkPermissionsStatus();
+        const currentUid = useAuthStore.getState().user?.id;
+        if (currentUid) {
+          void syncFCMToken(currentUid);
+        }
       }
     });
     return () => sub.remove();
@@ -204,9 +208,13 @@ export function RootNavigator() {
         if (pending && pending.orderId) {
           SpinzoOverlay.clearPendingAcceptedOrder();
           console.log('[SpinzoOverlay] Processing pending accept from native overlay:', pending);
-          if (pending.taskType === 'stage_nudge') {
-            // Stage nudge was tapped to bring app forward; StageNudgeModal will handle the response
-            console.log('[SpinzoOverlay] Stage nudge opened app for #', pending.orderId);
+          if (
+            pending.taskType === 'stage_nudge' ||
+            pending.taskType === 'step' ||
+            pending.taskType === 'helper_step'
+          ) {
+            // Helper step or stage nudge overlay opened the app; the corresponding React modal handles it
+            console.log('[SpinzoOverlay] Helper/nudge overlay opened app for #', pending.orderId, pending.taskType);
           } else {
             await acceptTask(pending.orderId, pending.isDelivery);
           }

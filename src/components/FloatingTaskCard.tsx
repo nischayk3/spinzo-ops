@@ -76,12 +76,16 @@ export const FloatingTaskCard = ({ process, processes, onComplete, onPressCard }
 
   let milestoneBadge: { text: string; bg: string; color: string } | null = null;
   if (step === 'getting_washed') {
-    if (elapsedSec >= 2100) {
+    if (elapsedSec >= 2160) {
       milestoneBadge = { text: 'Cycle Done • Unload', bg: 'bg-green-100 border-green-300', color: 'text-green-800' };
     } else if (elapsedSec >= 1260 && !stage.softenerAddedAt) {
       milestoneBadge = { text: '🌸 Add Softener', bg: 'bg-purple-100 border-purple-300', color: 'text-purple-800' };
-    } else if (elapsedSec >= 780 && !stage.detergentAddedAt) {
+    } else if (elapsedSec >= 180 && !stage.detergentAddedAt) {
       milestoneBadge = { text: '⚠️ Add Detergent', bg: 'bg-amber-100 border-amber-300', color: 'text-amber-800' };
+    }
+  } else if (step === 'getting_dried') {
+    if (elapsedSec >= 2400) {
+      milestoneBadge = { text: 'Cycle Done • Unload', bg: 'bg-green-100 border-green-300', color: 'text-green-800' };
     }
   }
 

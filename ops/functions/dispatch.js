@@ -26,13 +26,41 @@ function isStaffAvailableForAutoAssign(staff) {
 }
 
 /**
- * Pick the least-busy on-shift rider from eligible candidates.
- * @param {Array<{uid: string, phone?: string, shiftStartAt?: number, onShift?: boolean, onBreak?: boolean, attendanceStatus?: string}>} candidates
+ * Great-circle Haversine distance in meters between two { lat, lng } points.
+ * Returns Infinity if either point lacks valid numeric coordinates.
+ */
+function haversineMeters(a, b) {
+  if (!a || !b) return Infinity;
+  const lat1 = Number(a.lat ?? a.latitude);
+  const lng1 = Number(a.lng ?? a.longitude);
+  const lat2 = Number(b.lat ?? b.latitude);
+  const lng2 = Number(b.lng ?? b.longitude);
+  if (!Number.isFinite(lat1) || !Number.isFinite(lng1) || !Number.isFinite(lat2) || !Number.isFinite(lng2)) {
+    return Infinity;
+  }
+  const R = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const sinLat = Math.sin(dLat / 2);
+  const sinLng = Math.sin(dLng / 2);
+  const h = sinLat * sinLat + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * sinLng * sinLng;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/**
+ * Pick the best on-shift rider from eligible candidates.
+ * When `orderGeo` ({ lat, lng }) is provided, scores riders using spatial-batching
+ * (load penalty + capacity overflow + proximity + 1.2km cluster batching bonus).
+ * When `orderGeo` is null/omitted, falls back to least-busy + earliest shift start.
+ * @param {Array<{uid: string, phone?: string, shiftStartAt?: number, onShift?: boolean, onBreak?: boolean, attendanceStatus?: string, lastLocation?: object, location?: object}>} candidates
  * @param {Record<string, number>} taskCounts - pending task count keyed by uid
  * @param {Record<string, string>} rosterPhones - config/opsStaff.phones map (full E.164 -> role)
+ * @param {{ lat?: number, lng?: number, latitude?: number, longitude?: number } | null} [orderGeo]
+ * @param {Record<string, Array<{ lat?: number, lng?: number, latitude?: number, longitude?: number }>> | null} [riderStopCoords]
  * @returns {string|null} selected uid, or null if none eligible
  */
-function pickRider(candidates, taskCounts, rosterPhones) {
+function pickRider(candidates, taskCounts, rosterPhones, orderGeo = null, riderStopCoords = null) {
   const roster = rosterPhones || {};
   const eligible = candidates.filter((c) => {
     if (!c || c.onShift === false || c.onBreak === true) return false;
@@ -47,13 +75,62 @@ function pickRider(candidates, taskCounts, rosterPhones) {
     return phone !== '' && roster[phone] === 'rider';
   });
   if (eligible.length === 0) return null;
-  eligible.sort((a, b) => {
-    const ta = taskCounts[a.uid] || 0;
-    const tb = taskCounts[b.uid] || 0;
-    if (ta !== tb) return ta - tb;
-    return (a.shiftStartAt || 0) - (b.shiftStartAt || 0);
+
+  const hasOrderGeo = Boolean(
+    orderGeo &&
+    Number.isFinite(Number(orderGeo.lat ?? orderGeo.latitude)) &&
+    Number.isFinite(Number(orderGeo.lng ?? orderGeo.longitude))
+  );
+
+  if (!hasOrderGeo) {
+    eligible.sort((a, b) => {
+      const ta = taskCounts[a.uid] || 0;
+      const tb = taskCounts[b.uid] || 0;
+      if (ta !== tb) return ta - tb;
+      return (a.shiftStartAt || 0) - (b.shiftStartAt || 0);
+    });
+    return eligible[0].uid;
+  }
+
+  const scoreFor = (c) => {
+    const taskCount = taskCounts[c.uid] || 0;
+    const stops = (riderStopCoords && Array.isArray(riderStopCoords[c.uid])) ? riderStopCoords[c.uid] : [];
+    let minStopDist = Infinity;
+    for (const s of stops) {
+      const d = haversineMeters(orderGeo, s);
+      if (d < minStopDist) minStopDist = d;
+    }
+    let minDistMeters = minStopDist;
+    const riderLoc = c.lastLocation || c.location || null;
+    if (riderLoc) {
+      const locDist = haversineMeters(orderGeo, riderLoc);
+      if (locDist < minDistMeters) minDistMeters = locDist;
+    }
+    const proximityCost = Number.isFinite(minDistMeters) ? minDistMeters : 10000;
+    let score = taskCount * 1800 + proximityCost;
+    if (taskCount >= 5) {
+      score += 10000;
+    }
+    if (minStopDist <= 1200 && taskCount < 5) {
+      score -= 1500;
+    }
+    return score;
+  };
+
+  const scored = eligible.map((c) => ({
+    candidate: c,
+    score: scoreFor(c),
+    taskCount: taskCounts[c.uid] || 0,
+    shiftStartAt: c.shiftStartAt || 0,
+  }));
+
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return a.score - b.score;
+    if (a.taskCount !== b.taskCount) return a.taskCount - b.taskCount;
+    return a.shiftStartAt - b.shiftStartAt;
   });
-  return eligible[0].uid;
+
+  return scored[0].candidate.uid;
 }
 
 /**
@@ -411,6 +488,27 @@ function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
 }
 
 /**
+ * Check if a helper is allowed to be auto-assigned to a given processing stage,
+ * consulting dynamic `config/helperAssignmentRules` overrides first and falling back
+ * to default eligibility (ironing restricted to IRONING_PRIORITY_PHONES, all other stages allowed).
+ * @param {string} phone
+ * @param {string} stage - 'tagging' | 'getting_washed' | 'getting_dried' | 'getting_ironed' | 'packaging'
+ * @param {Record<string, Record<string, boolean>> | null | undefined} helperRules
+ * @returns {boolean}
+ */
+function isHelperAllowedForStage(phone, stage, helperRules) {
+  if (helperRules && typeof helperRules === 'object' && phone) {
+    const e164 = normalizePhone(phone);
+    const last10 = String(phone).replace(/\D/g, '').slice(-10);
+    const rule = (e164 && helperRules[e164]) || (last10 && helperRules[last10]) || helperRules[phone];
+    if (rule && typeof rule[stage] === 'boolean') {
+      return rule[stage];
+    }
+  }
+  return stage === 'getting_ironed' ? isIroningEligible(phone) : true;
+}
+
+/**
  * Compute real-time helper workload and task breakdown from live processes.
  * - handsOn: active uncompleted tagging, ironing, or packaging task (capacity = 1)
  * - machineLoad: assigned washing/drying task awaiting 'Start' (capacity = 1)
@@ -510,6 +608,20 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
   return null;
 }
 
+const WASH_REQUIRING_SERVICES = new Set([
+  'wash_fold',
+  'wash_iron',
+  'blanket_wash',
+  'blanket_wash_single',
+  'blanket_wash_double',
+  'premium_laundry',
+  'dry_clean',
+]);
+
+function isWashRequiringService(serviceType) {
+  return typeof serviceType === 'string' && WASH_REQUIRING_SERVICES.has(serviceType);
+}
+
 /**
  * Deterministic, balanced helper selection for store operations stages:
  * - Tagging: Tier 1 Primary floor helpers (Abdul & Tahirul, least loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if free & no iron) -> else QUEUE!
@@ -518,9 +630,12 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
  * - Ironing: 2 Stations max. Station 1 dedicated to Samsul; Station 2 to Abdur/Abdul on overflow. Tahirul blocked. If busy -> QUEUE!
  * - Packaging: Tier 1 Primary floor helpers (Abdul & Tahirul, least loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if free & no iron) -> else QUEUE!
  */
-function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}) {
+function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}, helperRules = null) {
   const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
-  const helpers = (onShiftHelpers || []).filter(h => isStaffAvailableForAutoAssign(h));
+  const effectiveRules = helperRules || (options && options.helperRules) || null;
+  const helpers = (onShiftHelpers || []).filter(
+    (h) => isStaffAvailableForAutoAssign(h) && isHelperAllowedForStage(h.phone, stage, effectiveRules)
+  );
   if (helpers.length === 0) {
     return { ok: false, error: 'no_helpers_on_shift', shouldQueue: true };
   }
@@ -576,6 +691,59 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     }
     if (freeAbdur) {
       return { ok: true, helper: freeAbdur };
+    }
+
+    // Drum-Buffer-Rope Washer Starvation Override:
+    // If all eligible helpers are hands-on busy, this order requires a washer,
+    // a washer is empty, AND no getting_washed orders are already waiting in queue,
+    // temporarily pull a packaging helper (first) or ironing helper (second) to tag & feed the washer.
+    if (isWashRequiringService(options?.serviceType)) {
+      const maxWashers = (resources && resources.washers) || 2;
+      const occupiedWashers = getOccupiedMachines('getting_washed', liveProcesses);
+      const hasWaitingWashQueue = (liveProcesses || []).some((p) => {
+        const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+        if (cur !== 'getting_washed' || p.status === 'done' || p.status === 'cancelled') return false;
+        const stg = p.stages && p.stages.getting_washed;
+        if (stg && stg.completedAt) return false;
+        return !stg || !stg.startedAt;
+      });
+
+      if (occupiedWashers.length < maxWashers && !hasWaitingWashQueue) {
+        const activeStepsForHelper = (uid) => {
+          const active = new Set();
+          (liveProcesses || []).forEach((p) => {
+            const cur = p.steps ? p.steps[p.currentIndex] : p.status;
+            if (!cur || p.status === 'done' || p.status === 'cancelled') return;
+            const stg = p.stages && p.stages[cur];
+            if (stg && stg.assignee === uid && !stg.completedAt) {
+              if (cur === 'tagging' || cur === 'getting_ironed' || cur === 'packaging') {
+                active.add(cur);
+              }
+            }
+          });
+          return active;
+        };
+
+        const pullableHelpers = helpers.filter((h) => {
+          if ((workloads[h.uid]?.machineLoad || 0) > 0) return false;
+          const active = activeStepsForHelper(h.uid);
+          return !active.has('tagging');
+        });
+
+        const packagingCandidates = sortByLeastLoaded(
+          pullableHelpers.filter((h) => activeStepsForHelper(h.uid).has('packaging'))
+        );
+        if (packagingCandidates.length > 0) {
+          return { ok: true, helper: packagingCandidates[0], isStarvationOverride: true };
+        }
+
+        const ironingCandidates = sortByLeastLoaded(
+          pullableHelpers.filter((h) => activeStepsForHelper(h.uid).has('getting_ironed'))
+        );
+        if (ironingCandidates.length > 0) {
+          return { ok: true, helper: ironingCandidates[0], isStarvationOverride: true };
+        }
+      }
     }
 
     // ALL helpers busy with hands-on tasks -> MUST QUEUE! (Never overload anyone)
@@ -701,7 +869,7 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
     if (availableStation) {
       const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
       const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
-      const candidate = freeAbdur || freeAbdul || sortByLeastLoaded(freeHelpers.filter(h => isIroningEligible(h.phone)))[0];
+      const candidate = freeAbdur || freeAbdul || sortByLeastLoaded(freeHelpers.filter(h => isHelperAllowedForStage(h.phone, 'getting_ironed', effectiveRules)))[0];
       if (candidate) {
         return { ok: true, helper: candidate, machineName: availableStation, isMicroTask: false };
       }
@@ -1067,8 +1235,8 @@ function isMachineNudgeDue(stageData, step, nowMs = Date.now()) {
 /**
  * Checks if a started wash or dry machine stage has finished running
  * and is waiting to be unloaded (not yet completed).
- * - Washing nominal cycle: 35 minutes
- * - Drying nominal cycle: 45 minutes
+ * - Washing nominal cycle: 36 minutes
+ * - Drying nominal cycle: 40 minutes
  * - Repeat/snooze suppression: 5 minutes
  * 
  * @param {object} stageData
@@ -1089,8 +1257,8 @@ function isMachineUnloadNudgeDue(stageData, step, nowMs = Date.now()) {
     : 0;
   if (!startedMs) return false;
 
-  // Cycle durations: 35m for washing, 45m for drying
-  const CYCLE_MS = step === 'getting_washed' ? 35 * 60 * 1000 : 45 * 60 * 1000;
+  // Cycle durations: 36m for washing, 40m for drying
+  const CYCLE_MS = step === 'getting_washed' ? 36 * 60 * 1000 : 40 * 60 * 1000;
   const REPEAT_MS = 5 * 60 * 1000; // 5m repeat interval
 
   // Check last snooze timestamp
@@ -1117,8 +1285,43 @@ function isMachineUnloadNudgeDue(stageData, step, nowMs = Date.now()) {
 }
 
 /**
+ * Determines whether a hands-on stage (tagging / packaging) reminder is due.
+ * Fires 10 minutes after assignment/acceptance, then repeats every 5 minutes
+ * until completed, respecting snooze (`snoozedUntil` / `lastSnoozedAt`) and `lastSentAt`.
+ * @param {object} stageData
+ * @param {'tagging' | 'packaging'} step
+ * @param {number} nowMs
+ * @returns {boolean}
+ */
+function isHandsOnStageNudgeDue(stageData, step, nowMs = Date.now()) {
+  if (!stageData || !stageData.assignee) return false;
+  if (step !== 'tagging' && step !== 'packaging') return false;
+  if (stageData.completedAt) return false;
+
+  const toMs = (t) => (!t ? 0 : typeof t.toMillis === 'function' ? t.toMillis() : typeof t === 'number' ? t : new Date(t).getTime());
+  const anchorMs = toMs(stageData.assignedAt || stageData.acceptedAt);
+  if (!anchorMs) return false;
+
+  const DELAY_MS = 10 * 60 * 1000; // 10 minutes initial grace
+  const REPEAT_MS = 5 * 60 * 1000; // 5 minutes repeat interval
+
+  const snoozedUntilMs = toMs(stageData.nudge?.hands_on?.snoozedUntil);
+  if (snoozedUntilMs > 0 && nowMs < snoozedUntilMs) return false;
+
+  const lastSnoozedMs = toMs(stageData.nudge?.hands_on?.lastSnoozedAt);
+  const lastSentMs = toMs(stageData.nudge?.hands_on?.lastSentAt);
+  const effectiveWindowMs = Math.max(lastSnoozedMs, lastSentMs);
+
+  if (effectiveWindowMs > 0) {
+    return nowMs >= effectiveWindowMs + REPEAT_MS;
+  }
+
+  return nowMs >= anchorMs + DELAY_MS;
+}
+
+/**
  * Returns which washer chemical milestone is due for a running wash stage, or null.
- * Mirrors client lifecycleNotifications: detergent @13m, softener @21m (softener wins if both due).
+ * Mirrors client lifecycleNotifications: detergent @3m, softener @21m (softener wins if both due).
  * Re-sends every 2 minutes (via nudge.<chemical>.lastSentAt) until the chemical is marked added.
  */
 function washerChemicalNudgeDue(stageData, nowMs = Date.now()) {
@@ -1130,7 +1333,7 @@ function washerChemicalNudgeDue(stageData, nowMs = Date.now()) {
   const REPEAT_MS = 2 * 60 * 1000;
   const milestones = [
     { chemical: 'softener', atMs: 21 * 60 * 1000, addedAt: stageData.softenerAddedAt },
-    { chemical: 'detergent', atMs: 13 * 60 * 1000, addedAt: stageData.detergentAddedAt },
+    { chemical: 'detergent', atMs: 3 * 60 * 1000, addedAt: stageData.detergentAddedAt },
   ];
   for (const m of milestones) {
     if (m.addedAt || nowMs < startedMs + m.atMs) continue;
@@ -1143,6 +1346,7 @@ function washerChemicalNudgeDue(stageData, nowMs = Date.now()) {
 module.exports = {
   isMachineNudgeDue,
   isMachineUnloadNudgeDue,
+  isHandsOnStageNudgeDue,
   washerChemicalNudgeDue,
   getTodayDateString,
   normalizeSlotDateString,
@@ -1154,6 +1358,7 @@ module.exports = {
   applyExpressPricing,
   EXPRESS_MULTIPLIER,
   checkPaymentGate,
+  haversineMeters,
   pickRider,
   normalizePhone,
   pickupGuard,
@@ -1175,10 +1380,12 @@ module.exports = {
   ABDUR_PHONE,
   IRONING_PRIORITY_PHONES,
   isIroningEligible,
+  isHelperAllowedForStage,
   isHelperHandsOnBusy,
   getRunningMachines,
   getOccupiedMachines,
   allocateMachineName,
+  isWashRequiringService,
   selectHelperForStage,
   LOAD_BASED_SERVICES,
   MACHINE_CAPACITY_KG,

@@ -1,5 +1,6 @@
-import { OpsProcess, currentStep, isDone, isHelperBusy, isMachineStep, isActivelyLoadingMachine, isHelperDoingHandsOn } from './opsProcess';
+import { OpsProcess, currentStep, isDone, holdsBusyStage, isHelperBusy, isMachineStep, isActivelyLoadingMachine, isHelperDoingHandsOn } from './opsProcess';
 import { StoreResources } from '../store/storeResourcesStore';
+import type { HelperAssignmentRules, HelperStageKey, HelperStageRuleMap } from '../store/helperRulesStore';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,43 @@ export function isIroningEligiblePhone(phone?: string | null): boolean {
   if (!phone) return false;
   const norm = normalizePhone(phone);
   return IRONING_PRIORITY_PHONES.some(p => normalizePhone(p) === norm);
+}
+
+const RULE_STAGES = new Set<HelperStageKey>([
+  'tagging',
+  'getting_washed',
+  'getting_dried',
+  'getting_ironed',
+  'packaging',
+]);
+
+export function DEFAULT_HELPER_STAGE_RULES(phone?: string | null): HelperStageRuleMap {
+  return {
+    tagging: true,
+    getting_washed: true,
+    getting_dried: true,
+    getting_ironed: isIroningEligiblePhone(phone),
+    packaging: true,
+  };
+}
+
+export function isHelperAllowedForStage(
+  phone: string | null | undefined,
+  stage: string,
+  rules?: HelperAssignmentRules | null
+): boolean {
+  if (!RULE_STAGES.has(stage as HelperStageKey)) return true;
+
+  const norm = normalizePhone(phone);
+  if (rules && norm) {
+    const digits10 = norm.replace(/\D/g, '').slice(-10);
+    const ruleMap = rules[norm] || (digits10 ? rules[digits10] : undefined) || (phone ? rules[phone] : undefined);
+    if (ruleMap && typeof ruleMap[stage as HelperStageKey] === 'boolean') {
+      return ruleMap[stage as HelperStageKey];
+    }
+  }
+
+  return stage === 'getting_ironed' ? isIroningEligiblePhone(phone) : true;
 }
 
 // ─── Machine Capacity & Stage Buffers ──────────────────────────────────────────
@@ -105,25 +143,67 @@ function isOrderTerminal(status?: string): boolean {
   return status === 'cancelled' || status === 'ready' || status === 'out_for_delivery' || status === 'delivered';
 }
 
+const WASH_REQUIRING_SERVICES = new Set([
+  'wash_fold',
+  'wash_iron',
+  'blanket_wash',
+  'blanket_wash_single',
+  'blanket_wash_double',
+  'premium_laundry',
+  'dry_clean',
+]);
+
+/** Check if a service type requires a washing machine cycle. */
+export function isWashRequiringService(serviceType?: string | null): boolean {
+  if (!serviceType) return false;
+  const norm = String(serviceType).trim().toLowerCase();
+  if (WASH_REQUIRING_SERVICES.has(norm)) return true;
+  if (norm.includes('wash') || norm.includes('blanket')) return true;
+  return false;
+}
+
 /** Check if an order or ops_process requires a washing machine cycle. */
 export function isWashDependent(task: OpsProcess | null, orders: any[] = []): boolean {
   if (!task) return false;
-  if (Array.isArray(task.steps) && task.steps.length > 0) {
-    return task.steps.includes('getting_washed');
+  if (Array.isArray(task.steps) && task.steps.includes('getting_washed')) {
+    return true;
   }
-  const st = String((task as any).serviceType || '').toLowerCase();
+  // If full pipeline steps are populated (beyond just ['tagging']) and getting_washed is absent, it doesn't wash.
+  if (Array.isArray(task.steps) && task.steps.length > 1) {
+    return false;
+  }
+  const st = String((task as any).serviceType || '').trim();
   if (st) {
-    if (st.includes('ironing') && !st.includes('wash')) return false;
-    if (st === 'shoe_clean' || st === 'dry_clean') return false;
-    return true; // wash_fold, wash_iron, premium_laundry, blanket_wash
+    return isWashRequiringService(st);
   }
   const o = orders.find(x => x.id === task.orderId || x.id === task.id);
   if (o) {
-    const ost = String(o.serviceType || '').toLowerCase();
-    if (ost === 'ironing' || ost === 'shoe_clean' || ost === 'dry_clean') return false;
-    return true;
+    const ost = String(o.serviceType || '').trim();
+    if (ost) {
+      return isWashRequiringService(ost);
+    }
+    if (Array.isArray(o.items) && o.items.length > 0) {
+      const hasTypedItem = o.items.some((it: any) => !!(it?.serviceType || it?.serviceId));
+      if (hasTypedItem) {
+        return o.items.some((it: any) => isWashRequiringService(it?.serviceType || it?.serviceId));
+      }
+    }
   }
   return true;
+}
+
+/**
+ * True if the helper is currently busy ONLY in interruptible hands-on stages
+ * (`packaging` or `getting_ironed`), and NOT already doing `tagging` or loading a machine.
+ */
+function isHelperOccupiedOnlyInInterruptibleStage(processes: OpsProcess[], uid: string): boolean {
+  const busyStages = processes
+    .filter(p => holdsBusyStage(p, uid))
+    .map(p => currentStep(p));
+  return (
+    busyStages.length > 0 &&
+    busyStages.every(step => step === 'packaging' || step === 'getting_ironed')
+  );
 }
 
 function getProcessTimestamp(p: OpsProcess): number {
@@ -190,7 +270,8 @@ export function isHelperEligible(
   process: OpsProcess,
   role: string,
   machineAtCapacity: boolean,
-  phone?: string | null
+  phone?: string | null,
+  helperRules?: HelperAssignmentRules | null
 ): boolean {
   if (isDone(process) || process.status === 'cancelled') return false;
 
@@ -203,11 +284,9 @@ export function isHelperEligible(
   // The machine or buffer for this step is full store-wide → don't offer to anyone
   if (machineAtCapacity) return false;
 
-  // Ironing Orders: Strictly gated to authorized specialists (Samsul & Abdur)
-  // New helper and other unauthorized phone numbers are blocked.
-  if (cur === 'getting_ironed') {
-    if (role === 'admin') return true;
-    if (!phone || !isIroningEligiblePhone(phone)) return false;
+  // Dynamic supervisor assignment rules (falls back to ironing specialist gate when unset)
+  if (role !== 'admin' && !isHelperAllowedForStage(phone, cur, helperRules)) {
+    return false;
   }
 
   return true;
@@ -227,7 +306,7 @@ export function isHelperEligible(
  *   - Machine Priority: Washer and Dryer never sit idle.
  *   - Packaging Overflow: If > 3 packaging orders pending, 4th triggers instant assignment of oldest packaging order.
  *   - Machine Buffers: 2 pending orders per active washer, 2 per active iron station.
- *   - Ironing Priority: Priority 1 Samsul (+916369768237), Priority 2 Abdur (+917559105832), block New Helper.
+ *   - Ironing Priority: Priority 1 Samsul (+916369768237), Priority 2 Abdur (+917559105832), block New Helper (unless enabled in helperRules).
  */
 export function getTopEligibleTask(
   processes: OpsProcess[],
@@ -238,17 +317,21 @@ export function getTopEligibleTask(
   resources: StoreResources = { washers: 1, dryers: 1, ironingStations: 1 },
   onShift = true,
   phone?: string | null,
-  onBreak = false
+  onBreak = false,
+  helperRules?: HelperAssignmentRules | null
 ): OpsProcess | null {
   // Ignore processes whose order is already finished/cancelled.
   const live = processes.filter(p => !isOrderTerminal(orders.find(o => o.id === p.orderId)?.status));
 
-  // ── 0a. Human supervisor-assigned tasks ALWAYS surface (even on break) ──
+  // ✅ SHIFT GATE: off-shift helpers must NEVER be woken (even by manual supervisor pushes)
+  if (!onShift) return null;
+
+  // ── 0a. Human supervisor-assigned tasks ALWAYS surface while on shift (even on break) ──
   const supPushed = live.find(p => isSupervisorPushedToMe(p, uid));
   if (supPushed) return { ...supPushed, isPushedToMe: true };
 
-  // ✅ SHIFT & BREAK GATE: off-shift or on-break helpers must NOT receive system_auto or pool offers
-  if (!onShift || onBreak) return null;
+  // ✅ BREAK GATE: on-break helpers must NOT receive system_auto or pool offers
+  if (onBreak) return null;
 
   // ── 0b. System-auto assigned tasks surface when helper is on shift and not on break ──
   const pushed = live.find(p => isPushedToMe(p, uid));
@@ -262,31 +345,45 @@ export function getTopEligibleTask(
   const isWasherStarving = runningWashers < maxWashers && waitingToWash === 0;
   const isWashBufferLow = waitingToWash < 2;
 
+  const canDoTagging = role === 'admin' || isHelperAllowedForStage(phone, 'tagging', helperRules);
+  const canDoPackaging = role === 'admin' || isHelperAllowedForStage(phone, 'packaging', helperRules);
+
   // Check for unclaimed orders that need tagging
   const claimedOrderIds = new Set(processes.map(p => p.orderId));
-  const o = orders.find(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id));
-  const unclaimedTaggingProcess: OpsProcess | null = o ? {
-    id: o.id,
-    orderId: o.id,
-    userId: o.userId,
-    vendorId: o.vendorId,
-    steps: ['tagging'],
-    currentIndex: 0,
-    status: 'tagging',
-    stages: {},
-    garments: { labels: [], registered: [] },
-  } : null;
+  const unclaimedTaggingProcesses: OpsProcess[] = canDoTagging
+    ? orders
+        .filter(x => x.status === 'pickup_completed' && !claimedOrderIds.has(x.id))
+        .map(o => ({
+          id: o.id,
+          orderId: o.id,
+          userId: o.userId,
+          vendorId: o.vendorId,
+          serviceType: o.serviceType,
+          steps: ['tagging'],
+          currentIndex: 0,
+          status: 'tagging',
+          stages: {},
+          garments: { labels: [], registered: [] },
+        }))
+    : [];
 
   // ── 1. Filter eligible processes (with global machine capacity and buffer checks) ──
   const eligible = live.filter(p => {
     const cur = currentStep(p);
     const atCapacity = !!cur && !p.stages[cur]?.startedAt && isMachineOrBufferAtCapacity(live, cur, resources);
-    return isHelperEligible(p, role, atCapacity, phone);
+    return isHelperEligible(p, role, atCapacity, phone, helperRules);
   });
 
-  const unassignedTaggingProcess = eligible.find(p => currentStep(p) === 'tagging') || null;
-  const candidateTaggingTask: OpsProcess | null = unassignedTaggingProcess || unclaimedTaggingProcess;
-  const taggingFeedsWasher = candidateTaggingTask ? isWashDependent(candidateTaggingTask, orders) : false;
+  const unassignedTaggingProcesses = eligible.filter(p => currentStep(p) === 'tagging');
+  const allTaggingCandidates: OpsProcess[] = canDoTagging
+    ? [...unassignedTaggingProcesses, ...unclaimedTaggingProcesses]
+    : [];
+  const washFeedingTaggingTask = allTaggingCandidates.find(p => isWashDependent(p, orders)) || null;
+  const candidateTaggingTask: OpsProcess | null =
+    (isWasherStarving || isWashBufferLow)
+      ? (washFeedingTaggingTask || allTaggingCandidates[0] || null)
+      : (allTaggingCandidates[0] || null);
+  const taggingFeedsWasher = !!candidateTaggingTask && isWashDependent(candidateTaggingTask, orders);
 
   // ── RULE: Packaging Overflow Rule ──
   // If > 3 packaging orders pending (i.e. 4 or more), 4th arrival triggers instant
@@ -296,7 +393,7 @@ export function getTopEligibleTask(
     p => currentStep(p) === 'packaging' && !p.stages.packaging?.assignee && !p.stages.packaging?.completedAt
   );
 
-  if (pendingPackaging.length > 3 && !(isWasherStarving && candidateTaggingTask && taggingFeedsWasher)) {
+  if (canDoPackaging && pendingPackaging.length > 3 && !(isWasherStarving && candidateTaggingTask && taggingFeedsWasher)) {
     // Sort oldest first
     pendingPackaging.sort((a, b) => getProcessTimestamp(a) - getProcessTimestamp(b));
     const oldestPackaging = pendingPackaging[0];
@@ -335,6 +432,18 @@ export function getTopEligibleTask(
     if (!isActivelyLoadingMachine(live, uid) && !isAcceptInFlight(live, orders, activeTask)) {
       return machineProcess;
     }
+  }
+
+  // ── 2b. Washer Starvation Pull: Pull a helper occupied in packaging/ironing for wash-requiring tagging ──
+  if (
+    isWasherStarving &&
+    canDoTagging &&
+    washFeedingTaggingTask &&
+    !isActivelyLoadingMachine(live, uid) &&
+    !isAcceptInFlight(live, orders, activeTask) &&
+    isHelperOccupiedOnlyInInterruptibleStage(live, uid)
+  ) {
+    return washFeedingTaggingTask;
   }
 
   // ── 3. Busy gate: hands-on work in progress for non-machine tasks ──

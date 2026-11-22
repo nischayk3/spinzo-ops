@@ -98,7 +98,7 @@ export async function triggerAssignmentNotification(params: AssignmentNotificati
           type: 'assignment',
         },
       },
-      trigger: null, // show immediately
+      trigger: Platform.OS === 'android' ? { channelId: CHANNEL_ID } : null, // show immediately
     });
   } catch (err) {
     console.warn('[Notifications] Failed to schedule notification:', err);
@@ -168,7 +168,7 @@ export async function triggerStageNudgeNotification(params: StageNudgeNotificati
           phase: params.phase,
         },
       },
-      trigger: null,
+      trigger: Platform.OS === 'android' ? { channelId: CHANNEL_ID } : null,
     });
   } catch (err) {
     console.warn('[Notifications] Failed to schedule stage nudge notification:', err);
@@ -178,8 +178,8 @@ export async function triggerStageNudgeNotification(params: StageNudgeNotificati
 export interface ScheduleStageNudgeParams {
   orderId: string;
   processId: string;
-  step: 'getting_washed' | 'getting_dried';
-  phase: 'accepted' | 'started';
+  step: 'getting_washed' | 'getting_dried' | 'tagging' | 'packaging';
+  phase: 'accepted' | 'started' | 'hands_on';
   delaySeconds: number;
   title: string;
   message: string;
@@ -218,6 +218,7 @@ export async function scheduleStageNudgeTimer(params: ScheduleStageNudgeParams):
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
         seconds: Math.max(1, Math.floor(params.delaySeconds)),
+        ...(Platform.OS === 'android' ? { channelId: CHANNEL_ID } : {}),
       },
     });
     return identifier;
@@ -232,8 +233,8 @@ export async function scheduleStageNudgeTimer(params: ScheduleStageNudgeParams):
  */
 export async function cancelStageNudgeTimer(processId: string, step?: string): Promise<void> {
   try {
-    const phases = ['accepted', 'started'];
-    const steps = step ? [step] : ['getting_washed', 'getting_dried'];
+    const phases = ['accepted', 'started', 'hands_on'];
+    const steps = step ? [step] : ['getting_washed', 'getting_dried', 'tagging', 'packaging'];
     for (const s of steps) {
       for (const p of phases) {
         await Notifications.cancelScheduledNotificationAsync(`nudge_${processId}_${s}_${p}`).catch(() => {});

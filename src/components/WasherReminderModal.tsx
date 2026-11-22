@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform } from 'react-native';
+import React, { useEffect, useState, useRef } from 'react';
+import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform, AppState } from 'react-native';
 import { Sparkles, CheckCircle2, X, Clock, Droplets, RefreshCw } from 'lucide-react-native';
 import { useWasherReminderStore } from '../store/washerReminderStore';
 import { useOpsProcessStore } from '../store/opsProcessStore';
@@ -17,6 +17,7 @@ export function WasherReminderModal() {
   const { markChemicalAdded, completeStep } = useOpsProcessStore();
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const wasAlertingRef = useRef(false);
 
   const isAvailableForReminders =
     staffDoc?.onShift === true &&
@@ -35,10 +36,10 @@ export function WasherReminderModal() {
   const isComplete = effectiveReminder?.milestone === 'complete';
 
   const title = isDetergent
-    ? 'Add Detergent (13 Min)'
+    ? 'Add Detergent (3 Min)'
     : isSoftener
     ? 'Add Softener (21 Min)'
-    : 'Washing Cycle Complete (35 Min)';
+    : 'Washing Cycle Complete (36 Min)';
 
   const orderShortId = effectiveReminder
     ? (effectiveReminder.orderId.includes('__')
@@ -47,10 +48,10 @@ export function WasherReminderModal() {
     : '';
 
   const description = isDetergent
-    ? `Order #${orderShortId} has reached 13 minutes in the wash cycle. Please add detergent to Washer now.`
+    ? `Order #${orderShortId} has reached 3 minutes in the wash cycle. Please add detergent to Washer now.`
     : isSoftener
-    ? `Order #${orderShortId} has reached 21 minutes (rinse cycle started). Please add fabric softener now.`
-    : `Order #${orderShortId} wash cycle (35 mins) is done. Please unload the washer and transfer load to the dryer.`;
+    ? `Order #${orderShortId} has reached 21 minutes (15 min left — rinse cycle started). Please add fabric softener now.`
+    : `Order #${orderShortId} wash cycle (36 mins) is done. Please unload the washer and transfer load to the dryer.`;
 
   const actionLabel = isDetergent
     ? 'Add Detergent Now'
@@ -63,6 +64,7 @@ export function WasherReminderModal() {
 
   useEffect(() => {
     if (effectiveReminder) {
+      wasAlertingRef.current = true;
       dramaticChime(true);
       triggerStageNudgeNotification({
         orderId: effectiveReminder.orderId,
@@ -72,7 +74,7 @@ export function WasherReminderModal() {
         step: 'getting_washed',
         phase: isComplete ? 'started' : 'accepted',
       });
-      if (Platform.OS === 'android') {
+      if (Platform.OS === 'android' && AppState.currentState !== 'active') {
         SpinzoOverlay.showOverlay({
           orderId: effectiveReminder.orderId,
           taskType: 'stage_nudge',
@@ -82,17 +84,23 @@ export function WasherReminderModal() {
         });
       }
     } else {
-      stopAlarm();
-      clearAssignmentNotifications();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        clearAssignmentNotifications();
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.dismissOverlay();
+        }
       }
     }
     return () => {
-      stopAlarm();
-      clearAssignmentNotifications();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        clearAssignmentNotifications();
+        if (Platform.OS === 'android') {
+          SpinzoOverlay.dismissOverlay();
+        }
       }
     };
   }, [effectiveReminder?.orderId, effectiveReminder?.milestone, title, description, actionLabel, orderShortId, isComplete]);
@@ -100,6 +108,7 @@ export function WasherReminderModal() {
   if (!effectiveReminder) return null;
 
   const handleAction = async () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     setBusy(true);
     setErrorMsg(null);
@@ -135,6 +144,7 @@ export function WasherReminderModal() {
   };
 
   const handleSnooze = () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -144,6 +154,7 @@ export function WasherReminderModal() {
   };
 
   const handleDismiss = () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {

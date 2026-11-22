@@ -662,59 +662,59 @@ test('isMachineNudgeDue: unstarted wash/dry tasks after 5m grace window', () => 
   }, 'getting_washed', now), true);
 });
 
-test('isMachineUnloadNudgeDue: wash cycle (35m) and dry cycle (45m) finished but not unloaded', () => {
+test('isMachineUnloadNudgeDue: wash cycle (36m) and dry cycle (40m) finished but not unloaded', () => {
   const now = 2000000000;
-  const wash34MinAgo = now - 34 * 60 * 1000;
   const wash35MinAgo = now - 35 * 60 * 1000;
-  const dry44MinAgo = now - 44 * 60 * 1000;
-  const dry45MinAgo = now - 45 * 60 * 1000;
+  const wash36MinAgo = now - 36 * 60 * 1000;
+  const dry39MinAgo = now - 39 * 60 * 1000;
+  const dry40MinAgo = now - 40 * 60 * 1000;
 
   // Not washing or drying
-  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo }, 'tagging', now), false);
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash36MinAgo }, 'tagging', now), false);
 
   // Not started yet
   assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1' }, 'getting_washed', now), false);
 
   // Already completed (unloaded)
-  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo, completedAt: now - 1000 }, 'getting_washed', now), false);
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash36MinAgo, completedAt: now - 1000 }, 'getting_washed', now), false);
 
-  // Washing: started 34m ago (cycle still running) -> false
-  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash34MinAgo }, 'getting_washed', now), false);
+  // Washing: started 35m ago (cycle still running) -> false
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo }, 'getting_washed', now), false);
 
-  // Washing: started 35m ago (cycle finished, waiting to be unloaded) -> true
-  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash35MinAgo }, 'getting_washed', now), true);
+  // Washing: started 36m ago (cycle finished, waiting to be unloaded) -> true
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: wash36MinAgo }, 'getting_washed', now), true);
 
-  // Drying: started 44m ago (cycle still running) -> false
-  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: dry44MinAgo }, 'getting_dried', now), false);
+  // Drying: started 39m ago (cycle still running) -> false
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: dry39MinAgo }, 'getting_dried', now), false);
 
-  // Drying: started 45m ago (cycle finished, waiting to be unloaded) -> true
-  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: dry45MinAgo }, 'getting_dried', now), true);
+  // Drying: started 40m ago (cycle finished, waiting to be unloaded) -> true
+  assert.strictEqual(isMachineUnloadNudgeDue({ assignee: 'u1', startedAt: dry40MinAgo }, 'getting_dried', now), true);
 
   // Snooze suppression: snoozed 2m ago -> false
   assert.strictEqual(isMachineUnloadNudgeDue({
     assignee: 'u1',
-    startedAt: wash35MinAgo,
+    startedAt: wash36MinAgo,
     nudge: { started: { lastSnoozedAt: now - 2 * 60 * 1000 } }
   }, 'getting_washed', now), false);
 
   // Snooze expired: snoozed 5m ago -> true
   assert.strictEqual(isMachineUnloadNudgeDue({
     assignee: 'u1',
-    startedAt: wash35MinAgo,
+    startedAt: wash36MinAgo,
     nudge: { started: { lastSnoozedAt: now - 5 * 60 * 1000 } }
   }, 'getting_washed', now), true);
 
   // Sent push suppression: push sent 2m ago -> false
   assert.strictEqual(isMachineUnloadNudgeDue({
     assignee: 'u1',
-    startedAt: wash35MinAgo,
+    startedAt: wash36MinAgo,
     nudge: { started: { lastSentAt: now - 2 * 60 * 1000 } }
   }, 'getting_washed', now), false);
 
   // Push expired: push sent 5m ago -> true
   assert.strictEqual(isMachineUnloadNudgeDue({
     assignee: 'u1',
-    startedAt: wash35MinAgo,
+    startedAt: wash36MinAgo,
     nudge: { started: { lastSentAt: now - 5 * 60 * 1000 } }
   }, 'getting_washed', now), true);
 });
@@ -894,6 +894,236 @@ test('isSlotDueForDispatch: dispatches Express 6-8h orders immediately when sche
     isSlotDueForDispatch({ scheduledDate: '2026-11-08', scheduledTime: '10:00 - 11:00', isExpress: true }, 20, opts),
     false
   );
+});
+
+test('washerChemicalNudgeDue: detergent at 3m and softener at 21m on 36m wash cycle', () => {
+  const { washerChemicalNudgeDue } = require('./dispatch');
+  const now = 3000000000;
+  const twoMinAgo = now - 2 * 60 * 1000;
+  const threeMinAgo = now - 3 * 60 * 1000;
+  const twentyMinAgo = now - 20 * 60 * 1000;
+  const twentyOneMinAgo = now - 21 * 60 * 1000;
+
+  // Before 3m -> no chemical nudge
+  assert.strictEqual(washerChemicalNudgeDue({ assignee: 'u1', startedAt: twoMinAgo }, now), null);
+
+  // At 3m -> detergent due
+  assert.strictEqual(washerChemicalNudgeDue({ assignee: 'u1', startedAt: threeMinAgo }, now), 'detergent');
+
+  // After detergent added, at 20m -> null (softener not due yet)
+  assert.strictEqual(washerChemicalNudgeDue({ assignee: 'u1', startedAt: twentyMinAgo, detergentAddedAt: now - 15 * 60 * 1000 }, now), null);
+
+  // At 21m -> softener due
+  assert.strictEqual(washerChemicalNudgeDue({ assignee: 'u1', startedAt: twentyOneMinAgo, detergentAddedAt: now - 15 * 60 * 1000 }, now), 'softener');
+
+  // Both added -> null
+  assert.strictEqual(washerChemicalNudgeDue({ assignee: 'u1', startedAt: twentyOneMinAgo, detergentAddedAt: now - 15 * 60 * 1000, softenerAddedAt: now - 1000 }, now), null);
+});
+
+test('isHandsOnStageNudgeDue: tagging & packaging 10m initial, 5m repeat, respects completion & snooze', () => {
+  const { isHandsOnStageNudgeDue } = require('./dispatch');
+  const now = 4000000000;
+  const nineMinAgo = now - 9 * 60 * 1000;
+  const tenMinAgo = now - 10 * 60 * 1000;
+
+  // Non-hands-on steps -> false
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', assignedAt: tenMinAgo }, 'getting_washed', now), false);
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', assignedAt: tenMinAgo }, 'getting_ironed', now), false);
+
+  // Before 10m -> false
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', assignedAt: nineMinAgo }, 'tagging', now), false);
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', acceptedAt: nineMinAgo }, 'packaging', now), false);
+
+  // At 10m -> true
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', assignedAt: tenMinAgo }, 'tagging', now), true);
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', acceptedAt: tenMinAgo }, 'packaging', now), true);
+
+  // Completed -> false
+  assert.strictEqual(isHandsOnStageNudgeDue({ assignee: 'u1', assignedAt: tenMinAgo, completedAt: now - 1000 }, 'tagging', now), false);
+
+  // Sent 3m ago -> false; sent 5m ago -> true
+  assert.strictEqual(isHandsOnStageNudgeDue({
+    assignee: 'u1',
+    assignedAt: tenMinAgo,
+    nudge: { hands_on: { lastSentAt: now - 3 * 60 * 1000 } }
+  }, 'tagging', now), false);
+  assert.strictEqual(isHandsOnStageNudgeDue({
+    assignee: 'u1',
+    assignedAt: tenMinAgo,
+    nudge: { hands_on: { lastSentAt: now - 5 * 60 * 1000 } }
+  }, 'tagging', now), true);
+
+  // Snoozed via snoozedUntil (in future) -> false; expired snoozedUntil -> true
+  assert.strictEqual(isHandsOnStageNudgeDue({
+    assignee: 'u1',
+    assignedAt: tenMinAgo,
+    nudge: { hands_on: { snoozedUntil: now + 2 * 60 * 1000 } }
+  }, 'packaging', now), false);
+  assert.strictEqual(isHandsOnStageNudgeDue({
+    assignee: 'u1',
+    assignedAt: tenMinAgo,
+    nudge: { hands_on: { snoozedUntil: now - 1000 } }
+  }, 'packaging', now), true);
+});
+
+test('isHelperAllowedForStage & selectHelperForStage: respects dynamic helperAssignmentRules with fallback', () => {
+  const { isHelperAllowedForStage, TAHIRUL_PHONE, ABDUL_PHONE } = require('./dispatch');
+
+  // Fallback when helperRules missing
+  assert.strictEqual(isHelperAllowedForStage(TAHIRUL_PHONE, 'getting_ironed', null), false);
+  assert.strictEqual(isHelperAllowedForStage(TAHIRUL_PHONE, 'tagging', null), true);
+  assert.strictEqual(isHelperAllowedForStage(ABDUL_PHONE, 'tagging', undefined), true);
+
+  // Custom rules: enable ironing for Tahirul (+91 key) and disable tagging for Abdul (10-digit key)
+  const customRules = {
+    '+919707275674': { getting_ironed: true },
+    '6900311761': { tagging: false },
+  };
+  assert.strictEqual(isHelperAllowedForStage(TAHIRUL_PHONE, 'getting_ironed', customRules), true);
+  assert.strictEqual(isHelperAllowedForStage(ABDUL_PHONE, 'tagging', customRules), false);
+  assert.strictEqual(isHelperAllowedForStage(ABDUL_PHONE, 'packaging', customRules), true);
+
+  const helpersWithTahirul = [
+    ...mockHelpers,
+    { uid: 'h_tahirul', name: 'Tahirul', phone: TAHIRUL_PHONE, onShift: true },
+  ];
+
+  // With tagging disabled for Abdul, tagging picks Tahirul instead of Abdul
+  const tagRes = selectHelperForStage('tagging', helpersWithTahirul, [], undefined, {}, customRules);
+  assert.strictEqual(tagRes.ok, true);
+  assert.strictEqual(tagRes.helper.uid, 'h_tahirul');
+
+  // With ironing enabled for Tahirul, Tahirul can be assigned Iron Station 2 when Samsul/Abdur/Abdul are busy
+  const liveIronBusy = [
+    { id: 'p_i1', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000, machineName: 'Iron Station 1' } } },
+    { id: 'p_pkg', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+    { id: 'p_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+  ];
+  const ironRes = selectHelperForStage('getting_ironed', helpersWithTahirul, liveIronBusy, { washers: 2, dryers: 2, ironingStations: 2 }, {}, customRules);
+  assert.strictEqual(ironRes.ok, true);
+  assert.strictEqual(ironRes.helper.uid, 'h_tahirul');
+  assert.strictEqual(ironRes.machineName, 'Iron Station 2');
+});
+
+test('isWashRequiringService: identifies all wash-requiring services accurately', () => {
+  const { isWashRequiringService } = require('./dispatch');
+  const washServices = [
+    'wash_fold',
+    'wash_iron',
+    'blanket_wash',
+    'blanket_wash_single',
+    'blanket_wash_double',
+    'premium_laundry',
+    'dry_clean',
+  ];
+  for (const svc of washServices) {
+    assert.strictEqual(isWashRequiringService(svc), true, `Expected ${svc} to require wash`);
+  }
+  assert.strictEqual(isWashRequiringService('ironing'), false);
+  assert.strictEqual(isWashRequiringService('shoe_clean'), false);
+  assert.strictEqual(isWashRequiringService(''), false);
+  assert.strictEqual(isWashRequiringService(null), false);
+  assert.strictEqual(isWashRequiringService(undefined), false);
+});
+
+test('selectHelperForStage (Washer Starvation Override): pulls packaging helper for wash services when washer empty, respects guards', () => {
+  const { ABDUL_PHONE, SAMSUL_PHONE, ABDUR_PHONE } = require('./dispatch');
+  const helpers = [
+    { uid: 'h_abdul', name: 'Abdul', phone: ABDUL_PHONE, onShift: true },
+    { uid: 'h_abdur', name: 'Abdur', phone: ABDUR_PHONE, onShift: true },
+    { uid: 'h_samsul', name: 'Samsul', phone: SAMSUL_PHONE, onShift: true },
+  ];
+
+  // All 3 helpers are hands-on busy: Abdul tagging, Abdur packaging, Samsul ironing; 0 washers occupied, 0 waiting in wash queue
+  const liveWasherStarving = [
+    { id: 'p_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', assignedAt: 1000 } } },
+    { id: 'p_pkg', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', assignedAt: 1000 } } },
+    { id: 'p_iron', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000, machineName: 'Iron Station 1' } } },
+  ];
+
+  // 1. Pulls packaging helper (Abdur) for wash_fold, wash_iron, blanket_wash, premium_laundry
+  for (const svc of ['wash_fold', 'wash_iron', 'blanket_wash', 'premium_laundry']) {
+    const res = selectHelperForStage('tagging', helpers, liveWasherStarving, { washers: 2, dryers: 2, ironingStations: 2 }, { serviceType: svc });
+    assert.strictEqual(res.ok, true, `Expected starvation override for ${svc}`);
+    assert.strictEqual(res.helper.uid, 'h_abdur', `Expected packaging helper Abdur to be pulled for ${svc}`);
+    assert.strictEqual(res.isStarvationOverride, true);
+  }
+
+  // 2. Does NOT pull for ironing-only orders
+  const ironOnlyRes = selectHelperForStage('tagging', helpers, liveWasherStarving, { washers: 2, dryers: 2, ironingStations: 2 }, { serviceType: 'ironing' });
+  assert.strictEqual(ironOnlyRes.ok, false);
+  assert.strictEqual(ironOnlyRes.shouldQueue, true);
+
+  // 3. Does NOT pull when all washers are occupied (2/2 running)
+  const liveWashersFull = [
+    ...liveWasherStarving,
+    { id: 'p_w1', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { assignee: 'h_abdul', startedAt: 1000, machineName: 'Washer 1' } } },
+    { id: 'p_w2', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { assignee: 'h_abdur', startedAt: 1000, machineName: 'Washer 2' } } },
+  ];
+  const fullRes = selectHelperForStage('tagging', helpers, liveWashersFull, { washers: 2, dryers: 2, ironingStations: 2 }, { serviceType: 'wash_fold' });
+  assert.strictEqual(fullRes.ok, false);
+  assert.strictEqual(fullRes.shouldQueue, true);
+
+  // 4. Does NOT pull when an unassigned/unstarted getting_washed order is already waiting in queue
+  const liveWashQueued = [
+    ...liveWasherStarving,
+    { id: 'p_wq', status: 'getting_washed', steps: ['getting_washed'], currentIndex: 0, stages: { getting_washed: { assignee: null } } },
+  ];
+  const queuedWashRes = selectHelperForStage('tagging', helpers, liveWashQueued, { washers: 2, dryers: 2, ironingStations: 2 }, { serviceType: 'wash_fold' });
+  assert.strictEqual(queuedWashRes.ok, false);
+  assert.strictEqual(queuedWashRes.shouldQueue, true);
+
+  // 5. Does NOT double-assign someone already doing tagging (even if everyone is tagging)
+  const liveAllTagging = [
+    { id: 'p_t1', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', assignedAt: 1000 } } },
+    { id: 'p_t2', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdur', assignedAt: 1000 } } },
+    { id: 'p_t3', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_samsul', assignedAt: 1000 } } },
+  ];
+  const allTaggingRes = selectHelperForStage('tagging', helpers, liveAllTagging, { washers: 2, dryers: 2, ironingStations: 2 }, { serviceType: 'wash_fold' });
+  assert.strictEqual(allTaggingRes.ok, false);
+  assert.strictEqual(allTaggingRes.shouldQueue, true);
+});
+
+test('pickRider (Spatial Batching): clusters nearby order onto Rider A over distant Rider B, while respecting 5-task cap', () => {
+  const { pickRider, haversineMeters } = require('./dispatch');
+
+  // HSR Sector 2 order location
+  const hsrOrderGeo = { lat: 12.9081, lng: 77.6476 };
+  // ~400m away in HSR Sector 2
+  const hsrNearbyStop = { lat: 12.9112, lng: 77.6494 };
+  // ~5km away (Koramangala / Bellandur)
+  const distantLoc = { lat: 12.9530, lng: 77.6476 };
+
+  const distNear = haversineMeters(hsrOrderGeo, hsrNearbyStop);
+  const distFar = haversineMeters(hsrOrderGeo, distantLoc);
+  assert.ok(distNear < 500, `Expected nearby stop < 500m, got ${distNear}`);
+  assert.ok(distFar > 4500, `Expected distant stop > 4500m, got ${distFar}`);
+
+  const rosterPhones = {
+    '+919000000001': 'rider',
+    '+919000000002': 'rider',
+  };
+  const candidates = [
+    { uid: 'rider_a', phone: '+919000000001', onShift: true, shiftStartAt: 1000, lastLocation: hsrNearbyStop },
+    { uid: 'rider_b', phone: '+919000000002', onShift: true, shiftStartAt: 1000, lastLocation: distantLoc },
+  ];
+  const riderStopCoords = {
+    rider_a: [hsrNearbyStop],
+    rider_b: [],
+  };
+
+  // Rider A has 1 stop 400m away (score: 1800 + ~395 - 1500 = 695)
+  // Rider B has 0 stops 5km away (score: 0 + ~4993 = 4993) -> Rider A wins via spatial batching!
+  const clustered = pickRider(candidates, { rider_a: 1, rider_b: 0 }, rosterPhones, hsrOrderGeo, riderStopCoords);
+  assert.strictEqual(clustered, 'rider_a');
+
+  // Capacity cap: if Rider A already has 5 active tasks (+10000 overflow penalty, no cluster bonus), Rider B wins!
+  const capped = pickRider(candidates, { rider_a: 5, rider_b: 0 }, rosterPhones, hsrOrderGeo, riderStopCoords);
+  assert.strictEqual(capped, 'rider_b');
+
+  // Backwards-compatibility: when orderGeo is omitted/null, least-busy Rider B (0 tasks) wins over Rider A (1 task)
+  const legacy = pickRider(candidates, { rider_a: 1, rider_b: 0 }, rosterPhones);
+  assert.strictEqual(legacy, 'rider_b');
 });
 
 

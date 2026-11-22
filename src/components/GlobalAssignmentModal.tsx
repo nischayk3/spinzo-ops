@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, TouchableOpacity, Modal, ActivityIndicator, Alert, Platform, AppState } from 'react-native';
 import { BellRing, MapPin, Zap, Clock, X, User, Phone } from 'lucide-react-native';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { acceptTask } from '../utils/opsPickup';
@@ -24,8 +24,9 @@ export function GlobalAssignmentModal() {
   const { staffDoc, myTasks, myDeliveries } = useOpsStaffStore();
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [locallyAcceptedIds, setLocallyAcceptedIds] = useState<Set<string>>(new Set());
+  const wasAlertingRef = useRef(false);
 
-  const isOffShift = staffDoc ? staffDoc.onShift !== true : false;
+  const isOffShift = !staffDoc || staffDoc.onShift !== true;
   const isOnBreak = Boolean(
     staffDoc?.onBreak ||
     staffDoc?.attendanceStatus === 'lunch' ||
@@ -90,6 +91,7 @@ export function GlobalAssignmentModal() {
 
   useEffect(() => {
     if (activeTask && activeTaskKey && !acceptingId && !locallyAcceptedIds.has(activeTaskKey)) {
+      wasAlertingRef.current = true;
       dramaticChime(true);
       triggerAssignmentNotification({
         orderId,
@@ -100,7 +102,7 @@ export function GlobalAssignmentModal() {
         isInstant,
       });
 
-      if (Platform.OS === 'android') {
+      if (Platform.OS === 'android' && AppState.currentState !== 'active') {
         try {
           SpinzoOverlay.showOverlay({
             orderId,
@@ -115,20 +117,26 @@ export function GlobalAssignmentModal() {
         }
       }
     } else if (!activeTask) {
-      stopAlarm();
-      clearAssignmentNotifications();
-      if (Platform.OS === 'android') {
-        try {
-          SpinzoOverlay.dismissOverlay();
-        } catch {}
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        clearAssignmentNotifications();
+        if (Platform.OS === 'android') {
+          try {
+            SpinzoOverlay.dismissOverlay();
+          } catch {}
+        }
       }
     }
     return () => {
-      stopAlarm();
-      if (Platform.OS === 'android') {
-        try {
-          SpinzoOverlay.dismissOverlay();
-        } catch {}
+      if (wasAlertingRef.current) {
+        wasAlertingRef.current = false;
+        stopAlarm();
+        if (Platform.OS === 'android') {
+          try {
+            SpinzoOverlay.dismissOverlay();
+          } catch {}
+        }
       }
     };
   }, [activeTaskKey, acceptingId]);
@@ -139,6 +147,7 @@ export function GlobalAssignmentModal() {
     const targetOrderId = activeTask.orderId || taskId;
 
     // 1. Immediately silence alerts and native overlay
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -165,6 +174,7 @@ export function GlobalAssignmentModal() {
   };
 
   const handleDismiss = () => {
+    wasAlertingRef.current = false;
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {

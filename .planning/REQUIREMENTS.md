@@ -115,3 +115,46 @@
 - **R14.1 (Role-Gated Notifications)**: Guard `useLifecycleNotifications.ts` so machine/washer checks never run on rider devices.
 - **R14.2 (Timer Consolidation & Debounced Search)**: Consolidate scattered `setInterval(1000)` timers and debounce text search inputs in `SupervisorDashboardScreen` and `FloorBoardScreen` (300ms debounce).
 
+---
+
+## Phases 9–13: Team Operational Feedback Overhaul (R15–R22)
+
+### R15: Unassign Pickup & Delivery Hold + UI Sync (Phase 9)
+- **R15.1 (Prevent Auto Re-Assignment)**: `unassignPickup` and `unassignDelivery` must set an explicit `manualHold: true` / `status: 'manual_hold'` hold so `syncDeliveryTask`, `drainScheduledRiderTasks`, and `onShiftCatchUp` never auto-reassign manually unassigned tasks until a supervisor manually assigns them or reschedules the slot.
+- **R15.2 (Clear Stale Rider Fields)**: `unassignPickup` must delete `riderId`, `riderName`, and `pickupRider`; `unassignDelivery` must delete `deliveryRiderId`, `deliveryRiderName`, `deliveryRiderPhone`, `deliveryRider`, `riderId`, and `riderName`. Supervisor cards (`SupervisorDashboardScreen`, `FloorBoardScreen`, `OrderDetailScreen`) must immediately show "Not Assigned" (and read `deliveryRiderId`/`deliveryRiderName` for delivery-stage orders).
+
+### R16: Delivery Auto-Assign Status Parity (Phase 9)
+- When the system auto-assigns a delivery rider (`syncDeliveryTask`, `drainScheduledRiderTasks`, `onShiftCatchUp`, `markOutForDelivery`), immediately set `order.status = 'out_for_delivery'`, `outForDeliveryAt = now`, and `ops_delivery_tasks.status = 'out_for_delivery'` (matching manual `assignTaskToRider`), so the supervisor panel and customer app reflect `out_for_delivery` immediately.
+
+### R17: Washing/Drying Cycle Durations & Chemical Reminders (Phase 10)
+- **Wash cycle**: `36 min` (`2160s`) across backend (`dispatch.js`, `index.js`) and client (`stageNudges.ts`, `lifecycleNotifications.ts`, `WasherReminderModal.tsx`, `OrderDetailScreen.tsx`, `FloatingTaskCard.tsx`, `alerts.ts`).
+- **Dry cycle**: `40 min` (`2400s`) across backend and client (fixing the 45m vs 30m mismatch).
+- **Detergent reminder**: `3 min` (`180s`) after machine start.
+- **Softener reminder**: `21 min` (`1260s`) after machine start (15 min left on 36 min wash).
+- **Minimum completion lock**: Keep at `30 min` (`1800s`) for both wash and dry.
+
+### R18: Tagging & Packaging Reminders (Phase 10)
+- Add reminders for `tagging` and `packaging` across client (`stageNudges.ts`, `StageNudgeModal.tsx`, `systemNotifications.ts`, `opsProcessStore.ts`) and backend (`dispatch.js`, `index.js` `checkUnstartedMachineNudges` + `snoozeNudge`).
+- First reminder fires **10 minutes** after `assignedAt`, then repeats every **5 minutes** until the stage is completed (bypassing `isHelperDoingHandsOn` suppression for the helper's own tagging/packaging task).
+
+### R19: Multi-Load (>8kg) Aggregation & Separate Load Timing Stages (Phase 11)
+- For orders split into 2+ loads (`loadCount > 1`), aggregate across all sibling `ops_process` docs in backend (`submitTagging`, `completeStep`, `completePackaging`, `persistOpsDetailsToOrder`) and client (`OrderDetailScreen`, `FloorBoardScreen`):
+  - Sum total garments tagged (`garmentCount`)
+  - Sum total bundles (`bundles`)
+  - Combine all packaging photos (deduplicated)
+  - Collect all packaging videos (`packagingVideos: Array<{ url, processId, label }>`)
+- Store and render **separate timing stages per load** (`loadTimings`: 2 loads → 2 timing stage timelines, 3 loads → 3 timing stage timelines).
+
+### R20: Tagging Pre-Existing Damage Report (Photo / Record Video) (Phase 12)
+- Add a **Report** button in Tagging (`OrderDetailScreen.tsx` `renderTagging`, both registration and scanning views) that opens camera options (**Click Photo** or **Record Video**) + optional short note to document pre-existing cloth damage.
+- Upload media via `uploadMediaToStorage` under `damage_reports/{orderId}` and persist via `opsProcessing` `reportDamage` callable to `ops_process` and `users/{uid}/orders/{orderId}`.
+- Render a "Pre-Existing Damage Reports" card on `OrderDetailScreen` and a damage indicator badge on `FloorBoardScreen`.
+
+### R21: Supervisor Home Floor Roster Deployment Multi-Order Modal (Phase 13)
+- Tapping any **helper** or **delivery partner** in `SupervisorDashboardScreen` Floor Roster Deployment opens a centered modal showing **all** currently assigned orders/tasks (fixing `getHelperLiveTask` returning only the first match).
+- Show accurate live multi-order count badges on roster rows.
+
+### R22: Settings Helper Assignment Rules Matrix (Phase 13)
+- Add an **Assignment Rules** section in `SettingsScreen.tsx` (for supervisors) listing all helpers from `config/opsStaff` in the left column and 5 stage columns on the right (`Tagging`, `Washing`, `Drying`, `Ironing`, `Packaging`), each with an enable/disable toggle persisted to `config/helperAssignmentRules`.
+- Auto-assignment (`ops/functions/dispatch.js` `selectHelperForStage` + `ops/functions/index.js`) and client pool eligibility (`src/utils/helperEligibility.ts`) respect these toggles while preserving existing tier preference among enabled helpers and allowing manual supervisor override.
+
