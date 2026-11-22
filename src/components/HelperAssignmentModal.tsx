@@ -27,7 +27,9 @@ export function HelperAssignmentModal() {
   const subscribeHelperRules = useHelperRulesStore(s => s.subscribe);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [localSnoozeMap, setLocalSnoozeMap] = useState<Record<string, number>>({});
+  const [globalDismissUntil, setGlobalDismissUntil] = useState<number>(0);
   const wasAlertingRef = useRef(false);
+  const lastAlertedKeyRef = useRef<string>('');
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
 
@@ -60,10 +62,11 @@ export function HelperAssignmentModal() {
   const candidateSnoozeKey = candidateTask
     ? `${candidateTask.steps[candidateTask.currentIndex] || candidateTask.status}:${candidateTask.id}`
     : '';
-  // Check if this task was recently dismissed/snoozed by the user
-  const isSnoozed = candidateSnoozeKey
+  // Check if this task was recently dismissed/snoozed by the user (or global 3m quiet window active)
+  const isGloballyDismissed = globalDismissUntil > 0 && Date.now() < globalDismissUntil;
+  const isSnoozed = isGloballyDismissed || (candidateSnoozeKey
     ? Boolean(localSnoozeMap[candidateSnoozeKey] && Date.now() < (localSnoozeMap[candidateSnoozeKey] + 5 * 60 * 1000))
-    : false;
+    : false);
   const activeTask = isSnoozed ? null : candidateTask;
 
   const order = activeTask ? orders.find(o => o.id === activeTask.orderId) : undefined;
@@ -82,8 +85,13 @@ export function HelperAssignmentModal() {
       })
     : '';
 
+  const activeAlertKey = activeTask && !acceptingId ? `${activeTask.id}:${curStep}:${showAsBanner ? 'b' : 'm'}` : '';
+
   useEffect(() => {
     if (activeTask && !acceptingId) {
+      // Never re-fire audio/notification for the exact same task+step on background snapshot ticks
+      if (lastAlertedKeyRef.current === activeAlertKey) return;
+      lastAlertedKeyRef.current = activeAlertKey;
       wasAlertingRef.current = true;
       // Short chime then Hindi voice loop when modal is blocking; single clean Hindi voice when banner
       if (!showAsBanner) {
@@ -92,15 +100,18 @@ export function HelperAssignmentModal() {
         speakHindi(voiceText);
       }
       const addr = order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '';
-      triggerAssignmentNotification({
-        orderId: activeTask.orderId,
-        orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
-        taskType: curStep ? `${stepLabel(curStep)} Stage` : 'Process Stage',
-        address: addr,
-        isInstant: Boolean(order?.pickupDetails?.isInstant),
-      });
+      const isBackgrounded = AppState.currentState !== 'active';
+      if (isBackgrounded) {
+        triggerAssignmentNotification({
+          orderId: activeTask.orderId,
+          orderShortId: activeTask.orderId.slice(-6).toUpperCase(),
+          taskType: curStep ? `${stepLabel(curStep)} Stage` : 'Process Stage',
+          address: addr,
+          isInstant: Boolean(order?.pickupDetails?.isInstant),
+        });
+      }
 
-      if (Platform.OS === 'android' && !showAsBanner && AppState.currentState !== 'active') {
+      if (Platform.OS === 'android' && !showAsBanner && isBackgrounded) {
         SpinzoOverlay.showOverlay({
           orderId: activeTask.orderId || activeTask.id,
           taskType: 'helper_step',
@@ -112,6 +123,7 @@ export function HelperAssignmentModal() {
         } as any);
       }
     } else {
+      lastAlertedKeyRef.current = '';
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
         stopAlarm();
@@ -124,13 +136,14 @@ export function HelperAssignmentModal() {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
+        lastAlertedKeyRef.current = '';
         stopAlarm();
         if (Platform.OS === 'android') {
           SpinzoOverlay.dismissOverlay();
         }
       }
     };
-  }, [activeTask?.id, curStep, acceptingId, showAsBanner, voiceText, cleanToken]);
+  }, [activeAlertKey]);
 
   // Auto-clear active task if the order was cancelled, completed, or deleted
   useEffect(() => {
@@ -158,11 +171,15 @@ export function HelperAssignmentModal() {
 
   const handleDismiss = () => {
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
       SpinzoOverlay.dismissOverlay();
     }
+    // Give the helper 3 full minutes of uninterrupted quiet so the next queued order
+    // doesn't immediately pop up 100ms later while they are finishing packaging/tagging.
+    setGlobalDismissUntil(Date.now() + 3 * 60 * 1000);
     if (activeTask) {
       const key = `${curStep}:${activeTask.id}`;
       setLocalSnoozeMap(prev => ({ ...prev, [key]: Date.now() }));

@@ -27,6 +27,7 @@ export function StageNudgeModal() {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const wasAlertingRef = useRef(false);
+  const lastAlertedKeyRef = useRef<string>('');
 
   const isOnShift = staffDoc?.onShift === true;
   const isOnBreak = Boolean(
@@ -91,21 +92,31 @@ export function StageNudgeModal() {
       })
     : '';
 
-  // Alert triggers: Chime-then-Hindi-voice loop + system heads-up notification + Android over-the-app overlay
+  const activeAlertKey = activeNudge && !busy
+    ? `${activeNudge.processId || activeNudge.orderId}:${activeNudge.step}:${activeNudge.phase}`
+    : '';
+
+  // Alert triggers: Chime-then-Hindi-voice loop + background-only system notification & Android overlay
   useEffect(() => {
     if (activeNudge && !busy) {
+      if (lastAlertedKeyRef.current === activeAlertKey) return;
+      lastAlertedKeyRef.current = activeAlertKey;
       wasAlertingRef.current = true;
       startVoiceAlertLoop(voiceText);
-      triggerStageNudgeNotification({
-        orderId: activeNudge.orderId,
-        orderShortId: activeNudge.orderId.slice(-6).toUpperCase(),
-        title: activeNudge.title,
-        message: activeNudge.message,
-        step: activeNudge.step,
-        phase: activeNudge.phase,
-      });
 
-      if (Platform.OS === 'android' && AppState.currentState !== 'active') {
+      const isBackgrounded = AppState.currentState !== 'active';
+      if (isBackgrounded) {
+        triggerStageNudgeNotification({
+          orderId: activeNudge.orderId,
+          orderShortId: activeNudge.orderId.slice(-6).toUpperCase(),
+          title: activeNudge.title,
+          message: activeNudge.message,
+          step: activeNudge.step,
+          phase: activeNudge.phase,
+        });
+      }
+
+      if (Platform.OS === 'android' && isBackgrounded) {
         SpinzoOverlay.showOverlay({
           orderId: activeNudge.orderId,
           taskType: 'stage_nudge',
@@ -117,6 +128,7 @@ export function StageNudgeModal() {
         } as any);
       }
     } else if (!activeNudge) {
+      lastAlertedKeyRef.current = '';
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
         stopAlarm();
@@ -129,30 +141,35 @@ export function StageNudgeModal() {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
+        lastAlertedKeyRef.current = '';
         stopAlarm();
         if (Platform.OS === 'android') {
           SpinzoOverlay.dismissOverlay();
         }
       }
     };
-  }, [activeNudge?.processId, activeNudge?.orderId, activeNudge?.step, activeNudge?.phase, busy, voiceText, cleanToken]);
+  }, [activeAlertKey]);
 
   if (!activeNudge) return null;
 
   const handleDismiss = () => {
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
       SpinzoOverlay.dismissOverlay();
     }
-    // Snooze locally for 2 minutes on explicit X dismiss so user isn't immediately blocked
-    recordLocalSnooze(`${activeNudge.processId || activeNudge.orderId}_${activeNudge.step}_${activeNudge.phase}`);
+    const current = activeNudge;
+    // Snooze BOTH locally AND on backend so the 1-min FCM cron doesn't immediately re-push!
+    recordLocalSnooze(`${current.processId || current.orderId}_${current.step}_${current.phase}`);
     setActiveNudge(null);
+    snoozeNudge(current.orderId, current.step as any, current.phase as any, current.processId).catch(() => {});
   };
 
   const handleSnooze = async () => {
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -179,6 +196,7 @@ export function StageNudgeModal() {
 
   const handleAction = async () => {
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
     stopAlarm();
     setActionError(null);
 
@@ -188,8 +206,10 @@ export function StageNudgeModal() {
       if (Platform.OS === 'android') {
         SpinzoOverlay.dismissOverlay();
       }
+      // Snooze BOTH locally AND on backend when opening the order so FCM doesn't interrupt while working!
       recordLocalSnooze(`${current.processId || current.orderId}_${current.step}_${current.phase}`);
       setActiveNudge(null);
+      snoozeNudge(current.orderId, current.step as any, current.phase as any, current.processId).catch(() => {});
       navigation.navigate('OrderDetail', {
         orderId: current.orderId,
         processId: current.processId,

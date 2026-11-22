@@ -365,11 +365,9 @@ export function announceAssignedDelivery(
   speakHindi(prompt);
 }
 
-/** Alert for order stage transition — lighter chime + TTS */
-export function announceStageTransition(orderId: string, stageName: string) {
+/** Alert for order stage transition — subtle chime only (no alphanumeric order-ID TTS spam) */
+export function announceStageTransition(_orderId: string, _stageName: string) {
   lifecycleChime();
-  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
-  speak(`Order ${shortId} moved to ${stageName}`);
 }
 
 /** Alert for washing machine chemical additions (3m detergent, 21m softener, 36m complete) */

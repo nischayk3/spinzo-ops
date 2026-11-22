@@ -21,6 +21,7 @@ export function WasherReminderModal() {
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const wasAlertingRef = useRef(false);
+  const lastAlertedKeyRef = useRef<string>('');
 
   const isAvailableForReminders =
     staffDoc?.onShift === true &&
@@ -83,19 +84,29 @@ export function WasherReminderModal() {
       })
     : '';
 
+  const activeAlertKey = effectiveReminder
+    ? `${effectiveReminder.processId}:${effectiveReminder.milestone}`
+    : '';
+
   useEffect(() => {
     if (effectiveReminder) {
+      if (lastAlertedKeyRef.current === activeAlertKey) return;
+      lastAlertedKeyRef.current = activeAlertKey;
       wasAlertingRef.current = true;
       startVoiceAlertLoop(voiceText);
-      triggerStageNudgeNotification({
-        orderId: effectiveReminder.orderId,
-        orderShortId,
-        title,
-        message: description,
-        step: 'getting_washed',
-        phase: isComplete ? 'started' : 'accepted',
-      });
-      if (Platform.OS === 'android' && AppState.currentState !== 'active') {
+
+      const isBackgrounded = AppState.currentState !== 'active';
+      if (isBackgrounded) {
+        triggerStageNudgeNotification({
+          orderId: effectiveReminder.orderId,
+          orderShortId,
+          title,
+          message: description,
+          step: 'getting_washed',
+          phase: isComplete ? 'started' : 'accepted',
+        });
+      }
+      if (Platform.OS === 'android' && isBackgrounded) {
         SpinzoOverlay.showOverlay({
           orderId: effectiveReminder.orderId,
           taskType: 'stage_nudge',
@@ -107,6 +118,7 @@ export function WasherReminderModal() {
         } as any);
       }
     } else {
+      lastAlertedKeyRef.current = '';
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
         stopAlarm();
@@ -119,6 +131,7 @@ export function WasherReminderModal() {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
+        lastAlertedKeyRef.current = '';
         stopAlarm();
         clearAssignmentNotifications();
         if (Platform.OS === 'android') {
@@ -126,7 +139,7 @@ export function WasherReminderModal() {
         }
       }
     };
-  }, [effectiveReminder?.orderId, effectiveReminder?.milestone, title, description, actionLabel, orderShortId, isComplete, voiceText, cleanToken]);
+  }, [activeAlertKey]);
 
   if (!effectiveReminder) return null;
 
@@ -178,12 +191,14 @@ export function WasherReminderModal() {
 
   const handleDismiss = () => {
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
       SpinzoOverlay.dismissOverlay();
     }
-    dismissReminder();
+    // Snooze for 5 minutes on explicit X dismiss so the 5s milestone poller doesn't immediately pop it right back up!
+    snoozeReminder(5);
   };
 
   const badgeBg = isDetergent ? 'bg-amber-100 text-amber-800' : isSoftener ? 'bg-purple-100 text-purple-800' : 'bg-green-100 text-green-800';

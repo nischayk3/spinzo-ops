@@ -498,24 +498,10 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
           tasks.push(t);
           const alertKey = taskAlertKey(t, 'pickup');
           if (!isInitialTasks && shouldAnnounce(t, announcedTaskIds, 'pickup') && docSnap.id) {
+            // GlobalAssignmentModal owns the chime + Hindi voice loop for unaccepted tasks;
+            // only mark announced here so we never double-speak on pickup arrival.
             announcedTaskIds.add(alertKey);
             saveAnnounced(announcedTaskIds);
-            const sd = get().staffDoc;
-            const isSupervisorOverride = Boolean(t.assignedBy && t.assignedBy !== 'system_auto');
-            const isOnBreak = sd?.onBreak === true || sd?.attendanceStatus === 'lunch' || sd?.attendanceStatus === 'short_break';
-            if ((!sd || sd.onShift !== false) && (!isOnBreak || isSupervisorOverride)) {
-              const ord = activeOrderData.get(t.orderId || t.id);
-              announceAssignedPickup({
-                ...t,
-                tokenNumber: ord?.tokenNumber || t.tokenNumber,
-                tokens: ord?.tokens || t.tokens,
-                isExpress: Boolean(
-                  t.isExpress ||
-                  ord?.isExpress ||
-                  ord?.turnaroundMode === 'express_6_8h'
-                ),
-              });
-            }
           } else if (docSnap.id && t.acceptedAt) {
             announcedTaskIds.add(alertKey);
           }
@@ -581,23 +567,10 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
           deliveries.push(task);
           const alertKey = taskAlertKey(task, 'delivery');
           if (!isInitialDeliveries && shouldAnnounce(task, announcedTaskIds, 'delivery') && docSnap.id) {
+            // GlobalAssignmentModal owns the chime + Hindi voice loop for unaccepted deliveries;
+            // only mark announced here so we never double-speak on delivery arrival.
             announcedTaskIds.add(alertKey);
             saveAnnounced(announcedTaskIds);
-            const sd = get().staffDoc;
-            const isSupervisorOverride = Boolean(task.assignedBy && task.assignedBy !== 'system_auto');
-            const isOnBreak = sd?.onBreak === true || sd?.attendanceStatus === 'lunch' || sd?.attendanceStatus === 'short_break';
-            if ((!sd || sd.onShift !== false) && (!isOnBreak || isSupervisorOverride)) {
-              const ord = activeOrderData.get(task.orderId || task.id);
-              announceAssignedDelivery(task.orderId, task.deliveryAddress, {
-                tokenNumber: ord?.tokenNumber || task.tokenNumber,
-                tokensMap: ord?.tokens || task.tokens,
-                isExpress: Boolean(
-                  task.isExpress ||
-                  ord?.isExpress ||
-                  ord?.turnaroundMode === 'express_6_8h'
-                ),
-              });
-            }
           } else if (docSnap.id && task.acceptedAt) {
             announcedTaskIds.add(alertKey);
           }

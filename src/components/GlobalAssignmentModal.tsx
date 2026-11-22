@@ -111,16 +111,20 @@ export function GlobalAssignmentModal() {
     if (activeTask && activeTaskKey && !acceptingId && !locallyAcceptedIds.has(activeTaskKey)) {
       wasAlertingRef.current = true;
       startVoiceAlertLoop(voiceText);
-      triggerAssignmentNotification({
-        orderId,
-        orderShortId: shortId,
-        taskType: isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup'),
-        address,
-        slotText,
-        isInstant,
-      });
 
-      if (Platform.OS === 'android' && AppState.currentState !== 'active') {
+      const isBackgrounded = AppState.currentState !== 'active';
+      if (isBackgrounded) {
+        triggerAssignmentNotification({
+          orderId,
+          orderShortId: shortId,
+          taskType: isDelivery ? 'Delivery' : (isInstant ? 'Instant Pickup' : 'Pickup'),
+          address,
+          slotText,
+          isInstant,
+        });
+      }
+
+      if (Platform.OS === 'android' && isBackgrounded) {
         try {
           SpinzoOverlay.showOverlay({
             orderId,

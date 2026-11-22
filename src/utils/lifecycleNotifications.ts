@@ -9,7 +9,9 @@ import { useWasherReminderStore } from '../store/washerReminderStore';
 import { useStaffRosterStore } from '../store/staffRosterStore';
 
 const seenStates: Record<string, number> = {};
+let hasHydratedProcesses = false;
 const seenOrders = new Set<string>();
+let hasHydratedOrders = false;
 const announcedMilestones = new Set<string>();
 const EMPTY_PROCESSES: any[] = [];
 const EMPTY_ORDERS: any[] = [];
@@ -20,36 +22,52 @@ export function useLifecycleNotifications() {
   const isRider = (activeRole || staffDoc?.role) === 'rider';
 
   const processes = useOpsProcessStore(s => (isRider ? EMPTY_PROCESSES : s.processes));
+  const isProcessesLoading = useOpsProcessStore(s => (isRider ? false : s.isLoading));
   const orders = useOrderFeedStore(s => (isRider ? EMPTY_ORDERS : s.orders));
   const isOrdersLoading = useOrderFeedStore(s => (isRider ? false : s.isLoading));
   const myUid = staffDoc?.uid;
   const isSupervisorOrAdmin = activeRole === 'supervisor' || activeRole === 'admin' || staffDoc?.role === 'supervisor' || staffDoc?.role === 'admin';
 
-  // 1. Announce Stage Transitions (Supervisors and admins only)
+  // 1. Announce Stage Transitions (Supervisors and admins only — subtle chime, never on initial reload)
   useEffect(() => {
     if (!isSupervisorOrAdmin) return;
+    if (isProcessesLoading) return;
+
+    // Seed all existing processes on first hydrated snapshot (keyed by process.id, NOT orderId,
+    // so multi-load sibling docs sharing an orderId never collide and false-trigger on reload).
+    if (!hasHydratedProcesses) {
+      if (processes.length > 0) {
+        processes.forEach(p => {
+          seenStates[p.id] = p.currentIndex;
+        });
+        hasHydratedProcesses = true;
+      }
+      return;
+    }
+
     processes.forEach(p => {
-      const prevIndex = seenStates[p.orderId] ?? -1;
-      
-      // If order progressed to a new index and we had already seen it before (so we don't announce on first load)
+      const prevIndex = seenStates[p.id];
+      if (prevIndex === undefined) {
+        // Brand-new process doc appeared — record baseline without false transition alert
+        seenStates[p.id] = p.currentIndex;
+        return;
+      }
       if (p.currentIndex > prevIndex) {
-        if (prevIndex !== -1) {
-          // Announce!
-          announceStageTransition(p.orderId, stepLabel(p.status));
-        }
-        seenStates[p.orderId] = p.currentIndex;
+        seenStates[p.id] = p.currentIndex;
+        announceStageTransition(p.orderId, stepLabel(p.status));
       }
     });
-  }, [processes, isSupervisorOrAdmin]);
+  }, [processes, isProcessesLoading, isSupervisorOrAdmin]);
 
   // 2. Announce New Orders (Supervisors and admins only; delivery partners get alerted strictly on order assignment)
   useEffect(() => {
     if (!isSupervisorOrAdmin) return;
     if (isOrdersLoading) return; // Wait until initial load is done
-    
-    // On the first render after loading, we just populate the Set so we don't announce all history.
-    if (seenOrders.size === 0 && orders.length > 0) {
+
+    // On the first render after loading, silently seed all existing orders so reload is 100% silent.
+    if (!hasHydratedOrders) {
       orders.forEach(o => seenOrders.add(o.id));
+      hasHydratedOrders = true;
       return;
     }
 
@@ -120,12 +138,8 @@ export function useLifecycleNotifications() {
 
         if (!startMs || isNaN(startMs)) return;
         const elapsedMinutes = (now - startMs) / (60 * 1000);
-        const matchedOrder = useOrderFeedStore.getState().orders.find(o => o.id === p.orderId);
-        const tokenNumber = p.tokenNumber || matchedOrder?.tokenNumber;
-        const tokensMap = (matchedOrder as any)?.tokens;
 
-        // Milestone 1: Detergent at 3 minutes
-        const detKey = `${p.id}_detergent`;
+        // Milestone 1: Detergent at 3 minutes (WasherReminderModal owns audio/voice — no duplicate speech)
         if (elapsedMinutes >= 3 && !stage.detergentAddedAt) {
           useWasherReminderStore.getState().showReminder({
             orderId: p.orderId,
@@ -133,14 +147,9 @@ export function useLifecycleNotifications() {
             milestone: 'detergent',
             elapsedMinutes: Math.round(elapsedMinutes),
           });
-          if (!announcedMilestones.has(detKey)) {
-            announcedMilestones.add(detKey);
-            announceWasherMilestone(p.orderId, 'detergent', tokenNumber, tokensMap);
-          }
         }
 
         // Milestone 2: Softener at 21 minutes
-        const softKey = `${p.id}_softener`;
         if (elapsedMinutes >= 21 && !stage.softenerAddedAt) {
           useWasherReminderStore.getState().showReminder({
             orderId: p.orderId,
@@ -148,14 +157,9 @@ export function useLifecycleNotifications() {
             milestone: 'softener',
             elapsedMinutes: Math.round(elapsedMinutes),
           });
-          if (!announcedMilestones.has(softKey)) {
-            announcedMilestones.add(softKey);
-            announceWasherMilestone(p.orderId, 'softener', tokenNumber, tokensMap);
-          }
         }
 
         // Milestone 3: Cycle Complete at 36 minutes
-        const compKey = `${p.id}_complete`;
         if (elapsedMinutes >= 36) {
           useWasherReminderStore.getState().showReminder({
             orderId: p.orderId,
@@ -163,10 +167,6 @@ export function useLifecycleNotifications() {
             milestone: 'complete',
             elapsedMinutes: Math.round(elapsedMinutes),
           });
-          if (!announcedMilestones.has(compKey)) {
-            announcedMilestones.add(compKey);
-            announceWasherMilestone(p.orderId, 'complete', tokenNumber, tokensMap);
-          }
         }
       });
     };

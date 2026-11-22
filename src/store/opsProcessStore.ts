@@ -75,7 +75,11 @@ function scheduleHandsOnStageReminder(
   const initialDelayMs = rule ? rule.initialDelayMs : HANDS_ON_NUDGE_DELAY_SECONDS * 1000;
   const assignedOrAcceptedMs = toMillis(stageData?.assignedAt || stageData?.acceptedAt);
   const elapsedMs = assignedOrAcceptedMs > 0 ? Math.max(0, Date.now() - assignedOrAcceptedMs) : 0;
-  const delaySeconds = Math.max(10, Math.ceil((initialDelayMs - elapsedMs) / 1000));
+  const remainingSeconds = Math.ceil((initialDelayMs - elapsedMs) / 1000);
+  // If already past the initial 10m window, do NOT fire a 10-second OS alarm spam timer —
+  // StageNudgeModal + backend FCM already handle overdue reminders cleanly.
+  if (remainingSeconds < 30) return;
+  const delaySeconds = remainingSeconds;
   const title = rule?.title || (step === 'tagging' ? 'Tagging Reminder' : 'Packaging Reminder');
   const message =
     rule?.message ||
@@ -260,6 +264,8 @@ export const useOpsProcessStore = create<OpsProcessState>((set, get) => ({
     try {
       const cleanOrderId = orderId.includes('__') ? orderId.split('__')[0] : orderId;
       const targetProcessId = processId || getProcessId(orderId) || cleanOrderId;
+      // Immediately cancel any imminent local OS timer before the server round-trip completes
+      cancelStageNudgeTimer(targetProcessId || cleanOrderId, step);
       const res = await callOps()({
         orderId: cleanOrderId,
         processId: targetProcessId,
