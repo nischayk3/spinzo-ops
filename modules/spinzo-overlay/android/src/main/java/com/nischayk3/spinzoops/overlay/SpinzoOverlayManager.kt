@@ -18,6 +18,8 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -26,13 +28,25 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import java.util.Locale
 
 object SpinzoOverlayManager {
+
+    private const val SIREN_BURST_MS = 1_500L
+    private const val VOICE_REPEAT_INTERVAL_MS = 8_000L
+    private const val MAX_VOICE_REPEATS = 3
+    private const val REPEAT_VIBRATION_PULSE_MS = 600L
 
     private var currentOverlayView: View? = null
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var ttsFailed = false
+    private var pendingVoiceText: String? = null
+    private var activeVoiceText: String? = null
+    private var voiceRepeatCount = 0
     private var pendingAcceptedOrderId: String? = null
     private var pendingIsDelivery: Boolean = false
     private var pendingTaskType: String? = null
@@ -41,6 +55,25 @@ object SpinzoOverlayManager {
         Log.d("SpinzoOverlay", "45s auto-stop failsafe triggered — stopping alarm & vibration")
         stopAudioAndVibration()
     }
+    private val startVoiceRunnable = Runnable {
+        val text = activeVoiceText ?: return@Runnable
+        if (ttsFailed || tts == null) {
+            Log.w("SpinzoOverlay", "TTS unavailable — keeping alarm siren active")
+            return@Runnable
+        }
+        if (!ttsReady) {
+            pendingVoiceText = text
+            Log.d("SpinzoOverlay", "TTS still initializing — queued pending voice text")
+            return@Runnable
+        }
+        duckSirenAndSpeak(text, cancelLoopingVibration = true)
+    }
+    private val voiceRepeatRunnable = Runnable {
+        val text = activeVoiceText ?: return@Runnable
+        if (voiceRepeatCount >= MAX_VOICE_REPEATS) return@Runnable
+        triggerShortVibrationPulse()
+        duckSirenAndSpeak(text, cancelLoopingVibration = false)
+    }
 
     private fun formatStepLabel(raw: String): String {
         return when (raw.trim().lowercase()) {
@@ -48,8 +81,47 @@ object SpinzoOverlayManager {
             "getting_dried" -> "Drying"
             "getting_ironed" -> "Ironing"
             "tagging" -> "Tagging"
+            "prestain" -> "Pre-stain"
             "packaging" -> "Packaging"
             else -> raw.trim().replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        }
+    }
+
+    private fun buildFallbackHindiVoice(data: Map<String, String>): String {
+        val tokenNumber = data["tokenNumber"]?.trim()?.takeIf { it.isNotEmpty() }
+        val tokenPhrase = if (tokenNumber != null) "टोकन नंबर $tokenNumber" else "नया ऑर्डर"
+        val stepRaw = data["stepName"]?.trim()?.lowercase() ?: ""
+        val phase = data["phase"]?.trim()?.lowercase() ?: ""
+        val taskType = data["taskType"]?.trim()?.lowercase() ?: ""
+        val type = data["type"]?.trim()?.lowercase() ?: ""
+        val isInstant = data["isInstant"].equals("true", ignoreCase = true)
+        val isNudge = taskType == "stage_nudge" || type == "stage_nudge"
+        val isDelivery = taskType.contains("delivery")
+
+        val stepHindi = when (stepRaw) {
+            "getting_washed" -> "वॉशिंग"
+            "getting_dried" -> "ड्राइंग"
+            "getting_ironed" -> "आयरनिंग"
+            "tagging" -> "टैगिंग"
+            "prestain" -> "प्री-स्टेन"
+            "packaging" -> "पैकेजिंग"
+            else -> ""
+        }
+
+        return when {
+            phase == "idle_alert" -> {
+                if (stepHindi.isNotEmpty()) "$stepHindi मशीन खाली है, कृपया चेक करें।"
+                else "मशीन खाली है, कृपया चेक करें।"
+            }
+            isNudge -> {
+                if (stepHindi.isNotEmpty()) "$tokenPhrase का $stepHindi स्टेटस चेक करें।"
+                else "$tokenPhrase का स्टेटस चेक करें।"
+            }
+            isDelivery && isInstant -> "$tokenPhrase की एक्सप्रेस डिलीवरी आई है।"
+            isDelivery -> "$tokenPhrase की डिलीवरी असाइन हुई है।"
+            stepHindi.isNotEmpty() -> "$tokenPhrase के लिए $stepHindi का काम आया है।"
+            isInstant -> "$tokenPhrase का इंस्टेंट पिकअप आया है।"
+            else -> "$tokenPhrase का नया ऑर्डर आया है।"
         }
     }
 
@@ -81,6 +153,8 @@ object SpinzoOverlayManager {
 
         val orderId = data["orderId"] ?: ""
         val shortId = if (orderId.length >= 6) orderId.takeLast(6).uppercase() else orderId.uppercase()
+        val tokenNumber = data["tokenNumber"]?.trim()?.takeIf { it.isNotEmpty() }
+        val displayId = if (tokenNumber != null) "Token #$tokenNumber" else "#$shortId"
         val taskType = data["taskType"] ?: "pickup"
         val isDelivery = taskType.contains("delivery", ignoreCase = true)
         val isInstant = data["isInstant"].equals("true", ignoreCase = true)
@@ -89,12 +163,13 @@ object SpinzoOverlayManager {
         val formattedStep = if (stepName.isNotEmpty()) formatStepLabel(stepName) else ""
         val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
         val isIdleAlert = data["phase"] == "idle_alert"
+        val voiceText = data["voiceText"]?.takeIf { it.isNotBlank() } ?: buildFallbackHindiVoice(data)
 
         val rawAddress = data["address"]
         val address = when {
             !rawAddress.isNullOrBlank() -> rawAddress
             isIdleAlert -> "Check idle machine on store floor"
-            stepName.isNotEmpty() -> "Order #$shortId • Floor Task"
+            stepName.isNotEmpty() -> "$displayId • Floor Task"
             else -> "Customer Address"
         }
 
@@ -115,28 +190,32 @@ object SpinzoOverlayManager {
                 formattedStep.isNotEmpty() -> "⏰ $formattedStep"
                 else -> "⏰ Operations Check"
             }
-            tvSubtitle.text = if (isIdleAlert) "Store Floor • Idle Machine" else "#$shortId • Status Check"
+            tvSubtitle.text = when {
+                isIdleAlert -> "Store Floor • Idle Machine"
+                formattedStep.isNotEmpty() -> "$displayId • $formattedStep"
+                else -> "$displayId • Status Check"
+            }
             btnAccept.text = if (formattedStep.isNotEmpty()) formattedStep.uppercase() else "OPEN & RESPOND"
         } else if (isDelivery) {
             if (isInstant) {
                 tvTitle.text = "⚡ Express Delivery!"
-                tvSubtitle.text = "#$shortId • Express Delivery"
+                tvSubtitle.text = "$displayId • Express Delivery"
             } else {
                 tvTitle.text = "📦 Delivery Assigned!"
-                tvSubtitle.text = "#$shortId • Delivery"
+                tvSubtitle.text = "$displayId • Delivery"
             }
             btnAccept.text = "ACCEPT ORDER"
         } else if (isInstant) {
             tvTitle.text = "⚡ Instant Pickup!"
-            tvSubtitle.text = "#$shortId • Instant Pickup"
+            tvSubtitle.text = "$displayId • Instant Pickup"
             btnAccept.text = "ACCEPT ORDER"
         } else if (formattedStep.isNotEmpty()) {
             tvTitle.text = "⚙️ $formattedStep Assigned!"
-            tvSubtitle.text = "#$shortId • Process Stage"
+            tvSubtitle.text = "$displayId • $formattedStep"
             btnAccept.text = "ACCEPT ORDER"
         } else {
             tvTitle.text = "📦 Order Assigned!"
-            tvSubtitle.text = "#$shortId • Pickup"
+            tvSubtitle.text = "$displayId • Pickup"
             btnAccept.text = "ACCEPT ORDER"
         }
 
@@ -191,7 +270,7 @@ object SpinzoOverlayManager {
         }
 
         windowManager.addView(overlayView, params)
-        startAudioAndVibration(context)
+        startAudioAndVibration(appContext, voiceText)
 
         try {
             val pm = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
@@ -232,7 +311,154 @@ object SpinzoOverlayManager {
         }
     }
 
-    private fun startAudioAndVibration(context: Context) {
+    private fun ensureTtsInitialized(appContext: Context) {
+        if (tts != null && (ttsReady || !ttsFailed)) return
+        try {
+            ttsReady = false
+            ttsFailed = false
+            tts = TextToSpeech(appContext) { status ->
+                mainHandler.post {
+                    val engine = tts
+                    if (status == TextToSpeech.SUCCESS && engine != null) {
+                        try {
+                            var langResult = engine.setLanguage(Locale("hi", "IN"))
+                            if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                                langResult = engine.setLanguage(Locale("hi"))
+                            }
+                            if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                                Log.w("SpinzoOverlay", "Hindi TTS voice unavailable (code=$langResult) — falling back to siren")
+                                ttsReady = false
+                                ttsFailed = true
+                                pendingVoiceText = null
+                                return@post
+                            }
+                            engine.setSpeechRate(0.90f)
+                            engine.setAudioAttributes(
+                                AudioAttributes.Builder()
+                                    .setUsage(AudioAttributes.USAGE_ALARM)
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                    .build()
+                            )
+                            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                                override fun onStart(utteranceId: String?) {}
+                                override fun onDone(utteranceId: String?) {}
+
+                                @Deprecated("Deprecated in Java")
+                                override fun onError(utteranceId: String?) {
+                                    mainHandler.post {
+                                        if (activeVoiceText != null) {
+                                            Log.w("SpinzoOverlay", "TTS utterance error — resuming alarm fallback")
+                                            resumeAlarmFallback()
+                                        }
+                                    }
+                                }
+
+                                override fun onError(utteranceId: String?, errorCode: Int) {
+                                    mainHandler.post {
+                                        if (activeVoiceText != null) {
+                                            Log.w("SpinzoOverlay", "TTS utterance error ($errorCode) — resuming alarm fallback")
+                                            resumeAlarmFallback()
+                                        }
+                                    }
+                                }
+                            })
+                            ttsReady = true
+                            ttsFailed = false
+
+                            val queued = pendingVoiceText
+                            if (queued != null && activeVoiceText != null) {
+                                pendingVoiceText = null
+                                duckSirenAndSpeak(queued, cancelLoopingVibration = true)
+                            }
+                        } catch (e: Exception) {
+                            Log.w("SpinzoOverlay", "TTS configuration error: ${e.message}")
+                            ttsReady = false
+                            ttsFailed = true
+                            pendingVoiceText = null
+                        }
+                    } else {
+                        Log.w("SpinzoOverlay", "TTS initialization failed (status=$status) — keeping alarm siren")
+                        ttsReady = false
+                        ttsFailed = true
+                        pendingVoiceText = null
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "TTS constructor error: ${e.message}")
+            tts = null
+            ttsReady = false
+            ttsFailed = true
+            pendingVoiceText = null
+        }
+    }
+
+    private fun duckSirenAndSpeak(text: String, cancelLoopingVibration: Boolean) {
+        if (activeVoiceText == null || text.isBlank()) return
+        val engine = tts
+        if (engine == null || !ttsReady) {
+            Log.w("SpinzoOverlay", "TTS not ready — keeping alarm ringing")
+            return
+        }
+        try {
+            try {
+                if (mediaPlayer?.isPlaying == true) {
+                    mediaPlayer?.pause()
+                }
+            } catch (e: Exception) {
+                Log.w("SpinzoOverlay", "MediaPlayer pause error: ${e.message}")
+            }
+
+            if (cancelLoopingVibration) {
+                try {
+                    vibrator?.cancel()
+                } catch (e: Exception) {}
+            }
+
+            val utteranceId = "spinzo_alert_${System.currentTimeMillis()}"
+            val speakResult = engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+            if (speakResult == TextToSpeech.SUCCESS) {
+                voiceRepeatCount += 1
+                if (voiceRepeatCount < MAX_VOICE_REPEATS && activeVoiceText != null) {
+                    mainHandler.removeCallbacks(voiceRepeatRunnable)
+                    mainHandler.postDelayed(voiceRepeatRunnable, VOICE_REPEAT_INTERVAL_MS)
+                }
+            } else {
+                Log.w("SpinzoOverlay", "TTS speak returned error ($speakResult) — resuming alarm")
+                resumeAlarmFallback()
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "TTS speak exception: ${e.message} — resuming alarm")
+            resumeAlarmFallback()
+        }
+    }
+
+    private fun resumeAlarmFallback() {
+        try {
+            val mp = mediaPlayer
+            if (mp != null && !mp.isPlaying) {
+                mp.start()
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "MediaPlayer resume fallback error: ${e.message}")
+        }
+    }
+
+    private fun triggerShortVibrationPulse() {
+        try {
+            val v = vibrator ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                v.vibrate(VibrationEffect.createOneShot(REPEAT_VIBRATION_PULSE_MS, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                v.vibrate(REPEAT_VIBRATION_PULSE_MS)
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "Short vibration pulse error: ${e.message}")
+        }
+    }
+
+    private fun startAudioAndVibration(context: Context, voiceText: String? = null) {
         stopAudioAndVibration()
         try {
             val afd = context.resources.openRawResourceFd(R.raw.alarm)
@@ -281,11 +507,32 @@ object SpinzoOverlayManager {
             Log.w("SpinzoOverlay", "Vibration error: ${e.message}")
         }
 
+        val cleanedVoice = voiceText?.takeIf { it.isNotBlank() }
+        if (cleanedVoice != null) {
+            activeVoiceText = cleanedVoice
+            voiceRepeatCount = 0
+            ensureTtsInitialized(context.applicationContext ?: context)
+            mainHandler.postDelayed(startVoiceRunnable, SIREN_BURST_MS)
+        }
+
         mainHandler.postDelayed(autoStopRunnable, 45_000L)
     }
 
     fun stopAudioAndVibration() {
         mainHandler.removeCallbacks(autoStopRunnable)
+        mainHandler.removeCallbacks(startVoiceRunnable)
+        mainHandler.removeCallbacks(voiceRepeatRunnable)
+
+        activeVoiceText = null
+        pendingVoiceText = null
+        voiceRepeatCount = 0
+
+        try {
+            tts?.stop()
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "TTS stop error: ${e.message}")
+        }
+
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()

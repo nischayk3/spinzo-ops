@@ -9,10 +9,15 @@
 ## 1. Verification Baseline
 
 - **TypeScript (`npx tsc --noEmit`)**: PASS (0 errors)
-- **Unit Tests (`npm run test`)**: PASS (18 test files, 244/244 tests passing)
-- **Cloud Functions (`node --check` + `node --test`)**: PASS (`ops/functions/index.js`, `ops/functions/dispatch.js`, 48/48 dispatch tests passing)
+- **Unit Tests (`npm run test`)**: PASS (19 test files, 253/253 tests passing)
+- **Cloud Functions (`node --check` + `node --test`)**: PASS (`ops/functions/index.js`, `ops/functions/dispatch.js`, 50/50 dispatch tests passing)
 
 ## 2. Recently Shipped Baseline
+
+- **Phase 17 — Hindi (`hi-IN`) Voice Accessibility System & Supervisor Reload Siren Fix**:
+  - **Canonical Hindi Voice Engine (`src/utils/voiceScripts.ts`, `ops/functions/dispatch.js`, 9 client + 2 backend test suites)**: Built `extractCleanTokenNumber` (strips `T-`/`#`, rejects alphanumeric order IDs) and `buildHindiVoicePrompt` in natural Devanagari Hindi (`hi-IN`) for every helper assignment, washer/dryer start (`वॉशर चालू करिए` / `ड्रायर चालू करिए`), detergent/softener (`डिटर्जेंट डालिए` / `सॉफ्टनर डालिए`), unload (`वॉशर से निकालिए` / `ड्रायर से निकालिए`), tagging/packaging reminders, idle machine alerts, and rider pickup/delivery alerts.
+  - **Siren-Then-Voice Ducking & Native Locked-Screen Hindi TTS (`src/utils/alerts.ts`, `modules/spinzo-overlay/.../SpinzoOverlayManager.kt`, `ops/functions/index.js`, all 4 alert modals)**: Plays a `1.5s` attention chime, pauses the siren so voice is 100% clear, speaks Hindi (`hi-IN`, rate `0.90`), repeats every `8s` (max 3x), and stops immediately on tap/accept/snooze. Backend attaches `tokenNumber` + `voiceText` to every FCM payload; native Android `TextToSpeech` (`USAGE_ALARM`) speaks Hindi even with the screen locked.
+  - **Eliminated Supervisor Reload Siren Spam (`src/screens/Supervisor/SupervisorDashboardScreen.tsx`)**: Removed the `announceSkippedOrder` loop that blasted `"You skipped order..."` + siren for all today's pickups on every web reload. *(Pending `git push` + `firebase deploy --only functions`.)*
 
 - **Phase 16 — End-to-End Assignment, High-Priority FCM & Android Over-App Overlay Hardening**:
   - **Backend FCM (`ops/functions/index.js`)**: Eliminated all 6 double-FCM rider assignment paths (`fcmSent: true` guard in `onOpsTaskWritten`/`onDeliveryTaskWritten`), fixed missed FCMs in `onShiftCatchUp` & `markOutForDelivery`, bumped `android.ttl` to `300s`, added APNs priority-10 headers, added stale-token auto-cleanup, ordered `drainWaitingOpsQueues` before `checkUnstartedMachineNudges`, raised query limits (`25` → `100`), added `resolveUrgentRecipient` so 3m detergent / 21m softener / 36m+40m unload nudges aren't silently dropped, parallelized idle alerts, and extended `snoozeNudge` break-coverage to `tagging`/`packaging`.

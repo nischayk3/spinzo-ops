@@ -8,7 +8,8 @@ import { useAuthStore } from '../store/authStore';
 import { getTopEligibleTask } from '../utils/helperEligibility';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
 import { useHelperRulesStore } from '../store/helperRulesStore';
-import { stopAlarm, dramaticChime } from '../utils/alerts';
+import { stopAlarm, startVoiceAlertLoop, speakHindi } from '../utils/alerts';
+import { buildHindiVoicePrompt, extractCleanTokenNumber } from '../utils/voiceScripts';
 import { stepLabel, currentStep, isMachineStep, isHelperDoingHandsOn } from '../utils/opsProcess';
 import { serviceSummary, orderTotal } from '../utils/orderFeed';
 import { doc, runTransaction } from '../config/firebase';
@@ -70,13 +71,25 @@ export function HelperAssignmentModal() {
   const isHandsOn = staffDoc ? isHelperDoingHandsOn(processes, staffDoc.uid) : false;
   const isMachineMicroTask = activeTask ? isMachineStep(curStep) : false;
   const showAsBanner = isHandsOn && isMachineMicroTask;
+  const rawToken = activeTask?.tokenNumber || order?.tokenNumber;
+  const cleanToken = extractCleanTokenNumber(rawToken, (order as any)?.tokens);
+  const voiceText = activeTask
+    ? buildHindiVoicePrompt({
+        kind: 'helper_assignment',
+        step: curStep,
+        tokenNumber: rawToken,
+        tokensMap: (order as any)?.tokens,
+      })
+    : '';
 
   useEffect(() => {
     if (activeTask && !acceptingId) {
       wasAlertingRef.current = true;
-      // Loop alarm sound until helper accepts (continuous siren)
+      // Short chime then Hindi voice loop when modal is blocking; single clean Hindi voice when banner
       if (!showAsBanner) {
-        dramaticChime(true);
+        startVoiceAlertLoop(voiceText);
+      } else {
+        speakHindi(voiceText);
       }
       const addr = order?.address?.formattedAddress || (order as any)?.pickupAddress || (order as any)?.deliveryAddress || '';
       triggerAssignmentNotification({
@@ -94,7 +107,9 @@ export function HelperAssignmentModal() {
           customerName: order?.customerName || '',
           address: addr || 'Store Operations',
           stepName: curStep ? stepLabel(curStep) : '',
-        });
+          tokenNumber: cleanToken,
+          voiceText,
+        } as any);
       }
     } else {
       if (wasAlertingRef.current) {
@@ -115,7 +130,7 @@ export function HelperAssignmentModal() {
         }
       }
     };
-  }, [activeTask?.id, curStep, acceptingId, showAsBanner]);
+  }, [activeTask?.id, curStep, acceptingId, showAsBanner, voiceText, cleanToken]);
 
   // Auto-clear active task if the order was cancelled, completed, or deleted
   useEffect(() => {

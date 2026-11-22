@@ -4,11 +4,13 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Clock, Play, CheckCircle, X, ExternalLink } from 'lucide-react-native';
 import { useOpsProcessStore } from '../store/opsProcessStore';
+import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useAuthStore } from '../store/authStore';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { useStaffRosterStore } from '../store/staffRosterStore';
 import { getActiveStageNudge, ActiveStageNudge, recordLocalSnooze } from '../utils/stageNudges';
-import { dramaticChime, stopAlarm } from '../utils/alerts';
+import { startVoiceAlertLoop, stopAlarm } from '../utils/alerts';
+import { buildHindiVoicePrompt, extractCleanTokenNumber } from '../utils/voiceScripts';
 import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
 import type { RootStackParamList } from '../navigation/RootNavigator';
@@ -19,6 +21,7 @@ export function StageNudgeModal() {
   const activeRole = useAuthStore(s => s.activeRole);
   const staffDoc = useOpsStaffStore(s => s.staffDoc);
   const rosterHelpers = useStaffRosterStore(s => s.roster.helpers);
+  const orders = useOrderFeedStore(s => s.orders);
   const { processes, snoozeNudge, startStep, completeStep } = useOpsProcessStore();
   const [activeNudge, setActiveNudge] = useState<ActiveStageNudge | null>(null);
   const [busy, setBusy] = useState(false);
@@ -70,11 +73,29 @@ export function StageNudgeModal() {
     return () => clearInterval(interval);
   }, [processes, user?.id, activeRole, isOnShift, isOnBreak, rosterHelpers]);
 
-  // Alert triggers: Single non-looping chime + system heads-up notification + Android over-the-app overlay
+  const matchedProcess = activeNudge
+    ? processes.find(p => p.id === activeNudge.processId || p.orderId === activeNudge.orderId)
+    : undefined;
+  const matchedOrder = activeNudge
+    ? orders.find(o => o.id === activeNudge.orderId)
+    : undefined;
+  const rawToken = matchedProcess?.tokenNumber || matchedOrder?.tokenNumber;
+  const cleanToken = extractCleanTokenNumber(rawToken, (matchedOrder as any)?.tokens);
+  const voiceText = activeNudge
+    ? buildHindiVoicePrompt({
+        kind: 'nudge',
+        step: activeNudge.step,
+        phase: activeNudge.phase,
+        tokenNumber: rawToken,
+        tokensMap: (matchedOrder as any)?.tokens,
+      })
+    : '';
+
+  // Alert triggers: Chime-then-Hindi-voice loop + system heads-up notification + Android over-the-app overlay
   useEffect(() => {
     if (activeNudge && !busy) {
       wasAlertingRef.current = true;
-      dramaticChime(true);
+      startVoiceAlertLoop(voiceText);
       triggerStageNudgeNotification({
         orderId: activeNudge.orderId,
         orderShortId: activeNudge.orderId.slice(-6).toUpperCase(),
@@ -91,7 +112,9 @@ export function StageNudgeModal() {
           customerName: activeNudge.title,
           address: activeNudge.message,
           stepName: activeNudge.actionLabel,
-        });
+          tokenNumber: cleanToken,
+          voiceText,
+        } as any);
       }
     } else if (!activeNudge) {
       if (wasAlertingRef.current) {
@@ -112,7 +135,7 @@ export function StageNudgeModal() {
         }
       }
     };
-  }, [activeNudge?.processId, activeNudge?.orderId, activeNudge?.step, activeNudge?.phase, busy]);
+  }, [activeNudge?.processId, activeNudge?.orderId, activeNudge?.step, activeNudge?.phase, busy, voiceText, cleanToken]);
 
   if (!activeNudge) return null;
 

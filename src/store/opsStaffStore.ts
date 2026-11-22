@@ -504,7 +504,17 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             const isSupervisorOverride = Boolean(t.assignedBy && t.assignedBy !== 'system_auto');
             const isOnBreak = sd?.onBreak === true || sd?.attendanceStatus === 'lunch' || sd?.attendanceStatus === 'short_break';
             if ((!sd || sd.onShift !== false) && (!isOnBreak || isSupervisorOverride)) {
-              announceAssignedPickup(t);
+              const ord = activeOrderData.get(t.orderId || t.id);
+              announceAssignedPickup({
+                ...t,
+                tokenNumber: ord?.tokenNumber || t.tokenNumber,
+                tokens: ord?.tokens || t.tokens,
+                isExpress: Boolean(
+                  t.isExpress ||
+                  ord?.isExpress ||
+                  ord?.turnaroundMode === 'express_6_8h'
+                ),
+              });
             }
           } else if (docSnap.id && t.acceptedAt) {
             announcedTaskIds.add(alertKey);
@@ -577,7 +587,16 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
             const isSupervisorOverride = Boolean(task.assignedBy && task.assignedBy !== 'system_auto');
             const isOnBreak = sd?.onBreak === true || sd?.attendanceStatus === 'lunch' || sd?.attendanceStatus === 'short_break';
             if ((!sd || sd.onShift !== false) && (!isOnBreak || isSupervisorOverride)) {
-              announceAssignedDelivery(task.orderId, task.deliveryAddress);
+              const ord = activeOrderData.get(task.orderId || task.id);
+              announceAssignedDelivery(task.orderId, task.deliveryAddress, {
+                tokenNumber: ord?.tokenNumber || task.tokenNumber,
+                tokensMap: ord?.tokens || task.tokens,
+                isExpress: Boolean(
+                  task.isExpress ||
+                  ord?.isExpress ||
+                  ord?.turnaroundMode === 'express_6_8h'
+                ),
+              });
             }
           } else if (docSnap.id && task.acceptedAt) {
             announcedTaskIds.add(alertKey);

@@ -1126,4 +1126,139 @@ test('pickRider (Spatial Batching): clusters nearby order onto Rider A over dist
   assert.strictEqual(legacy, 'rider_b');
 });
 
+test('extractCleanTokenNumber: strips prefixes, falls back to tokensMap, rejects random IDs', () => {
+  const { extractCleanTokenNumber } = require('./dispatch');
+
+  assert.strictEqual(extractCleanTokenNumber('T-39'), '39');
+  assert.strictEqual(extractCleanTokenNumber('t-39'), '39');
+  assert.strictEqual(extractCleanTokenNumber('#149'), '149');
+  assert.strictEqual(extractCleanTokenNumber('  #T-42  '), '42');
+  assert.strictEqual(extractCleanTokenNumber('149'), '149');
+  assert.strictEqual(extractCleanTokenNumber('39A'), '39A');
+  assert.strictEqual(extractCleanTokenNumber(88), '88');
+
+  // Falls back to first valid entry in tokensMap
+  assert.strictEqual(extractCleanTokenNumber('', { wash_fold: 'T-51', ironing: '52' }), '51');
+  assert.strictEqual(extractCleanTokenNumber(null, { wash_fold: '', wash_iron: '#77' }), '77');
+
+  // Rejects empty / random alphanumeric order IDs (>8 chars or non-numeric-leading)
+  assert.strictEqual(extractCleanTokenNumber(''), '');
+  assert.strictEqual(extractCleanTokenNumber(null), '');
+  assert.strictEqual(extractCleanTokenNumber('ORD123456'), '');
+  assert.strictEqual(extractCleanTokenNumber('7kX9mP2qR4'), '');
+  assert.strictEqual(extractCleanTokenNumber('123456789'), '');
+  assert.strictEqual(extractCleanTokenNumber('abc123'), '');
+  assert.strictEqual(extractCleanTokenNumber('ORD999999999', { wash_fold: 'T-64' }), '64');
+});
+
+test('buildHindiVoicePrompt: generates exact Devanagari Hindi scripts for all alert scenarios', () => {
+  const { buildHindiVoicePrompt } = require('./dispatch');
+
+  // Helper assignments (with and without token)
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'tagging', tokenNumber: 'T-39' }),
+    'टोकन नंबर 39, टैगिंग करनी है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'getting_washed', tokenNumber: '#149' }),
+    'टोकन नंबर 149, वॉशर में डालिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'getting_dried', tokenNumber: '12' }),
+    'टोकन नंबर 12, ड्रायर में डालिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'getting_ironed', tokenNumber: '7' }),
+    'टोकन नंबर 7, आयरन करना है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'packaging', tokenNumber: '25' }),
+    'टोकन नंबर 25, पैकेजिंग करनी है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'unknown_step', tokenNumber: '25' }),
+    'टोकन नंबर 25, नया काम आया है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'helper_assignment', step: 'tagging' }),
+    'टैगिंग करनी है'
+  );
+
+  // Machine start / unload & chemical nudges
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'getting_washed', phase: 'detergent', tokenNumber: '39' }),
+    'टोकन नंबर 39, डिटर्जेंट डालिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'getting_washed', phase: 'softener', tokenNumber: '39' }),
+    'टोकन नंबर 39, सॉफ्टनर डालिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'getting_washed', phase: 'accepted', tokenNumber: '39' }),
+    'टोकन नंबर 39, वॉशर चालू करिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'getting_washed', phase: 'started', tokenNumber: '39' }),
+    'टोकन नंबर 39, वॉशर से निकालिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'getting_dried', phase: 'accepted', tokenNumber: '40' }),
+    'टोकन नंबर 40, ड्रायर चालू करिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'getting_dried', phase: 'started', tokenNumber: '40' }),
+    'टोकन नंबर 40, ड्रायर से निकालिए'
+  );
+
+  // Tagging & packaging hands-on nudges
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'tagging', phase: 'hands_on', tokenNumber: '18' }),
+    'टोकन नंबर 18, टैगिंग जल्दी पूरी करिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'nudge', step: 'packaging', phase: 'hands_on', tokenNumber: '18' }),
+    'टोकन नंबर 18, पैकेजिंग जल्दी पूरी करिए'
+  );
+
+  // Idle machine autopilot alerts
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'idle_alert', step: 'getting_washed' }),
+    'वॉशर खाली है, कपड़े डालिए'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'idle_alert', step: 'getting_dried' }),
+    'ड्रायर खाली है, कपड़े डालिए'
+  );
+
+  // Rider pickup & delivery
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'pickup', isExpress: false }),
+    'नया पिकअप आया है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'pickup', isExpress: true }),
+    'एक्सप्रेस पिकअप आया है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'pickup', isExpress: false, locality: 'HSR Sector 2' }),
+    'नया पिकअप आया है, HSR Sector 2'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'pickup', isExpress: true, locality: 'A very long locality name exceeding twenty-five characters' }),
+    'एक्सप्रेस पिकअप आया है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'delivery', tokenNumber: 'T-105', isExpress: false }),
+    'टोकन नंबर 105, डिलीवरी के लिए जाना है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'delivery', isExpress: true }),
+    'एक्सप्रेस डिलीवरी के लिए जाना है'
+  );
+  assert.strictEqual(
+    buildHindiVoicePrompt({ kind: 'delivery', isExpress: false }),
+    'नई डिलीवरी आई है'
+  );
+});
+
 

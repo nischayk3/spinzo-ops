@@ -1343,11 +1343,94 @@ function washerChemicalNudgeDue(stageData, nowMs = Date.now()) {
   return null;
 }
 
+/**
+ * Extract a clean numeric-based token string from a raw token value or a tokens map.
+ * Strips leading 'T-', 't-', '#', and whitespace. Rejects empty strings or random
+ * alphanumeric order IDs (>8 chars or non-numeric-leading).
+ * @param {string|number|null|undefined} rawToken
+ * @param {Record<string, unknown>|null|undefined} [tokensMap]
+ * @returns {string}
+ */
+function extractCleanTokenNumber(rawToken, tokensMap) {
+  const cleanCandidate = (val) => {
+    if (val === null || val === undefined) return '';
+    const str = String(val)
+      .trim()
+      .replace(/^[#\s]+/, '')
+      .replace(/^t[-\s]*/i, '')
+      .replace(/^[#\s]+/, '')
+      .trim();
+    if (!str || str.length > 8) return '';
+    // Allow pure digits ("39", "149") or short numeric-based tokens ("39A", "39-1")
+    if (!/^\d+(?:-[A-Za-z0-9]{1,2}|[A-Za-z]{1,2})?$/.test(str)) return '';
+    return str;
+  };
+
+  const direct = cleanCandidate(rawToken);
+  if (direct) return direct;
+
+  if (tokensMap && typeof tokensMap === 'object') {
+    for (const val of Object.values(tokensMap)) {
+      const cleaned = cleanCandidate(val);
+      if (cleaned) return cleaned;
+    }
+  }
+  return '';
+}
+
+/**
+ * Build canonical Devanagari Hindi (hi-IN) TTS prompt for staff FCM voice alerts.
+ * @param {{ kind?: string, step?: string, phase?: string, tokenNumber?: string|number, isExpress?: boolean, locality?: string }} [opts]
+ * @returns {string}
+ */
+function buildHindiVoicePrompt({ kind, step, phase, tokenNumber, isExpress, locality } = {}) {
+  const tok = extractCleanTokenNumber(tokenNumber);
+  const prefix = tok ? `टोकन नंबर ${tok}, ` : '';
+
+  if (kind === 'pickup') {
+    const base = isExpress ? 'एक्सप्रेस पिकअप आया है' : 'नया पिकअप आया है';
+    const shortLoc = typeof locality === 'string' ? locality.trim() : '';
+    return shortLoc && shortLoc.length <= 25 ? `${base}, ${shortLoc}` : base;
+  }
+
+  if (kind === 'delivery') {
+    if (tok) return `टोकन नंबर ${tok}, डिलीवरी के लिए जाना है`;
+    return isExpress ? 'एक्सप्रेस डिलीवरी के लिए जाना है' : 'नई डिलीवरी आई है';
+  }
+
+  if (kind === 'idle_alert') {
+    if (step === 'getting_dried') return 'ड्रायर खाली है, कपड़े डालिए';
+    return 'वॉशर खाली है, कपड़े डालिए';
+  }
+
+  if (kind === 'nudge') {
+    if (phase === 'detergent') return `${prefix}डिटर्जेंट डालिए`;
+    if (phase === 'softener') return `${prefix}सॉफ्टनर डालिए`;
+    if (step === 'getting_washed' && phase === 'accepted') return `${prefix}वॉशर चालू करिए`;
+    if (step === 'getting_washed' && phase === 'started') return `${prefix}वॉशर से निकालिए`;
+    if (step === 'getting_dried' && phase === 'accepted') return `${prefix}ड्रायर चालू करिए`;
+    if (step === 'getting_dried' && phase === 'started') return `${prefix}ड्रायर से निकालिए`;
+    if (step === 'tagging') return `${prefix}टैगिंग जल्दी पूरी करिए`;
+    if (step === 'packaging') return `${prefix}पैकेजिंग जल्दी पूरी करिए`;
+    return `${prefix}नया काम आया है`;
+  }
+
+  // kind === 'helper_assignment' (or default)
+  if (step === 'tagging') return `${prefix}टैगिंग करनी है`;
+  if (step === 'getting_washed') return `${prefix}वॉशर में डालिए`;
+  if (step === 'getting_dried') return `${prefix}ड्रायर में डालिए`;
+  if (step === 'getting_ironed') return `${prefix}आयरन करना है`;
+  if (step === 'packaging') return `${prefix}पैकेजिंग करनी है`;
+  return `${prefix}नया काम आया है`;
+}
+
 module.exports = {
   isMachineNudgeDue,
   isMachineUnloadNudgeDue,
   isHandsOnStageNudgeDue,
   washerChemicalNudgeDue,
+  extractCleanTokenNumber,
+  buildHindiVoicePrompt,
   getTodayDateString,
   normalizeSlotDateString,
   isDeliveryDueToday,

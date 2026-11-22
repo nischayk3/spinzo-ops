@@ -2,7 +2,7 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, isWashRequiringService, getOccupiedMachines, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, isHandsOnStageNudgeDue, washerChemicalNudgeDue, resolveToken } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, isWashRequiringService, getOccupiedMachines, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, isHandsOnStageNudgeDue, washerChemicalNudgeDue, resolveToken, extractCleanTokenNumber, buildHindiVoicePrompt } = require('./dispatch');
 
 // Which steps a role may claim/start. Supervisors bypass.
 // Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
@@ -104,6 +104,8 @@ async function sendFCMOrderAssignment({
   isInstant = false,
   stepName = '',
   assignedBySupervisor = false,
+  tokenNumber = '',
+  voiceText = '',
 }) {
   if (!staffId) return;
   try {
@@ -128,6 +130,27 @@ async function sendFCMOrderAssignment({
       return;
     }
 
+    const cleanToken = extractCleanTokenNumber(tokenNumber);
+    const taskTypeLower = String(taskType || '').toLowerCase();
+    const kind =
+      taskType === 'step'
+        ? 'helper_assignment'
+        : taskTypeLower.includes('delivery')
+        ? 'delivery'
+        : 'pickup';
+    const isExpressTask =
+      taskTypeLower.includes('express') ||
+      String(slot || '').toLowerCase().includes('express') ||
+      (kind === 'delivery' && Boolean(isInstant));
+    const computedVoiceText =
+      voiceText ||
+      buildHindiVoicePrompt({
+        kind,
+        step: stepName,
+        tokenNumber: cleanToken,
+        isExpress: isExpressTask,
+      });
+
     const message = {
       token: fcmToken,
       data: {
@@ -140,6 +163,8 @@ async function sendFCMOrderAssignment({
         isInstant: String(isInstant ? 'true' : 'false'),
         stepName: String(stepName || ''),
         assignedBySupervisor: assignedBySupervisor ? 'true' : 'false',
+        tokenNumber: String(cleanToken || ''),
+        voiceText: String(computedVoiceText || ''),
       },
       android: {
         priority: 'high',
@@ -178,6 +203,8 @@ async function sendFCMStageNudge({
   step = 'getting_washed',
   phase = 'accepted',
   actionLabel = 'START WASHER',
+  tokenNumber = '',
+  voiceText = '',
 }) {
   if (!staffId) return;
   try {
@@ -197,6 +224,16 @@ async function sendFCMStageNudge({
       return;
     }
 
+    const cleanToken = extractCleanTokenNumber(tokenNumber);
+    const computedVoiceText =
+      voiceText ||
+      buildHindiVoicePrompt({
+        kind: phase === 'idle_alert' ? 'idle_alert' : 'nudge',
+        step,
+        phase,
+        tokenNumber: cleanToken,
+      });
+
     const payload = {
       token: fcmToken,
       data: {
@@ -209,6 +246,8 @@ async function sendFCMStageNudge({
         stepName: String(actionLabel || 'START MACHINE'),
         step: String(step || ''),
         phase: String(phase || 'accepted'),
+        tokenNumber: String(cleanToken || ''),
+        voiceText: String(computedVoiceText || ''),
       },
       android: {
         priority: 'high',
@@ -391,6 +430,7 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
       address: pickupAddressFromOrder(order),
       slot,
       isInstant: isInstant || isExpress,
+      tokenNumber: extractCleanTokenNumber(order && order.tokenNumber, order && order.tokens),
     });
 
     // Dual-write rider details directly to customer's order doc for real-time app tracking
@@ -492,6 +532,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
         address: td.pickupAddress || '',
         slot,
         isInstant: isInstant || isExp,
+        tokenNumber: extractCleanTokenNumber(td.tokenNumber, td.tokens),
       });
     } catch (err) {
       console.error(`onShiftCatchUp: reassign ${taskDoc.id} failed`, err);
@@ -622,6 +663,7 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
           address: delData.deliveryAddress || '',
           slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
           isInstant: isExp,
+          tokenNumber: delData.tokenNumber || extractCleanTokenNumber(null, delData.tokens),
         });
         console.log(`[onShiftCatchUp] Assigned due delivery ${delDoc.id} (${delData.deliveryDate}) to newly on-shift rider ${newRiderUid}`);
       }
@@ -1265,12 +1307,15 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
 
     // Create process docs for all services
     const batch = db.batch();
+    let primaryTokenNumber = '';
     for (const group of serviceGroups) {
       const processKey = group.processKey || group.serviceType;
       const processId = `${orderId}__${processKey}`;
       const steps = stepsForServiceType(group.serviceType);
       const pRef = db.doc(`ops_process/${processId}`);
       const tokenKey = group.tokenKey || group.processKey || group.serviceType;
+      const procTokenNumber = resolveToken(tokens, tokenKey) || resolveToken(tokens, group.serviceType) || order.tokenNumber || '';
+      if (!primaryTokenNumber && procTokenNumber) primaryTokenNumber = procTokenNumber;
 
       batch.set(pRef, {
         id: processId,
@@ -1283,7 +1328,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         steps,
         currentIndex: 0,
         status: steps[0],
-        tokenNumber: resolveToken(tokens, tokenKey) || resolveToken(tokens, group.serviceType) || order.tokenNumber || '',
+        tokenNumber: procTokenNumber,
         siblingCount: serviceGroups.length,
         loadIndex: group.loadIndex || 1,
         loadCount: group.loadCount || 1,
@@ -1338,6 +1383,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
         taskType: 'step',
         customerName: order.customerName || order.userName || '',
         stepName: 'tagging',
+        tokenNumber: primaryTokenNumber || order.tokenNumber || extractCleanTokenNumber(null, tokens),
       });
     }
   } catch (err) {
@@ -1473,6 +1519,7 @@ async function autoAssignStage(processId, targetStage, options = {}) {
       taskType: 'step',
       customerName: pData.customerName || '',
       stepName: targetStage,
+      tokenNumber: pData.tokenNumber || '',
     });
 
     return { ok: true, helper: selectedHelper, machineName };
@@ -1672,6 +1719,7 @@ async function drainScheduledRiderTasks() {
           address: data.pickupAddress || '',
           slot,
           isInstant: isInstant || isExp,
+          tokenNumber: extractCleanTokenNumber(data.tokenNumber, data.tokens),
         });
         console.log(`[drainScheduledRiderTasks] Auto-dispatched due pickup ${orderId} (slot: ${slot}) to rider ${assignee}`);
       }
@@ -1742,6 +1790,7 @@ async function drainScheduledRiderTasks() {
         address: delData.deliveryAddress || '',
         slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
         isInstant: isExp,
+        tokenNumber: delData.tokenNumber || extractCleanTokenNumber(null, delData.tokens),
       });
       console.log(`[drainScheduledRiderTasks] Auto-dispatched due delivery ${delDoc.id} (slot: ${delData.deliveryDate} ${delData.deliveryTime}) to rider ${riderUid}`);
     }
@@ -1847,6 +1896,7 @@ async function checkUnstartedMachineNudges() {
             step,
             phase: 'accepted',
             actionLabel,
+            tokenNumber: p.tokenNumber || '',
           });
 
           // Record lastSentAt in Firestore to suppress repeated FCM alerts for 5 minutes
@@ -1886,6 +1936,7 @@ async function checkUnstartedMachineNudges() {
             step,
             phase: 'started',
             actionLabel,
+            tokenNumber: p.tokenNumber || '',
           });
 
           // Record lastSentAt in Firestore to suppress repeated FCM alerts for 5 minutes
@@ -1924,6 +1975,7 @@ async function checkUnstartedMachineNudges() {
             step,
             phase: chemical,
             actionLabel: isDetergent ? 'ADD DETERGENT NOW' : 'ADD SOFTENER NOW',
+            tokenNumber: p.tokenNumber || '',
           });
 
           await doc.ref.set({
@@ -1978,6 +2030,7 @@ async function checkUnstartedMachineNudges() {
           step,
           phase: 'hands_on',
           actionLabel,
+          tokenNumber: p.tokenNumber || '',
         });
 
         await doc.ref.set({
@@ -2427,6 +2480,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         address: deliveryAddress,
         slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
         isInstant: isExpress,
+        tokenNumber: after.tokenNumber || extractCleanTokenNumber(null, after.tokens),
       });
       console.log(`[syncDeliveryTask] Outbound delivery for order ${orderId} (slot: ${deliveryDate} ${deliveryTime}) auto-assigned to rider ${riderUid}`);
     } else if (!riderUid) {
@@ -2748,6 +2802,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
             taskType: 'step',
             customerName: order.customerName || order.userName || '',
             stepName: 'tagging',
+            tokenNumber: extractCleanTokenNumber(data.tokenNumber || order.tokenNumber, tokens),
           });
         } catch (fcmErr) {
           console.warn('[claim] FCM send error:', fcmErr);
@@ -4029,6 +4084,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             customerName: order.customerName || order.userName || '',
             address: pickupAddressFromOrder(order),
             slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
+            tokenNumber: order.tokenNumber || extractCleanTokenNumber(null, order.tokens),
           },
         };
       }
@@ -4439,6 +4495,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             customerName: p.customerName || '',
             stepName: p.steps[p.currentIndex] || '',
             assignedBySupervisor: true,
+            tokenNumber: p.tokenNumber || '',
           });
         }
       } catch (err) {
@@ -4495,6 +4552,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           slot,
           isInstant,
           assignedBySupervisor: true,
+          tokenNumber: extractCleanTokenNumber(oData.tokenNumber, oData.tokens),
         });
       } catch (err) {
         console.error('assignTaskToRider FCM push error', err);
@@ -4513,6 +4571,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           address: fcmInfo.address,
           slot: fcmInfo.slot || (fcmInfo.isExpress ? '⚡ Express 6-8h Priority' : ''),
           isInstant: fcmInfo.isExpress,
+          tokenNumber: fcmInfo.tokenNumber || '',
         });
       } catch (err) {
         console.error('markOutForDelivery FCM push error', err);
@@ -4624,6 +4683,7 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
       address: enrichedAfter.pickupAddress || '',
       slot,
       isInstant: isInstant || isExp,
+      tokenNumber: extractCleanTokenNumber(enrichedAfter.tokenNumber, enrichedAfter.tokens),
     });
   }
 
@@ -4777,6 +4837,7 @@ exports.onDeliveryTaskWritten = onDocumentWritten('ops_delivery_tasks/{orderId}'
       address: after.deliveryAddress || '',
       slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
       isInstant: isExp,
+      tokenNumber: after.tokenNumber || extractCleanTokenNumber(null, after.tokens),
     });
   }
 

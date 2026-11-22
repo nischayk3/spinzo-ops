@@ -5,7 +5,8 @@ import { useOpsStaffStore } from '../store/opsStaffStore';
 import { acceptTask } from '../utils/opsPickup';
 import { isPending, pickupLabel, formatRiderDateLabel, taskAlertKey } from '../utils/opsTasks';
 import { formatDisplayPhone } from '../utils/orderFeed';
-import { stopAlarm, dramaticChime } from '../utils/alerts';
+import { stopAlarm, startVoiceAlertLoop } from '../utils/alerts';
+import { buildHindiVoicePrompt, extractCleanTokenNumber } from '../utils/voiceScripts';
 import { triggerAssignmentNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
 
@@ -88,11 +89,28 @@ export function GlobalAssignmentModal() {
   const address = safeAddress(rawAddress);
   const orderId = activeTask?.orderId || activeTask?.id || '';
   const shortId = safeShortId(orderId);
+  const rawToken = (activeTask as any)?.tokenNumber;
+  const tokensMap = (activeTask as any)?.tokens;
+  const cleanToken = extractCleanTokenNumber(rawToken, tokensMap);
+  const isExpress = Boolean((activeTask as any)?.isExpress);
+  const locality =
+    typeof rawAddress === 'object' && rawAddress
+      ? rawAddress.locality || rawAddress.subLocality || rawAddress.area || undefined
+      : undefined;
+  const voiceText = activeTask
+    ? buildHindiVoicePrompt({
+        kind: isDelivery ? 'delivery' : 'pickup',
+        tokenNumber: rawToken,
+        tokensMap,
+        isExpress,
+        locality,
+      })
+    : '';
 
   useEffect(() => {
     if (activeTask && activeTaskKey && !acceptingId && !locallyAcceptedIds.has(activeTaskKey)) {
       wasAlertingRef.current = true;
-      dramaticChime(true);
+      startVoiceAlertLoop(voiceText);
       triggerAssignmentNotification({
         orderId,
         orderShortId: shortId,
@@ -111,7 +129,9 @@ export function GlobalAssignmentModal() {
             address,
             slot: slotText,
             isInstant: isInstant ? 'true' : 'false',
-          });
+            tokenNumber: cleanToken,
+            voiceText,
+          } as any);
         } catch (e) {
           console.warn('[GlobalAssignmentModal] SpinzoOverlay.showOverlay error:', e);
         }
@@ -139,7 +159,7 @@ export function GlobalAssignmentModal() {
         }
       }
     };
-  }, [activeTaskKey, acceptingId]);
+  }, [activeTaskKey, acceptingId, voiceText, cleanToken]);
 
   const handleAccept = async () => {
     if (!activeTask || !activeTaskKey) return;

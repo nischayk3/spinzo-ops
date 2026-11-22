@@ -1,6 +1,7 @@
 import { Platform } from 'react-native';
 import * as Speech from 'expo-speech';
 import type { OpsTask } from './opsTasks';
+import { buildHindiVoicePrompt } from './voiceScripts';
 
 // Browser audio needs a user gesture before it can play; prime once from a tap handler.
 let audioCtx: { ctx: AudioContext; resume: () => Promise<void> } | null = null;
@@ -66,6 +67,69 @@ import { createAudioPlayer } from 'expo-audio';
 const alarmSound = createAudioPlayer(require('../../assets/sounds/alarm.mp3'));
 let shouldBePlaying = false;
 let singleLoopTimeout: ReturnType<typeof setTimeout> | null = null;
+let voiceLoopGeneration = 0;
+let voiceTimeout: ReturnType<typeof setTimeout> | null = null;
+
+function stopAlarmSoundOnly() {
+  shouldBePlaying = false;
+  if (singleLoopTimeout) {
+    clearTimeout(singleLoopTimeout);
+    singleLoopTimeout = null;
+  }
+  try {
+    alarmSound.pause();
+    alarmSound.loop = false;
+    if (typeof alarmSound.seekTo === 'function') {
+      alarmSound.seekTo(0);
+    } else if (typeof alarmSound.currentTime !== 'undefined') {
+      alarmSound.currentTime = 0;
+    }
+  } catch (e) {
+    console.log('Failed to stop alarm sound', e);
+  }
+}
+
+/** Play a short non-looping attention chime that stops cleanly after durationMs without touching voice timers */
+function playAttentionChime(durationMs: number = 1500) {
+  shouldBePlaying = true;
+  if (singleLoopTimeout) {
+    clearTimeout(singleLoopTimeout);
+    singleLoopTimeout = null;
+  }
+
+  if (web) {
+    const ac = ensureAudioCtx();
+    if (ac) {
+      try {
+        ac.resume().catch(() => {});
+        const now = ac.ctx.currentTime;
+        playTone(ac.ctx, 784, 'triangle', now, 0.22, 0.3);
+        playTone(ac.ctx, 988, 'triangle', now + 0.2, 0.22, 0.3);
+        playTone(ac.ctx, 1318, 'triangle', now + 0.4, 0.35, 0.35);
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
+  try {
+    alarmSound.loop = false;
+    if (typeof alarmSound.seekTo === 'function') {
+      alarmSound.seekTo(0);
+    } else if (typeof alarmSound.currentTime !== 'undefined') {
+      alarmSound.currentTime = 0;
+    }
+    try { alarmSound.play(); } catch { /* silence AbortError */ }
+
+    singleLoopTimeout = setTimeout(() => {
+      if (shouldBePlaying) {
+        stopAlarmSoundOnly();
+      }
+    }, durationMs);
+  } catch (e) {
+    console.log('Failed to play attention chime', e);
+  }
+}
 
 /** Unlock Audio Context for web browsers safely */
 export async function unlockAudio() {
@@ -141,24 +205,10 @@ export async function dramaticChime(loop: boolean = true) {
   }
 }
 
-/** Instantly kill the siren */
+/** Instantly kill both the siren and any active Hindi TTS voice alert loop */
 export async function stopAlarm() {
-  shouldBePlaying = false;
-  if (singleLoopTimeout) {
-    clearTimeout(singleLoopTimeout);
-    singleLoopTimeout = null;
-  }
-  try {
-    alarmSound.pause();
-    alarmSound.loop = false;
-    if (typeof alarmSound.seekTo === 'function') {
-      alarmSound.seekTo(0);
-    } else if (typeof alarmSound.currentTime !== 'undefined') {
-      alarmSound.currentTime = 0;
-    }
-  } catch (e) {
-    console.log('Failed to stop alarm sound', e);
-  }
+  stopAlarmSoundOnly();
+  stopVoiceAlerts();
 }
 
 /** Lighter chime for lifecycle stage transitions */
@@ -206,23 +256,113 @@ function speak(text: string) {
   }
 }
 
+/** Speak Devanagari Hindi clearly using hi-IN voice, cancelling any prior speech first */
+export function speakHindi(text: string) {
+  const trimmed = (text || '').trim();
+  if (!trimmed) return;
+  try {
+    Speech.stop();
+  } catch {
+    // best-effort
+  }
+  try {
+    Speech.speak(trimmed, { language: 'hi-IN', rate: 0.90, pitch: 1.0 });
+  } catch (err) {
+    console.warn('Hindi speech error', err);
+  }
+}
+
+/** Cancel any pending Hindi voice repeat timers and stop active TTS immediately */
+export function stopVoiceAlerts() {
+  voiceLoopGeneration += 1;
+  if (voiceTimeout) {
+    clearTimeout(voiceTimeout);
+    voiceTimeout = null;
+  }
+  try {
+    Speech.stop();
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Play a 1.5s attention chime, silence the chime completely, and then speak the Hindi prompt
+ * clearly with zero siren overlap. Repeats up to `maxRepeats` times (default 3) every `repeatEveryMs` (default 8000ms).
+ */
+export function startVoiceAlertLoop(
+  voiceText: string,
+  options?: { repeatEveryMs?: number; maxRepeats?: number }
+) {
+  stopVoiceAlerts();
+  stopAlarmSoundOnly();
+
+  const trimmed = (voiceText || '').trim();
+  if (!trimmed) return;
+
+  const repeatEveryMs = options?.repeatEveryMs ?? 8000;
+  const maxRepeats = Math.max(1, options?.maxRepeats ?? 3);
+  const gen = ++voiceLoopGeneration;
+
+  playAttentionChime(1500);
+
+  let spokenCount = 0;
+  const speakNext = () => {
+    if (gen !== voiceLoopGeneration) return;
+    stopAlarmSoundOnly();
+    speakHindi(trimmed);
+    spokenCount += 1;
+    if (spokenCount < maxRepeats) {
+      voiceTimeout = setTimeout(speakNext, repeatEveryMs);
+    } else {
+      voiceTimeout = null;
+    }
+  };
+
+  voiceTimeout = setTimeout(speakNext, 1500);
+}
+
 export function primeAlerts() {
   confirmBeep();
 }
 
 export function announceNewOrder() {
-  dramaticChime(false);
-  speak('New order placed');
+  startVoiceAlertLoop(buildHindiVoicePrompt({ kind: 'new_order' }), { maxRepeats: 1 });
 }
 
-export function announceAssignedPickup(task: Pick<OpsTask, 'orderId' | 'pickupAddress'>) {
-  const shortId = (task?.orderId || '').slice(-6).toUpperCase() || '------';
-  speak(`Pickup assigned. Order ${shortId}. ${task?.pickupAddress || ''}`);
+export function announceAssignedPickup(
+  task: Pick<OpsTask, 'orderId' | 'pickupAddress'> & {
+    tokenNumber?: unknown;
+    tokens?: Record<string, unknown> | null;
+    isExpress?: boolean;
+  }
+) {
+  const prompt = buildHindiVoicePrompt({
+    kind: 'pickup',
+    tokenNumber: task?.tokenNumber,
+    tokensMap: task?.tokens,
+    isExpress: task?.isExpress,
+    locality: typeof task?.pickupAddress === 'string' ? task.pickupAddress : undefined,
+  });
+  speakHindi(prompt);
 }
 
-export function announceAssignedDelivery(orderId: string, address: string) {
-  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
-  speak(`Delivery assigned. Order ${shortId}. ${address || ''}`);
+export function announceAssignedDelivery(
+  _orderId: string,
+  _address: string,
+  options?: {
+    tokenNumber?: unknown;
+    tokensMap?: Record<string, unknown> | null;
+    isExpress?: boolean;
+  }
+) {
+  const prompt = buildHindiVoicePrompt({
+    kind: 'delivery',
+    tokenNumber: options?.tokenNumber,
+    tokensMap: options?.tokensMap,
+    isExpress: options?.isExpress,
+  });
+  speakHindi(prompt);
 }
 
 /** Alert for order stage transition — lighter chime + TTS */
@@ -233,18 +373,20 @@ export function announceStageTransition(orderId: string, stageName: string) {
 }
 
 /** Alert for washing machine chemical additions (3m detergent, 21m softener, 36m complete) */
-export function announceWasherMilestone(orderId: string, milestone: 'detergent' | 'softener' | 'complete') {
-  const shortId = (orderId || '').slice(-6).toUpperCase() || '------';
-  if (milestone === 'detergent') {
-    dramaticChime(false);
-    speak(`Order ${shortId}: Please add detergent to the washing machine.`);
-  } else if (milestone === 'softener') {
-    dramaticChime(false);
-    speak(`Order ${shortId}: Please add fabric softener to the washing machine.`);
-  } else if (milestone === 'complete') {
-    lifecycleChime();
-    speak(`Order ${shortId}: Washing cycle finished. Ready to unload.`);
-  }
+export function announceWasherMilestone(
+  _orderId: string,
+  milestone: 'detergent' | 'softener' | 'complete',
+  tokenNumber?: unknown,
+  tokensMap?: Record<string, unknown> | null
+) {
+  const prompt = buildHindiVoicePrompt({
+    kind: 'nudge',
+    step: 'getting_washed',
+    phase: milestone === 'complete' ? 'started' : milestone,
+    tokenNumber,
+    tokensMap,
+  });
+  startVoiceAlertLoop(prompt, { maxRepeats: 1 });
 }
 
 // Dedupe supervisor "skipped order" alarms so we don't re-ring for the same order.

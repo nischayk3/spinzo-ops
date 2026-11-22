@@ -3,7 +3,9 @@ import { View, Text, Modal, TouchableOpacity, ActivityIndicator, Platform, AppSt
 import { Sparkles, CheckCircle2, X, Clock, Droplets, RefreshCw } from 'lucide-react-native';
 import { useWasherReminderStore } from '../store/washerReminderStore';
 import { useOpsProcessStore } from '../store/opsProcessStore';
-import { dramaticChime, stopAlarm } from '../utils/alerts';
+import { useOrderFeedStore } from '../store/orderFeedStore';
+import { startVoiceAlertLoop, stopAlarm } from '../utils/alerts';
+import { buildHindiVoicePrompt, extractCleanTokenNumber } from '../utils/voiceScripts';
 import { triggerStageNudgeNotification, clearAssignmentNotifications } from '../utils/systemNotifications';
 import { SpinzoOverlay } from 'spinzo-overlay';
 
@@ -14,7 +16,8 @@ export function WasherReminderModal() {
   const activeRole = useAuthStore(s => s.activeRole);
   const staffDoc = useOpsStaffStore(s => s.staffDoc);
   const { activeReminder, dismissReminder, snoozeReminder } = useWasherReminderStore();
-  const { markChemicalAdded, completeStep } = useOpsProcessStore();
+  const { processes, markChemicalAdded, completeStep } = useOpsProcessStore();
+  const orders = useOrderFeedStore(s => s.orders);
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const wasAlertingRef = useRef(false);
@@ -62,10 +65,28 @@ export function WasherReminderModal() {
   const snoozeLabel = isComplete ? 'Still running (+3m)' : 'Snooze (+2m)';
   const snoozeMins = isComplete ? 3 : 2;
 
+  const matchedProcess = effectiveReminder
+    ? processes.find(p => p.id === effectiveReminder.processId || p.orderId === effectiveReminder.orderId)
+    : undefined;
+  const matchedOrder = effectiveReminder
+    ? orders.find(o => o.id === effectiveReminder.orderId)
+    : undefined;
+  const rawToken = matchedProcess?.tokenNumber || matchedOrder?.tokenNumber;
+  const cleanToken = extractCleanTokenNumber(rawToken, (matchedOrder as any)?.tokens);
+  const voiceText = effectiveReminder
+    ? buildHindiVoicePrompt({
+        kind: 'nudge',
+        step: 'getting_washed',
+        phase: effectiveReminder.milestone === 'complete' ? 'started' : effectiveReminder.milestone,
+        tokenNumber: rawToken,
+        tokensMap: (matchedOrder as any)?.tokens,
+      })
+    : '';
+
   useEffect(() => {
     if (effectiveReminder) {
       wasAlertingRef.current = true;
-      dramaticChime(true);
+      startVoiceAlertLoop(voiceText);
       triggerStageNudgeNotification({
         orderId: effectiveReminder.orderId,
         orderShortId,
@@ -81,7 +102,9 @@ export function WasherReminderModal() {
           customerName: title,
           address: description,
           stepName: actionLabel,
-        });
+          tokenNumber: cleanToken,
+          voiceText,
+        } as any);
       }
     } else {
       if (wasAlertingRef.current) {
@@ -103,7 +126,7 @@ export function WasherReminderModal() {
         }
       }
     };
-  }, [effectiveReminder?.orderId, effectiveReminder?.milestone, title, description, actionLabel, orderShortId, isComplete]);
+  }, [effectiveReminder?.orderId, effectiveReminder?.milestone, title, description, actionLabel, orderShortId, isComplete, voiceText, cleanToken]);
 
   if (!effectiveReminder) return null;
 

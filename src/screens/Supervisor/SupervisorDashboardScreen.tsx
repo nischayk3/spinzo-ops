@@ -12,7 +12,6 @@ import { useStaffRosterStore, StaffMember } from '../../store/staffRosterStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
 import { dayRevenue, orderTotal, parseOrderTokens, matchOrderSearch, serviceSummary, isToday, timeAgo, getPickupInfo, isTodayPickup, sortByPickupTimeAsc, isExpressOrder } from '../../utils/orderFeed';
-import { announceSkippedOrder } from '../../utils/alerts';
 import { getHelperLiveTasks } from '../../utils/rosterTasks';
 import { useResponsive } from '../../utils/useResponsive';
 import { useNavigation } from '@react-navigation/native';
@@ -87,20 +86,6 @@ export function SupervisorDashboardScreen() {
       .filter(o => (o.status === 'placed' || o.status === 'confirmed' || o.status === 'pickup_completed'))
       .filter(o => !o.isUrgent || isExpressOrder(o));
     return sortByPickupTimeAsc(base);
-  }, [orders]);
-
-  // Deduplicated alerts for skipped orders (only today's pickups)
-  useEffect(() => {
-    if (user?.role === 'supervisor') {
-      const todayPickups = orders.filter(o =>
-        (o.status === 'placed' || o.status === 'confirmed') &&
-        !o.isUrgent &&
-        isTodayPickup(o)
-      );
-      todayPickups.forEach(o => {
-        announceSkippedOrder(o.id);
-      });
-    }
   }, [orders]);
 
   const stats = useMemo(() => dayRevenue(orders), [orders]);

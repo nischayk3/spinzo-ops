@@ -1,19 +1,16 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useAuthStore } from '../store/authStore';
 import { useOpsStaffStore } from '../store/opsStaffStore';
 import { announceStageTransition, announceNewOrder, announceWasherMilestone } from './alerts';
-import * as Speech from 'expo-speech';
 import { stepLabel, currentStep } from './opsProcess';
-import { triggerAssignmentNotification } from './systemNotifications';
 import { useWasherReminderStore } from '../store/washerReminderStore';
 import { useStaffRosterStore } from '../store/staffRosterStore';
 
 const seenStates: Record<string, number> = {};
 const seenOrders = new Set<string>();
 const announcedMilestones = new Set<string>();
-const announcedHelperTasks = new Set<string>();
 const EMPTY_PROCESSES: any[] = [];
 const EMPTY_ORDERS: any[] = [];
 
@@ -123,6 +120,9 @@ export function useLifecycleNotifications() {
 
         if (!startMs || isNaN(startMs)) return;
         const elapsedMinutes = (now - startMs) / (60 * 1000);
+        const matchedOrder = useOrderFeedStore.getState().orders.find(o => o.id === p.orderId);
+        const tokenNumber = p.tokenNumber || matchedOrder?.tokenNumber;
+        const tokensMap = (matchedOrder as any)?.tokens;
 
         // Milestone 1: Detergent at 3 minutes
         const detKey = `${p.id}_detergent`;
@@ -135,7 +135,7 @@ export function useLifecycleNotifications() {
           });
           if (!announcedMilestones.has(detKey)) {
             announcedMilestones.add(detKey);
-            announceWasherMilestone(p.orderId, 'detergent');
+            announceWasherMilestone(p.orderId, 'detergent', tokenNumber, tokensMap);
           }
         }
 
@@ -150,7 +150,7 @@ export function useLifecycleNotifications() {
           });
           if (!announcedMilestones.has(softKey)) {
             announcedMilestones.add(softKey);
-            announceWasherMilestone(p.orderId, 'softener');
+            announceWasherMilestone(p.orderId, 'softener', tokenNumber, tokensMap);
           }
         }
 
@@ -165,7 +165,7 @@ export function useLifecycleNotifications() {
           });
           if (!announcedMilestones.has(compKey)) {
             announcedMilestones.add(compKey);
-            announceWasherMilestone(p.orderId, 'complete');
+            announceWasherMilestone(p.orderId, 'complete', tokenNumber, tokensMap);
           }
         }
       });
@@ -176,29 +176,4 @@ export function useLifecycleNotifications() {
     const interval = setInterval(checkWasherMilestones, 5000);
     return () => clearInterval(interval);
   }, [processes, activeRole, myUid, isSupervisorOrAdmin, isOnShift, isOnBreak, rosterHelpers]);
-
-  // 4. Helper Task Assignment Audio & Voice Announcement
-  useEffect(() => {
-    if (!myUid || !isOnShift) return;
-    processes.forEach(p => {
-      const cur = currentStep(p);
-      if (!cur) return;
-      const stage = p.stages?.[cur];
-      const isSupervisorPush = Boolean(stage?.assignedBy && stage.assignedBy !== 'system_auto' && stage.assignedBy !== 'self_claim');
-      if (isOnBreak && !isSupervisorPush) return;
-      // If assigned to me and not yet accepted
-      if (stage && stage.assignee === myUid && stage.assignedBy && stage.assignedBy !== 'self_claim' && !stage.acceptedAt && !stage.completedAt) {
-        const key = `${p.id}_${cur}_assigned`;
-        if (!announcedHelperTasks.has(key)) {
-          announcedHelperTasks.add(key);
-          Speech.speak(`New ${stepLabel(cur)} task assigned to you`, { language: 'en-IN' });
-          triggerAssignmentNotification({
-            orderId: p.orderId,
-            orderShortId: p.orderId.slice(-6).toUpperCase(),
-            taskType: `${stepLabel(cur)} Stage`,
-          });
-        }
-      }
-    });
-  }, [processes, myUid]);
 }
