@@ -1,17 +1,24 @@
 # SpinZo Ops — Active GSD Session State
 
-**Last Updated:** 2026-11-14
+**Last Updated:** 2026-11-19
 **Active Sync:** Antigravity (Tech Owner) ↔ Claude Code (`@AGENTS.md` + `.planning/`)
 **Deep Architecture & Risk Audit:** `docs/STATE.md`
 
 ---
 
 ## 1. Verification Baseline
+
 - **TypeScript (`npx tsc --noEmit`)**: PASS (0 errors)
-- **Unit Tests (`npm run test`)**: PASS (15 test files, 204/204 tests passing)
-- **Cloud Functions (`node --check` + `node --test`)**: PASS (`ops/functions/index.js`, `ops/functions/dispatch.js`, 41/41 dispatch tests passing)
+- **Unit Tests (`npm run test`)**: PASS (15 test files, 205/205 tests passing)
+- **Cloud Functions (`node --check` + `node --test`)**: PASS (`ops/functions/index.js`, `ops/functions/dispatch.js`, 42/42 dispatch tests passing)
 
 ## 2. Recently Shipped Baseline
+
+- **Quick Task — Onboard Helper Tahirul (`+919707275674`) Across Auto-Dispatch, Client Eligibility & Attendance**:
+  - **Firebase Verification (`spin-it-a135a`)**: Verified `config/opsStaff` already maps `+919707275674` → `role: "helper"`, `name: "Tahirul"`. Confirmed Auth user and `ops_staff/{uid}` will be created automatically on his first OTP login + QR clock-in.
+  - **Backend Auto-Assignment (`ops/functions/dispatch.js`, `ops/functions/index.js`)**: Added `TAHIRUL_PHONE` and updated `selectHelperForStage` so Tagging & Packaging use Tier 1 primary floor helpers (`Abdul` & `Tahirul`, least-loaded balanced) → Tier 2 `Abdur` → Tier 3 `Samsul` (if no iron pending). Kept Washing & Drying shared across all helpers (with `previousAssignee` continuity). Explicitly guarded Ironing with `isIroningEligible(h.phone)` so Tahirul is strictly blocked from Ironing.
+  - **Client Eligibility & Supervisor UI (`src/utils/helperEligibility.ts`, `StaffAttendanceTable.tsx`, `SettingsScreen.tsx`, `SupervisorDashboardScreen.tsx`)**: Added `TAHIRUL_PHONE` with Tier 1 Tagging/Packaging & washer-starvation priority (Ironing blocked); added Tahirul (`₹650` default daily fee) and Rider Sonu (`+919316250466`, `₹800` default daily fee) to `TARGET_STAFF` in `StaffAttendanceTable.tsx` (also fixed stale `shiftsMap` reset when stepping back to Today); updated Autopilot Routing Rules labels in Settings and Supervisor Dashboard.
+  - **Unit Tests & Deployment**: Added backend (`ops/functions/dispatch.test.js`) and client (`src/utils/__tests__/helperEligibility.test.ts`) tests covering Tahirul's Tier 1 Tagging/Packaging balancing, Washing/Drying handoff, and strict Ironing block. Deployed Cloud Functions to `spin-it-a135a` (Job ID `1795067507747`, 100% success).
 - **Phase 8.2 — Restored Full Rider Task Card, Assignment Modal & Customer Hydration Details**:
   - **Simultaneous Customer Name & Phone Number (`RiderTaskCard.tsx`, `GlobalAssignmentModal.tsx`)**: Always renders both `customerName` and the formatted 10-digit mobile number pill (`formatDisplayPhone(p.customerPhone)`) directly below it (tappable to dial) in addition to the Call button — even when `in_transit_to_store`. Also added customer name, phone, and delivery slot display inside `GlobalAssignmentModal.tsx`.
   - **Order Placement Date/Time, Assigned Time & Friendly Date/Slot Windows (`opsTasks.ts`, `RiderTaskCard.tsx`)**: Added `formatRiderDateLabel` and `buildRiderSlotDisplay` in `src/utils/opsTasks.ts` so Instant pickups, Scheduled pickups, and Deliveries display both the friendly calendar date (`Today, 14 Nov` / `Tomorrow, 15 Nov` / `Tue, 17 Nov`) and time window. Card headers now show full `formatDateTime(p.createdAt)` + `timeAgo(p.createdAt)` and `Assigned: ...` timestamps instead of only relative `timeAgo`.
@@ -39,4 +46,5 @@
   - Shipped in commits `24cf788` and `3ce6785`.
 
 ## 3. Active Focus
+
 - Phase 8 fully implemented and verified against all TypeScript, Vitest, and Cloud Function syntax gates. Ready for field test with riders and deployment.

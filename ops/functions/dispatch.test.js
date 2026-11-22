@@ -397,8 +397,12 @@ test('getRunningMachines: retains running machine across multi-lot orders until 
   assert.strictEqual(runningAfter.length, 0);
 });
 
-test('selectHelperForStage (Tagging Balancing): chooses Abdur over Abdul if Abdul has more active tasks', () => {
-  // Abdul currently has an active machine task, Abdur has 0 tasks
+test('selectHelperForStage (Tagging Tier 1 Balancing): balances between Abdul and Tahirul, keeping Abdur free for Iron Station 2', () => {
+  const helpersWithTahirul = [
+    ...mockHelpers,
+    { uid: 'h_tahirul', name: 'Tahirul', phone: '+919707275674', onShift: true },
+  ];
+  // Abdul currently has an active running washer (total=1), Tahirul has total=0, Abdur has total=0
   const live = [
     {
       id: 'p_abdul_task',
@@ -408,10 +412,65 @@ test('selectHelperForStage (Tagging Balancing): chooses Abdur over Abdul if Abdu
       stages: { getting_washed: { assignee: 'h_abdul', startedAt: 1000, machineName: 'Washer 1' } }
     }
   ];
-  // Both are hands-on free (machine is running), but Abdur has total=0 while Abdul has total=1
-  const res = selectHelperForStage('tagging', mockHelpers, live);
+  // Tier 1 (Abdul & Tahirul) picks Tahirul because Tahirul has lower total workload
+  const res = selectHelperForStage('tagging', helpersWithTahirul, live);
   assert.strictEqual(res.ok, true);
-  assert.strictEqual(res.helper.uid, 'h_abdur');
+  assert.strictEqual(res.helper.uid, 'h_tahirul');
+
+  // If Tahirul is busy tagging, Tier 1 still prefers hands-on-free Abdul over Tier 2 Abdur
+  const liveTahirulBusy = [
+    ...live,
+    { id: 'p_tahirul_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_tahirul', startedAt: 1000 } } },
+  ];
+  const res2 = selectHelperForStage('tagging', helpersWithTahirul, liveTahirulBusy);
+  assert.strictEqual(res2.ok, true);
+  assert.strictEqual(res2.helper.uid, 'h_abdul');
+
+  // When both Tier 1 helpers (Abdul & Tahirul) are hands-on busy, Tier 2 Abdur steps in
+  const liveTier1Busy = [
+    { id: 'p_abdul_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+    { id: 'p_tahirul_pkg', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_tahirul', startedAt: 1000 } } },
+  ];
+  const res3 = selectHelperForStage('tagging', helpersWithTahirul, liveTier1Busy);
+  assert.strictEqual(res3.ok, true);
+  assert.strictEqual(res3.helper.uid, 'h_abdur');
+});
+
+test('selectHelperForStage (Tahirul Packaging, Washing, Drying & Ironing Block)', () => {
+  const helpersWithTahirul = [
+    ...mockHelpers,
+    { uid: 'h_tahirul', name: 'Tahirul', phone: '+919707275674', onShift: true },
+  ];
+
+  // 1. Packaging: balances to Tahirul when Abdul is busy
+  const liveAbdulTagging = [
+    { id: 'p_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+  ];
+  const pkgRes = selectHelperForStage('packaging', helpersWithTahirul, liveAbdulTagging);
+  assert.strictEqual(pkgRes.ok, true);
+  assert.strictEqual(pkgRes.helper.uid, 'h_tahirul');
+
+  // 2. Washing & Drying: Tahirul gets previousAssignee continuity and machine assignment
+  const washRes = selectHelperForStage('getting_washed', helpersWithTahirul, [], { washers: 2, dryers: 2, ironingStations: 2 }, { previousAssignee: 'h_tahirul' });
+  assert.strictEqual(washRes.ok, true);
+  assert.strictEqual(washRes.helper.uid, 'h_tahirul');
+  assert.strictEqual(washRes.machineName, 'Washer 1');
+
+  const dryRes = selectHelperForStage('getting_dried', helpersWithTahirul, [], { washers: 2, dryers: 2, ironingStations: 2 }, { previousAssignee: 'h_tahirul' });
+  assert.strictEqual(dryRes.ok, true);
+  assert.strictEqual(dryRes.helper.uid, 'h_tahirul');
+  assert.strictEqual(dryRes.machineName, 'Dryer 1');
+
+  // 3. Ironing: Tahirul is STRICTLY BLOCKED even when Samsul, Abdur, and Abdul are all busy
+  const liveAllIronEligibleBusy = [
+    { id: 'p_i1', status: 'getting_ironed', steps: ['getting_ironed'], currentIndex: 0, stages: { getting_ironed: { assignee: 'h_samsul', startedAt: 1000, machineName: 'Iron Station 1' } } },
+    { id: 'p_pkg', status: 'packaging', steps: ['packaging'], currentIndex: 0, stages: { packaging: { assignee: 'h_abdur', startedAt: 1000 } } },
+    { id: 'p_tag', status: 'tagging', steps: ['tagging'], currentIndex: 0, stages: { tagging: { assignee: 'h_abdul', startedAt: 1000 } } },
+  ];
+  const ironRes = selectHelperForStage('getting_ironed', helpersWithTahirul, liveAllIronEligibleBusy);
+  assert.strictEqual(ironRes.ok, false);
+  assert.strictEqual(ironRes.shouldQueue, true);
+  assert.strictEqual(ironRes.error, 'iron_specialists_busy');
 });
 
 test('selectHelperForStage (Tagging): Samsul is assigned when floor helpers are busy and no iron orders pending', () => {

@@ -13,6 +13,7 @@ export interface ActiveHelperTask {
 export const SAMSUL_PHONE = '+916369768237';
 export const ABDUR_PHONE = '+917559105832';
 export const ABDUL_PHONE = '+916900311761';
+export const TAHIRUL_PHONE = '+919707275674';
 
 export const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE];
 
@@ -317,11 +318,13 @@ export function getTopEligibleTask(
   });
 
   // ── Specialist Preference Ranking ──
-  // Abdul: Primary for Tagging and Packaging
-  // Samsul: Primary for Ironing
-  // Abdur: Secondary for Ironing (station 2) / Tagging fallback
+  // Abdul & Tahirul: Primary for Tagging and Packaging (Tier 1)
+  // Abdur: Secondary for Ironing (station 2) / Tagging & Packaging Tier 2
+  // Samsul: Primary for Ironing (station 1) / Tagging & Packaging Tier 3 fallback
   const normPhone = normalizePhone(phone);
   const isAbdul = normPhone === normalizePhone(ABDUL_PHONE);
+  const isTahirul = normPhone === normalizePhone(TAHIRUL_PHONE);
+  const isPrimaryFloor = isAbdul || isTahirul;
   const isSamsul = normPhone === normalizePhone(SAMSUL_PHONE);
   const isAbdur = normPhone === normalizePhone(ABDUR_PHONE);
 
@@ -344,9 +347,9 @@ export function getTopEligibleTask(
   // WASHER FEEDING BUFFER RULE:
   // If washers are starving (idle washer with no queued wash orders) OR wash buffer is low (< 2 ready),
   // and there is an incoming wash-dependent tagging task, prioritize feeding the machines!
-  // Hierarchy: 1. Abdul (Primary) -> 2. Abdur (Secondary) -> 3. Samsul (Fallback)
+  // Hierarchy: 1. Abdul & Tahirul (Primary) -> 2. Abdur (Secondary) -> 3. Samsul (Fallback)
   if (candidateTaggingTask && taggingFeedsWasher && (isWasherStarving || isWashBufferLow)) {
-    if (isAbdul) {
+    if (isPrimaryFloor) {
       return candidateTaggingTask;
     }
     if (isAbdur) {
@@ -367,12 +370,12 @@ export function getTopEligibleTask(
     return ironProcess;
   }
 
-  // Abdul: Primary for Tagging and Packaging
-  if (isAbdul && candidateTaggingTask) {
+  // Abdul & Tahirul: Primary for Tagging and Packaging
+  if (isPrimaryFloor && candidateTaggingTask) {
     return candidateTaggingTask;
   }
 
-  // All three helpers (Abdul, Abdur, Samsool) are equally eligible for Tagging and Packaging!
+  // All eligible helpers can take Tagging and Packaging when free
   if (candidateTaggingTask) return candidateTaggingTask;
   if (packagingProcess) return packagingProcess;
 

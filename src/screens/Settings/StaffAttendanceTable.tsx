@@ -26,8 +26,8 @@ interface TargetStaffConfig {
   match: (staff: StaffDocData) => boolean;
 }
 
-// Strictly configured 5 active floor staff members requested by operations:
-// samsul, abdur, abdul, hrithik, and admin rider (9108558714)
+// Active floor staff members configured for operations attendance & payout tracking:
+// abdul, tahirul, abdur, samsul, hrithik, sonu, and admin rider (9108558714)
 const TARGET_STAFF: TargetStaffConfig[] = [
   {
     key: 'abdul',
@@ -40,6 +40,19 @@ const TARGET_STAFF: TargetStaffConfig[] = [
       const name = (s.name || '').toLowerCase();
       const phone = (s.phone || '').trim();
       return name.includes('abdul') || phone.endsWith('1761');
+    },
+  },
+  {
+    key: 'tahirul',
+    displayName: 'Tahirul',
+    role: 'helper',
+    roleDisplay: 'HELPER',
+    defaultFee: 650,
+    phoneHint: '5674',
+    match: (s) => {
+      const name = (s.name || '').toLowerCase();
+      const phone = (s.phone || '').trim();
+      return name.includes('tahirul') || phone.endsWith('5674');
     },
   },
   {
@@ -79,6 +92,19 @@ const TARGET_STAFF: TargetStaffConfig[] = [
       const name = (s.name || '').toLowerCase();
       const phone = (s.phone || '').trim();
       return name.includes('hrithik') || phone.endsWith('3208');
+    },
+  },
+  {
+    key: 'sonu',
+    displayName: 'Sonu',
+    role: 'rider',
+    roleDisplay: 'RIDER',
+    defaultFee: 800,
+    phoneHint: '0466',
+    match: (s) => {
+      const name = (s.name || '').toLowerCase();
+      const phone = (s.phone || '').trim();
+      return name.includes('sonu') || phone.endsWith('0466');
     },
   },
   {
@@ -182,12 +208,16 @@ export function StaffAttendanceTable() {
     return () => unsubStaff?.();
   }, []);
 
-  // 2. Fetch/Listen to shift documents for the 5 target staff on the selectedDate
+  // 2. Fetch/Listen to shift documents for the configured target staff on the selectedDate
   useEffect(() => {
     let active = true;
     const shiftUnsubs: Record<string, Unsubscribe> = {};
 
     const loadShiftsForDate = async () => {
+      // Reset previous date's shift map when switching back to live Today listeners
+      if (isTodaySelected) {
+        setShiftsMap({});
+      }
       // Find all matching UIDs across Firestore for each target staff member
       const newShifts: Record<string, ShiftDoc> = {};
 

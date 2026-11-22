@@ -717,5 +717,79 @@ describe('getTopEligibleTask', () => {
       expect(breakOverride).not.toBeNull();
       expect(breakOverride?.orderId).toBe('o_sup');
     });
+
+    it('routes Tagging, Packaging, Washing & Drying to Tahirul (+919707275674) while blocking Ironing', () => {
+      const resources = { washers: 2, dryers: 2, ironingStations: 2 };
+      const tahirulPhone = '+919707275674';
+
+      // 1. Ironing is strictly blocked for Tahirul
+      const ironProc = makeProcess({
+        id: 'p_iron',
+        orderId: 'o_iron',
+        steps: ['getting_ironed'],
+        currentIndex: 0,
+        status: 'getting_ironed',
+        stages: {},
+      });
+      const ironResult = getTopEligibleTask(
+        [ironProc],
+        [{ id: 'o_iron', status: 'processing', userId: 'u1' }],
+        'h_tahirul',
+        'helper',
+        null,
+        resources,
+        true,
+        tahirulPhone
+      );
+      expect(ironResult).toBeNull();
+
+      // 2. Wash-dependent tagging prioritized over packaging when washers are starving (same as Abdul)
+      const pkgProc = makeProcess({
+        id: 'p_pkg',
+        orderId: 'o_pkg',
+        steps: ['packaging'],
+        currentIndex: 0,
+        status: 'packaging',
+        stages: {},
+      });
+      const tagRes = getTopEligibleTask(
+        [pkgProc],
+        [
+          { id: 'o_pkg', status: 'processing', userId: 'u1' },
+          { id: 'o_wash', status: 'pickup_completed', userId: 'u2', serviceType: 'wash_fold' },
+        ],
+        'h_tahirul',
+        'helper',
+        null,
+        resources,
+        true,
+        tahirulPhone
+      );
+      expect(tagRes).not.toBeNull();
+      expect(tagRes?.orderId).toBe('o_wash');
+      expect(tagRes?.status).toBe('tagging');
+
+      // 3. Washing & Drying offered normally
+      const washProc = makeProcess({
+        id: 'p_wash',
+        orderId: 'o_wash2',
+        steps: ['getting_washed', 'getting_dried'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {},
+      });
+      const washRes = getTopEligibleTask(
+        [washProc],
+        [{ id: 'o_wash2', status: 'processing', userId: 'u3' }],
+        'h_tahirul',
+        'helper',
+        null,
+        resources,
+        true,
+        tahirulPhone
+      );
+      expect(washRes).not.toBeNull();
+      expect(washRes?.orderId).toBe('o_wash2');
+    });
   });
 });

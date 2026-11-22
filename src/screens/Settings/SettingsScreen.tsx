@@ -150,7 +150,7 @@ export function SettingsScreen() {
               <View className="bg-gray-50 p-3 rounded-2xl border border-gray-100">
                 <Text className="text-gray-700 text-xs font-semibold mb-1">Autopilot Routing Rules Matrix:</Text>
                 <Text className="text-gray-500 text-xs leading-5">
-                  • <Text className="font-bold text-gray-800">Tagging & Packaging:</Text> Auto-assigned to Abdul (Primary) on pickup completion.{'\n'}
+                  • <Text className="font-bold text-gray-800">Tagging & Packaging:</Text> Auto-assigned to Abdul & Tahirul (Primary), Abdur/Samsul fallback.{'\n'}
                   • <Text className="font-bold text-gray-800">Ironing Station 1:</Text> Routed to Samsul.{'\n'}
                   • <Text className="font-bold text-gray-800">Ironing Station 2:</Text> Routed to Abdur (Dual-station mode).{'\n'}
                   • <Text className="font-bold text-gray-800">Machine Parallelism:</Text> Helpers freed for manual tasks once washing/drying begins.

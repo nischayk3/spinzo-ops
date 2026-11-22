@@ -1148,7 +1148,7 @@ export function SupervisorDashboardScreen() {
                 <View className="gap-1">
                   <View className="flex-row items-center justify-between">
                     <Text className="text-slate-600 text-[10px] font-medium">Tagging & Packaging</Text>
-                    <Text className="text-purple-700 font-bold text-[10px]">→ Abdul (Primary)</Text>
+                    <Text className="text-purple-700 font-bold text-[10px]">→ Abdul & Tahirul (Primary)</Text>
                   </View>
                   <View className="flex-row items-center justify-between">
                     <Text className="text-slate-600 text-[10px] font-medium">Ironing Station 1 & 2</Text>

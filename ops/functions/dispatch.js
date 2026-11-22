@@ -390,17 +390,18 @@ function checkPaymentGate(order, options = {}) {
 }
 
 /**
- * Ironing priority list:
- * 1. Samsul (+916369768237)
- * 2. Abdur (+917559105832)
- * No ironing orders to new helper!
+ * Helper routing phone constants:
+ * - Tagging & Packaging Primary (Tier 1): Abdul (+916900311761), Tahirul (+919707275674)
+ * - Ironing Priority: 1. Samsul (+916369768237), 2. Abdur (+917559105832), 3. Abdul (overflow)
+ * - Tahirul is strictly blocked from Ironing.
  */
 const ABDUL_PHONE = '+916900311761';
+const TAHIRUL_PHONE = '+919707275674';
 const SAMSUL_PHONE = '+916369768237';
 const ABDUR_PHONE = '+917559105832';
 
-// All three store helpers are authorized for ironing operations
-// (Samuel primary on Station 1; Abdur/Abdul on Station 2 on overflow)
+// Authorized helpers for ironing operations
+// (Samsul primary on Station 1; Abdur/Abdul on Station 2 on overflow — Tahirul blocked)
 const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE, ABDUL_PHONE];
 
 function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
@@ -511,11 +512,11 @@ function allocateMachineName(step, liveProcesses, totalCapacity = 2) {
 
 /**
  * Deterministic, balanced helper selection for store operations stages:
- * - Tagging: Free floor helper (Abdul or Abdur, least loaded) -> Samsul (if free & no iron) -> else QUEUE!
- * - Washing: 2 Washers max. Free helper (least loaded) -> Floor helper doing tagging/packaging (60s load) -> Samsul (if not ironing) -> else QUEUE!
- * - Drying: 2 Dryers max. 1st previousAssignee (unloaded washer) -> Free helper -> Floor helper -> else QUEUE!
- * - Ironing: 2 Stations max. Station 1 dedicated to Samsul; Station 2 to Abdur/Abdul on pipeline overflow. If busy -> QUEUE!
- * - Packaging: Free floor helper (Abdul or Abdur, least loaded) -> Samsul (if free & no iron) -> else QUEUE!
+ * - Tagging: Tier 1 Primary floor helpers (Abdul & Tahirul, least loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if free & no iron) -> else QUEUE!
+ * - Washing: 2 Washers max. Previous assignee -> Free helper (least loaded) -> Busy helper (60s micro-load) -> else QUEUE!
+ * - Drying: 2 Dryers max. Previous assignee (unloaded washer) -> Free helper (least loaded) -> Busy helper (60s micro-load) -> else QUEUE!
+ * - Ironing: 2 Stations max. Station 1 dedicated to Samsul; Station 2 to Abdur/Abdul on overflow. Tahirul blocked. If busy -> QUEUE!
+ * - Packaging: Tier 1 Primary floor helpers (Abdul & Tahirul, least loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if free & no iron) -> else QUEUE!
  */
 function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resources = { washers: 2, dryers: 2, ironingStations: 2 }, options = {}) {
   const normalize = (p) => (p || '').replace(/\D/g, '').slice(-10);
@@ -527,11 +528,13 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
   const workloads = getHelperWorkload(liveProcesses);
 
   // Helper roles
-  const isFloorHelper = (h) => {
-    const p = normalize(h.phone);
-    return p === '6900311761' || p === '7559105832';
-  };
   const isSamsul = (h) => normalize(h.phone) === '6369768237';
+  const isAbdur = (h) => normalize(h.phone) === '7559105832';
+  // Tier 1 primary floor helpers: Abdul, Tahirul, and any future non-iron-specialist helper
+  const isPrimaryFloorHelper = (h) => {
+    const p = normalize(h.phone);
+    return p === '6900311761' || p === '9707275674' || (!isSamsul(h) && !isAbdur(h));
+  };
 
   // Completely free helpers (0 hands-on tasks, 0 machine loading tasks)
   const freeHelpers = helpers.filter(h => {
@@ -555,21 +558,27 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
       return cur === 'getting_ironed' && !p.stages?.[cur]?.completedAt;
     });
 
-    const freeFloor = sortByLeastLoaded(freeHelpers.filter(isFloorHelper));
+    // Tier 1: Primary floor helpers (Abdul & Tahirul, least-loaded first)
+    const freePrimary = sortByLeastLoaded(freeHelpers.filter(isPrimaryFloorHelper));
+    if (freePrimary.length > 0) {
+      return { ok: true, helper: freePrimary[0] };
+    }
+
+    // Tier 2 & 3 fallback when primary floor helpers are busy: Abdur -> Samsul (if no iron pending)
+    const freeAbdur = freeHelpers.find(isAbdur);
     const freeSamsul = (!hasPendingIron) ? freeHelpers.find(isSamsul) : null;
 
-    // In tie-break (both total=0), floor helper takes tagging; if floor helper is busy or has more tasks, Samsul takes it
-    if (freeFloor.length > 0 && (!freeSamsul || (workloads[freeFloor[0].uid]?.total || 0) <= (workloads[freeSamsul.uid]?.total || 0))) {
-      return { ok: true, helper: freeFloor[0] };
+    if (freeAbdur && (!freeSamsul || (workloads[freeAbdur.uid]?.total || 0) <= (workloads[freeSamsul.uid]?.total || 0))) {
+      return { ok: true, helper: freeAbdur };
     }
     if (freeSamsul) {
       return { ok: true, helper: freeSamsul };
     }
-    if (freeFloor.length > 0) {
-      return { ok: true, helper: freeFloor[0] };
+    if (freeAbdur) {
+      return { ok: true, helper: freeAbdur };
     }
 
-    // ALL helpers busy with hands-on tasks -> MUST QUEUE! (Never overload Abdul or anyone)
+    // ALL helpers busy with hands-on tasks -> MUST QUEUE! (Never overload anyone)
     return { ok: false, error: 'all_taggers_busy', shouldQueue: true };
   }
 
@@ -687,12 +696,12 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
       return { ok: true, helper: samsul, machineName: 'Iron Station 1', isMicroTask: false };
     }
 
-    // Station 2 (or Station 1 if Samsul busy): Abdur (Priority 2 iron specialist), then Abdul
+    // Station 2 (or Station 1 if Samsul busy): Abdur (Priority 2 iron specialist), then Abdul (strictly ironing-eligible only)
     const availableStation = !occupiedStationNames.has('Iron Station 1') ? 'Iron Station 1' : (!occupiedStationNames.has('Iron Station 2') ? 'Iron Station 2' : null);
     if (availableStation) {
       const freeAbdur = freeHelpers.find(h => normalize(h.phone) === '7559105832');
       const freeAbdul = freeHelpers.find(h => normalize(h.phone) === '6900311761');
-      const candidate = freeAbdur || freeAbdul || sortByLeastLoaded(freeHelpers.filter(isFloorHelper))[0];
+      const candidate = freeAbdur || freeAbdul || sortByLeastLoaded(freeHelpers.filter(h => isIroningEligible(h.phone)))[0];
       if (candidate) {
         return { ok: true, helper: candidate, machineName: availableStation, isMicroTask: false };
       }
@@ -712,17 +721,24 @@ function selectHelperForStage(stage, onShiftHelpers, liveProcesses = [], resourc
       return cur === 'getting_ironed' && !p.stages?.[cur]?.completedAt;
     });
 
-    const freeFloor = sortByLeastLoaded(freeHelpers.filter(isFloorHelper));
+    // Tier 1: Primary floor helpers (Abdul & Tahirul, least-loaded first)
+    const freePrimary = sortByLeastLoaded(freeHelpers.filter(isPrimaryFloorHelper));
+    if (freePrimary.length > 0) {
+      return { ok: true, helper: freePrimary[0] };
+    }
+
+    // Tier 2 & 3 fallback when primary floor helpers are busy: Abdur -> Samsul (if no iron pending)
+    const freeAbdur = freeHelpers.find(isAbdur);
     const freeSamsul = (!hasPendingIron) ? freeHelpers.find(isSamsul) : null;
 
-    if (freeFloor.length > 0 && (!freeSamsul || (workloads[freeFloor[0].uid]?.total || 0) <= (workloads[freeSamsul.uid]?.total || 0))) {
-      return { ok: true, helper: freeFloor[0] };
+    if (freeAbdur && (!freeSamsul || (workloads[freeAbdur.uid]?.total || 0) <= (workloads[freeSamsul.uid]?.total || 0))) {
+      return { ok: true, helper: freeAbdur };
     }
     if (freeSamsul) {
       return { ok: true, helper: freeSamsul };
     }
-    if (freeFloor.length > 0) {
-      return { ok: true, helper: freeFloor[0] };
+    if (freeAbdur) {
+      return { ok: true, helper: freeAbdur };
     }
 
     // ALL helpers busy with hands-on tasks -> MUST QUEUE!
@@ -1154,6 +1170,7 @@ module.exports = {
   splitOrderIntoServices,
   SERVICE_LABELS,
   ABDUL_PHONE,
+  TAHIRUL_PHONE,
   SAMSUL_PHONE,
   ABDUR_PHONE,
   IRONING_PRIORITY_PHONES,

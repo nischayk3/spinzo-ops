@@ -1147,11 +1147,11 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
 
 /**
  * Auto-assign an ops_process stage to an eligible on-shift helper based on store preferences.
- * - Tagging: Abdul (Primary) -> Abdur / Samsul fallback
+ * - Tagging: Tier 1 Abdul & Tahirul (Primary, least-loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if no iron)
  * - Washing: Any free helper (requires available washer) + sets machineName ('Washer 1' / 'Washer 2')
  * - Drying: Any free helper / previousAssignee (requires available dryer) + sets machineName ('Dryer 1' / 'Dryer 2')
- * - Ironing: Samsul (Station 1) -> Abdur (Station 2) parallel
- * - Packaging: Abdul (Primary) -> Abdur / Samsul fallback
+ * - Ironing: Samsul (Station 1) -> Abdur / Abdul (Station 2) parallel (Tahirul blocked)
+ * - Packaging: Tier 1 Abdul & Tahirul (Primary, least-loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if no iron)
  */
 async function autoAssignStage(processId, targetStage, options = {}) {
   try {
