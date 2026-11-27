@@ -48,7 +48,7 @@ class SpinzoOverlayModule : Module() {
         }
 
         Function("setAppInForeground") { inForeground: Boolean ->
-            SpinzoOverlayManager.setAppInForeground(inForeground)
+            SpinzoOverlayManager.isAppInForeground = inForeground
         }
 
         Function("showOverlay") { data: Map<String, String> ->

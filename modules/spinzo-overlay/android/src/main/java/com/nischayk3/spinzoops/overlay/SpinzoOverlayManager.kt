@@ -45,10 +45,6 @@ object SpinzoOverlayManager {
     @Volatile
     var isAppInForeground: Boolean = false
 
-    fun setAppInForeground(inForeground: Boolean) {
-        isAppInForeground = inForeground
-    }
-
     private val overlayGeneration = AtomicLong(0L)
 
     fun currentGeneration(): Long = overlayGeneration.get()
