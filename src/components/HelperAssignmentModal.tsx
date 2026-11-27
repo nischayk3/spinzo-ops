@@ -24,12 +24,16 @@ export function HelperAssignmentModal() {
   const authRole = useAuthStore(s => s.activeRole);
   const resources = useStoreResourcesStore(s => s.resources);
   const helperRules = useHelperRulesStore(s => s.rules);
+  const helperRulesLoaded = useHelperRulesStore(s => s.loaded);
   const subscribeHelperRules = useHelperRulesStore(s => s.subscribe);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [locallyAcceptedIds, setLocallyAcceptedIds] = useState<Set<string>>(new Set());
   const [localSnoozeMap, setLocalSnoozeMap] = useState<Record<string, number>>({});
   const [globalDismissUntil, setGlobalDismissUntil] = useState<number>(0);
   const wasAlertingRef = useRef(false);
+  const hadActiveTaskRef = useRef(false);
   const lastAlertedKeyRef = useRef<string>('');
+  const lastAlertedTokenRef = useRef<string>('');
 
   const effectiveRole = authRole || staffDoc?.role || 'helper';
 
@@ -44,27 +48,29 @@ export function HelperAssignmentModal() {
     staffDoc?.attendanceStatus === 'lunch' ||
     staffDoc?.attendanceStatus === 'short_break'
   );
-  const candidateTask = staffDoc
-    ? getTopEligibleTask(
-        processes,
-        orders,
-        staffDoc.uid,
-        effectiveRole,
-        staffDoc.activeHelperTask || null,
-        resources,
-        staffDoc.onShift === true,
-        staffDoc.phone,
-        isOnBreak,
-        helperRules
-      )
-    : null;
+  const candidateTask =
+    staffDoc && helperRulesLoaded
+      ? getTopEligibleTask(
+          processes,
+          orders,
+          staffDoc.uid,
+          effectiveRole,
+          staffDoc.activeHelperTask || null,
+          resources,
+          staffDoc.onShift === true,
+          staffDoc.phone,
+          isOnBreak,
+          helperRules
+        )
+      : null;
 
   const candidateSnoozeKey = candidateTask
     ? `${candidateTask.steps[candidateTask.currentIndex] || candidateTask.status}:${candidateTask.id}`
     : '';
-  // Check if this task was recently dismissed/snoozed by the user (or global 3m quiet window active)
+  // Check if this task was recently accepted, dismissed/snoozed by the user (or global 3m quiet window active)
   const isGloballyDismissed = globalDismissUntil > 0 && Date.now() < globalDismissUntil;
-  const isSnoozed = isGloballyDismissed || (candidateSnoozeKey
+  const isLocallyAccepted = candidateSnoozeKey ? locallyAcceptedIds.has(candidateSnoozeKey) : false;
+  const isSnoozed = isGloballyDismissed || isLocallyAccepted || (candidateSnoozeKey
     ? Boolean(localSnoozeMap[candidateSnoozeKey] && Date.now() < (localSnoozeMap[candidateSnoozeKey] + 5 * 60 * 1000))
     : false);
   const activeTask = isSnoozed ? null : candidateTask;
@@ -89,10 +95,16 @@ export function HelperAssignmentModal() {
 
   useEffect(() => {
     if (activeTask && !acceptingId) {
-      // Never re-fire audio/notification for the exact same task+step on background snapshot ticks
-      if (lastAlertedKeyRef.current === activeAlertKey) return;
+      // Never re-fire audio/notification for the exact same task+step on background snapshot ticks,
+      // except once if cleanToken hydrates slightly after initial mount.
+      const isSameTask = lastAlertedKeyRef.current === activeAlertKey;
+      const tokenJustHydrated = isSameTask && !lastAlertedTokenRef.current && Boolean(cleanToken);
+      if (isSameTask && !tokenJustHydrated) return;
+
       lastAlertedKeyRef.current = activeAlertKey;
+      lastAlertedTokenRef.current = cleanToken;
       wasAlertingRef.current = true;
+      hadActiveTaskRef.current = true;
       // Short chime then Hindi voice loop when modal is blocking; single clean Hindi voice when banner
       if (!showAsBanner) {
         startVoiceAlertLoop(voiceText);
@@ -117,15 +129,18 @@ export function HelperAssignmentModal() {
           taskType: 'helper_step',
           customerName: order?.customerName || '',
           address: addr || 'Store Operations',
+          step: curStep,
           stepName: curStep ? stepLabel(curStep) : '',
           tokenNumber: cleanToken,
           voiceText,
         } as any);
       }
-    } else {
+    } else if (!activeTask) {
       lastAlertedKeyRef.current = '';
-      if (wasAlertingRef.current) {
+      lastAlertedTokenRef.current = '';
+      if (wasAlertingRef.current || hadActiveTaskRef.current) {
         wasAlertingRef.current = false;
+        hadActiveTaskRef.current = false;
         stopAlarm();
         clearAssignmentNotifications();
         if (Platform.OS === 'android') {
@@ -133,17 +148,21 @@ export function HelperAssignmentModal() {
         }
       }
     }
+  }, [activeAlertKey, cleanToken]);
+
+  useEffect(() => {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
         lastAlertedKeyRef.current = '';
+        lastAlertedTokenRef.current = '';
         stopAlarm();
         if (Platform.OS === 'android') {
           SpinzoOverlay.dismissOverlay();
         }
       }
     };
-  }, [activeAlertKey]);
+  }, []);
 
   // Auto-clear active task if the order was cancelled, completed, or deleted
   useEffect(() => {
@@ -171,7 +190,9 @@ export function HelperAssignmentModal() {
 
   const handleDismiss = () => {
     wasAlertingRef.current = false;
+    hadActiveTaskRef.current = false;
     lastAlertedKeyRef.current = '';
+    lastAlertedTokenRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -188,7 +209,16 @@ export function HelperAssignmentModal() {
 
   const handleAccept = async () => {
     if (!activeTask || !staffDoc) return;
+    const acceptKey = `${curStep}:${activeTask.id}`;
     wasAlertingRef.current = false;
+    hadActiveTaskRef.current = false;
+    lastAlertedKeyRef.current = '';
+    lastAlertedTokenRef.current = '';
+    setLocallyAcceptedIds(prev => {
+      const next = new Set(prev);
+      next.add(acceptKey);
+      return next;
+    });
     setAcceptingId(activeTask.id);
     stopAlarm();
     clearAssignmentNotifications();
@@ -237,7 +267,20 @@ export function HelperAssignmentModal() {
 
     } catch (err: any) {
       console.warn("Failed to claim task:", err);
-      Alert.alert('Task Unavailable', err?.message || 'Someone else might have claimed it.');
+      const errMsg = String(err?.message || '').toLowerCase();
+      const isAlreadyDone =
+        errMsg.includes('already_accepted') ||
+        errMsg.includes('already_claimed') ||
+        errMsg.includes('already accepted') ||
+        errMsg.includes('already claimed');
+      if (!isAlreadyDone) {
+        setLocallyAcceptedIds(prev => {
+          const next = new Set(prev);
+          next.delete(acceptKey);
+          return next;
+        });
+        Alert.alert('Task Unavailable', err?.message || 'Someone else might have claimed it.');
+      }
     } finally {
       setAcceptingId(null);
     }
@@ -266,7 +309,7 @@ export function HelperAssignmentModal() {
               {machineName} Ready to Load
             </Text>
             <Text className="text-gray-300 text-xs">
-              Order #{orderShort} • 60s micro-task
+              {(cleanToken || token) ? `Token #${cleanToken || token} • ` : ''}Order #{orderShort} • 60s micro-task
             </Text>
           </View>
         </View>

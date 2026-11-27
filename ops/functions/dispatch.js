@@ -477,14 +477,36 @@ const TAHIRUL_PHONE = '+919707275674';
 const SAMSUL_PHONE = '+916369768237';
 const ABDUR_PHONE = '+917559105832';
 
-// Authorized helpers for ironing operations
-// (Samsul primary on Station 1; Abdur/Abdul on Station 2 on overflow — Tahirul blocked)
-const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE, ABDUL_PHONE];
+// Authorized helpers for ironing operations (matches client src/utils/helperEligibility.ts)
+// (Samsul primary on Station 1; Abdur on Station 2 on overflow — others require helperAssignmentRules override)
+const IRONING_PRIORITY_PHONES = [SAMSUL_PHONE, ABDUR_PHONE];
 
 function isIroningEligible(phone, allowedList = IRONING_PRIORITY_PHONES) {
   if (!phone) return false;
   const p = normalizePhone(phone);
   return allowedList.map(normalizePhone).includes(p);
+}
+
+/**
+ * Extract the per-phone helper stage rule map from a Firestore `config/helperAssignmentRules` doc.
+ * Supports both legacy nested `{ rules: { "+91...": { ... } } }` and current top-level flat map
+ * `{ "+91...": { tagging: true, ... }, updatedAt, updatedBy }`.
+ * @param {Record<string, any> | null | undefined} data
+ * @returns {Record<string, Record<string, boolean>> | null}
+ */
+function extractHelperRulesFromDoc(data) {
+  if (!data || typeof data !== 'object') return null;
+  if (data.rules && typeof data.rules === 'object' && !Array.isArray(data.rules)) {
+    return Object.keys(data.rules).length > 0 ? data.rules : null;
+  }
+  const extracted = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (k === 'updatedAt' || k === 'updatedBy') continue;
+    if (v && typeof v === 'object' && !Array.isArray(v) && typeof v.toMillis !== 'function') {
+      extracted[k] = v;
+    }
+  }
+  return Object.keys(extracted).length > 0 ? extracted : null;
 }
 
 /**
@@ -1343,85 +1365,218 @@ function washerChemicalNudgeDue(stageData, nowMs = Date.now()) {
   return null;
 }
 
+const HINDI_LETTER_MAP = {
+  A: 'ए',
+  B: 'बी',
+  C: 'सी',
+  D: 'डी',
+  E: 'ई',
+  F: 'एफ',
+  G: 'जी',
+  H: 'एच',
+  I: 'आई',
+  J: 'जे',
+  K: 'के',
+  L: 'एल',
+  M: 'एम',
+  N: 'एन',
+  O: 'ओ',
+  P: 'पी',
+  Q: 'क्यू',
+  R: 'आर',
+  S: 'एस',
+  T: 'टी',
+  U: 'यू',
+  V: 'वी',
+  W: 'डब्ल्यू',
+  X: 'एक्स',
+  Y: 'वाई',
+  Z: 'ज़ेड',
+};
+
+const SINGLE_TOKEN_REGEX =
+  /^(?:[A-Za-z]{1,2}-?\d{1,5}[A-Za-z]?|\d{1,5}(?:-?[A-Za-z]{1,2}\d{0,5})?(?:-[A-Za-z0-9]{1,2})?)$/;
+
+function cleanSingleToken(raw) {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw !== 'string' && typeof raw !== 'number') return '';
+  if (typeof raw === 'number' && !Number.isFinite(raw)) return '';
+
+  const str = String(raw)
+    .trim()
+    .replace(/^[#\s]+/, '')
+    .replace(/^token[\s#:.-]*/i, '')
+    .replace(/^[#\s]+/, '')
+    .replace(/^t[-\s]+/i, '')
+    .replace(/^[#\s]+/, '')
+    .trim();
+
+  if (!str || str.length > 8) return '';
+  if (!SINGLE_TOKEN_REGEX.test(str)) return '';
+  return str.toUpperCase();
+}
+
+function parseTokenList(raw) {
+  if (raw === null || raw === undefined) return [];
+  if (typeof raw === 'number') {
+    const single = cleanSingleToken(raw);
+    return single ? [single] : [];
+  }
+  if (typeof raw !== 'string') return [];
+
+  const parts = raw.split(/[,/;&]+|\s+और\s+/);
+  const out = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const cleaned = cleanSingleToken(part);
+    if (cleaned && !seen.has(cleaned)) {
+      seen.add(cleaned);
+      out.push(cleaned);
+    }
+  }
+  return out;
+}
+
 /**
- * Extract a clean numeric-based token string from a raw token value or a tokens map.
- * Strips leading 'T-', 't-', '#', and whitespace. Rejects empty strings or random
- * alphanumeric order IDs (>8 chars or non-numeric-leading).
- * @param {string|number|null|undefined} rawToken
+ * Extract an ordered, deduplicated list of clean alphanumeric/numeric tokens
+ * from a raw token string/number or a tokens map (handling rolled-up values).
+ * @param {unknown} rawToken
+ * @param {Record<string, unknown>|null|undefined} [tokensMap]
+ * @returns {string[]}
+ */
+function extractCleanTokens(rawToken, tokensMap) {
+  const direct = parseTokenList(rawToken);
+  if (direct.length > 0) return direct;
+
+  if (tokensMap && typeof tokensMap === 'object') {
+    const out = [];
+    const seen = new Set();
+    for (const val of Object.values(tokensMap)) {
+      for (const tok of parseTokenList(val)) {
+        if (!seen.has(tok)) {
+          seen.add(tok);
+          out.push(tok);
+        }
+      }
+    }
+    return out;
+  }
+  return [];
+}
+
+/**
+ * Extract a clean comma-separated token string from a raw token value or a tokens map.
+ * @param {unknown} rawToken
  * @param {Record<string, unknown>|null|undefined} [tokensMap]
  * @returns {string}
  */
 function extractCleanTokenNumber(rawToken, tokensMap) {
-  const cleanCandidate = (val) => {
-    if (val === null || val === undefined) return '';
-    const str = String(val)
-      .trim()
-      .replace(/^[#\s]+/, '')
-      .replace(/^t[-\s]*/i, '')
-      .replace(/^[#\s]+/, '')
-      .trim();
-    if (!str || str.length > 8) return '';
-    // Allow pure digits ("39", "149") or short numeric-based tokens ("39A", "39-1")
-    if (!/^\d+(?:-[A-Za-z0-9]{1,2}|[A-Za-z]{1,2})?$/.test(str)) return '';
-    return str;
-  };
+  return extractCleanTokens(rawToken, tokensMap).join(', ');
+}
 
-  const direct = cleanCandidate(rawToken);
-  if (direct) return direct;
+/**
+ * Convert a single alphanumeric token to phonetic Devanagari Hindi speech
+ * so hi-IN TTS pronounces letter prefixes clearly (e.g. "B102" -> "बी 102", "1B108" -> "1 बी 108").
+ * @param {string|number|null|undefined} token
+ * @returns {string}
+ */
+function formatTokenForHindiSpeech(token) {
+  if (token === null || token === undefined) return '';
+  const str = String(token).trim();
+  if (!str) return '';
+  const runs = str.match(/[A-Za-z]|\d+/g);
+  if (!runs || runs.length === 0) return '';
+  return runs
+    .map((part) => (/^[A-Za-z]$/.test(part) ? (HINDI_LETTER_MAP[part.toUpperCase()] || part.toUpperCase()) : part))
+    .join(' ');
+}
 
-  if (tokensMap && typeof tokensMap === 'object') {
-    for (const val of Object.values(tokensMap)) {
-      const cleaned = cleanCandidate(val);
-      if (cleaned) return cleaned;
-    }
-  }
-  return '';
+/**
+ * Join multiple spoken Hindi tokens naturally with "और".
+ * @param {string[]} tokens
+ * @returns {string}
+ */
+function formatTokensForHindiSpeech(tokens) {
+  const spokenList = (tokens || []).map(formatTokenForHindiSpeech).filter(Boolean);
+  if (spokenList.length === 0) return '';
+  if (spokenList.length === 1) return spokenList[0];
+  if (spokenList.length === 2) return `${spokenList[0]} और ${spokenList[1]}`;
+  return `${spokenList.slice(0, -1).join(', ')} और ${spokenList[spokenList.length - 1]}`;
 }
 
 /**
  * Build canonical Devanagari Hindi (hi-IN) TTS prompt for staff FCM voice alerts.
- * @param {{ kind?: string, step?: string, phase?: string, tokenNumber?: string|number, isExpress?: boolean, locality?: string }} [opts]
+ * @param {{ kind?: string, step?: string, phase?: string, tokenNumber?: unknown, tokensMap?: Record<string, unknown>|null, isExpress?: boolean, locality?: string }} [opts]
  * @returns {string}
  */
-function buildHindiVoicePrompt({ kind, step, phase, tokenNumber, isExpress, locality } = {}) {
-  const tok = extractCleanTokenNumber(tokenNumber);
-  const prefix = tok ? `टोकन नंबर ${tok}, ` : '';
+function buildHindiVoicePrompt({ kind, step, phase, tokenNumber, tokensMap, isExpress, locality } = {}) {
+  const tokens = extractCleanTokens(tokenNumber, tokensMap);
+  const spoken = formatTokensForHindiSpeech(tokens);
+
+  if (kind === 'new_order') {
+    return 'नया ऑर्डर आया है';
+  }
 
   if (kind === 'pickup') {
     const base = isExpress ? 'एक्सप्रेस पिकअप आया है' : 'नया पिकअप आया है';
     const shortLoc = typeof locality === 'string' ? locality.trim() : '';
-    return shortLoc && shortLoc.length <= 25 ? `${base}, ${shortLoc}` : base;
+    const locUpper = shortLoc.toUpperCase();
+    if (shortLoc && shortLoc.length <= 25 && locUpper !== 'LOCAL' && locUpper !== 'STORE') {
+      return `${base}, ${shortLoc}`;
+    }
+    return base;
   }
 
   if (kind === 'delivery') {
-    if (tok) return `टोकन नंबर ${tok}, डिलीवरी के लिए जाना है`;
+    if (spoken) return `टोकन ${spoken} की डिलीवरी के लिए जाना है`;
     return isExpress ? 'एक्सप्रेस डिलीवरी के लिए जाना है' : 'नई डिलीवरी आई है';
   }
 
   if (kind === 'idle_alert') {
-    if (step === 'getting_dried') return 'ड्रायर खाली है, कपड़े डालिए';
-    return 'वॉशर खाली है, कपड़े डालिए';
+    return step === 'getting_dried' ? 'ड्रायर खाली है, कपड़े डालिए' : 'वॉशर खाली है, कपड़े डालिए';
   }
 
   if (kind === 'nudge') {
-    if (phase === 'detergent') return `${prefix}डिटर्जेंट डालिए`;
-    if (phase === 'softener') return `${prefix}सॉफ्टनर डालिए`;
-    if (step === 'getting_washed' && phase === 'accepted') return `${prefix}वॉशर चालू करिए`;
-    if (step === 'getting_washed' && phase === 'started') return `${prefix}वॉशर से निकालिए`;
-    if (step === 'getting_dried' && phase === 'accepted') return `${prefix}ड्रायर चालू करिए`;
-    if (step === 'getting_dried' && phase === 'started') return `${prefix}ड्रायर से निकालिए`;
-    if (step === 'tagging') return `${prefix}टैगिंग जल्दी पूरी करिए`;
-    if (step === 'packaging') return `${prefix}पैकेजिंग जल्दी पूरी करिए`;
-    return `${prefix}नया काम आया है`;
+    if (phase === 'detergent') return spoken ? `टोकन ${spoken} में डिटर्जेंट डालिए` : 'वॉशर में डिटर्जेंट डालिए';
+    if (phase === 'softener') return spoken ? `टोकन ${spoken} में सॉफ्टनर डालिए` : 'वॉशर में सॉफ्टनर डालिए';
+    if (step === 'getting_washed' && phase === 'accepted') {
+      return spoken ? `टोकन ${spoken} का वॉशर चालू करिए` : 'वॉशर चालू करिए';
+    }
+    if (step === 'getting_washed' && phase === 'started') {
+      return spoken ? `टोकन ${spoken} को वॉशर से निकालिए` : 'वॉशर से कपड़े निकालिए';
+    }
+    if (step === 'getting_dried' && phase === 'accepted') {
+      return spoken ? `टोकन ${spoken} का ड्रायर चालू करिए` : 'ड्रायर चालू करिए';
+    }
+    if (step === 'getting_dried' && phase === 'started') {
+      return spoken ? `टोकन ${spoken} को ड्रायर से निकालिए` : 'ड्रायर से कपड़े निकालिए';
+    }
+    if (step === 'tagging') {
+      return spoken ? `टोकन ${spoken} की टैगिंग जल्दी पूरी करिए` : 'टैगिंग जल्दी पूरी करिए';
+    }
+    if (step === 'packaging') {
+      return spoken ? `टोकन ${spoken} की पैकेजिंग जल्दी पूरी करिए` : 'पैकेजिंग जल्दी पूरी करिए';
+    }
+    return spoken ? `टोकन ${spoken} का नया काम आया है` : 'नया काम आया है';
   }
 
   // kind === 'helper_assignment' (or default)
-  if (step === 'tagging') return `${prefix}टैगिंग करनी है`;
-  if (step === 'getting_washed') return `${prefix}वॉशर में डालिए`;
-  if (step === 'getting_dried') return `${prefix}ड्रायर में डालिए`;
-  if (step === 'getting_ironed') return `${prefix}आयरन करना है`;
-  if (step === 'packaging') return `${prefix}पैकेजिंग करनी है`;
-  return `${prefix}नया काम आया है`;
+  if (step === 'tagging') {
+    return spoken ? `टोकन ${spoken} की टैगिंग करनी है` : 'टैगिंग करनी है';
+  }
+  if (step === 'getting_washed') {
+    return spoken ? `टोकन ${spoken} को वॉशर में डालिए` : 'कपड़े वॉशर में डालिए';
+  }
+  if (step === 'getting_dried') {
+    return spoken ? `टोकन ${spoken} को ड्रायर में डालिए` : 'कपड़े ड्रायर में डालिए';
+  }
+  if (step === 'getting_ironed') {
+    return spoken ? `टोकन ${spoken} का नया आयरनिंग का ऑर्डर आया है` : 'नया आयरनिंग का ऑर्डर आया है';
+  }
+  if (step === 'packaging') {
+    return spoken ? `टोकन ${spoken} की पैकेजिंग करनी है` : 'पैकेजिंग करनी है';
+  }
+  return spoken ? `टोकन ${spoken} का नया काम आया है` : 'नया काम आया है';
 }
 
 module.exports = {
@@ -1429,8 +1584,12 @@ module.exports = {
   isMachineUnloadNudgeDue,
   isHandsOnStageNudgeDue,
   washerChemicalNudgeDue,
+  extractCleanTokens,
   extractCleanTokenNumber,
+  formatTokenForHindiSpeech,
+  formatTokensForHindiSpeech,
   buildHindiVoicePrompt,
+  extractHelperRulesFromDoc,
   getTodayDateString,
   normalizeSlotDateString,
   isDeliveryDueToday,

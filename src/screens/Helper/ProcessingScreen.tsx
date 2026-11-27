@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Linking, TextInput } from 'react-native';
+import { View, Text, ScrollView, TouchableOpacity, ActivityIndicator, Linking, TextInput, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -18,6 +18,19 @@ import { useStoreResourcesStore } from '../../store/storeResourcesStore';
 import { useHelperRulesStore } from '../../store/helperRulesStore';
 import { isHelperAllowedForStage } from '../../utils/helperEligibility';
 import { useResponsive } from '../../utils/useResponsive';
+import { stopAlarm } from '../../utils/alerts';
+import { clearAssignmentNotifications } from '../../utils/systemNotifications';
+import { SpinzoOverlay } from 'spinzo-overlay';
+
+const silenceActiveAlerts = () => {
+  stopAlarm();
+  clearAssignmentNotifications();
+  if (Platform.OS === 'android') {
+    try {
+      SpinzoOverlay.dismissOverlay();
+    } catch { /* non-fatal */ }
+  }
+};
 
 type AppRole = 'helper' | 'iron' | 'supervisor' | 'admin';
 type UrgencyFilter = 'all' | 'critical' | 'express' | 'aging24h';
@@ -351,6 +364,7 @@ function SupervisorFeed() {
 
   const handleFloatingComplete = async () => {
     if (activeFloatingProcess) {
+      silenceActiveAlerts();
       await completeStep(activeFloatingProcess.orderId);
     }
   };
@@ -1070,6 +1084,7 @@ export function ProcessingScreen() {
   const handleFloatingComplete = async (targetOrderId?: string) => {
     const targetId = targetOrderId || activeFloatingProcesses[0]?.orderId;
     if (targetId) {
+      silenceActiveAlerts();
       await completeStep(targetId);
     }
   };

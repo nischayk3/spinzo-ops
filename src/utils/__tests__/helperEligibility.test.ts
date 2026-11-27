@@ -936,6 +936,103 @@ describe('getTopEligibleTask', () => {
       );
       expect(task).toBeNull();
     });
+
+    it('gates system_auto pushed tasks (step 0b) by helperRules while allowing supervisor manual push (step 0a)', () => {
+      const rules: HelperAssignmentRules = {
+        [ABDUL_PHONE]: {
+          tagging: false,
+          getting_washed: false,
+          getting_dried: true,
+          getting_ironed: false,
+          packaging: true,
+        },
+      };
+
+      const systemAutoWash = makeProcess({
+        id: 'p_auto_wash',
+        orderId: 'o_auto_wash',
+        steps: ['getting_washed'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {
+          getting_washed: {
+            assignee: 'h_abdul',
+            assignedBy: 'system_auto',
+            assignedAt: Date.now(),
+          },
+        },
+      });
+
+      const supervisorPushWash = makeProcess({
+        id: 'p_sup_wash',
+        orderId: 'o_sup_wash',
+        steps: ['getting_washed'],
+        currentIndex: 0,
+        status: 'getting_washed',
+        stages: {
+          getting_washed: {
+            assignee: 'h_abdul',
+            assignedBy: 'sup_uid_1',
+            assignedAt: Date.now(),
+          },
+        },
+      });
+
+      const orders = [
+        { id: 'o_auto_wash', status: 'processing', userId: 'u1' },
+        { id: 'o_sup_wash', status: 'processing', userId: 'u2' },
+      ];
+
+      // Step 0b: system_auto push for disabled stage is blocked for regular helper
+      expect(
+        getTopEligibleTask(
+          [systemAutoWash],
+          orders,
+          'h_abdul',
+          'helper',
+          null,
+          { washers: 2, dryers: 2, ironingStations: 2 },
+          true,
+          ABDUL_PHONE,
+          false,
+          rules
+        )
+      ).toBeNull();
+
+      // Step 0b: admin bypasses helperRules gate
+      const adminRes = getTopEligibleTask(
+        [systemAutoWash],
+        orders,
+        'h_abdul',
+        'admin',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE,
+        false,
+        rules
+      );
+      expect(adminRes).not.toBeNull();
+      expect(adminRes?.orderId).toBe('o_auto_wash');
+      expect(adminRes?.isPushedToMe).toBe(true);
+
+      // Step 0a: human supervisor manual push ALWAYS surfaces even if stage toggle is OFF
+      const supRes = getTopEligibleTask(
+        [supervisorPushWash],
+        orders,
+        'h_abdul',
+        'helper',
+        null,
+        { washers: 2, dryers: 2, ironingStations: 2 },
+        true,
+        ABDUL_PHONE,
+        false,
+        rules
+      );
+      expect(supRes).not.toBeNull();
+      expect(supRes?.orderId).toBe('o_sup_wash');
+      expect(supRes?.isPushedToMe).toBe(true);
+    });
   });
 
   describe('Client Washer Starvation Parity (Autopilot v2)', () => {

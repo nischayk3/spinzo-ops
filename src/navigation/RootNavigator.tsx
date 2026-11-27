@@ -7,6 +7,7 @@ import { useOpsProcessStore } from '../store/opsProcessStore';
 import { useOrderFeedStore } from '../store/orderFeedStore';
 import { useStoreResourcesStore } from '../store/storeResourcesStore';
 import { useStaffRosterStore } from '../store/staffRosterStore';
+import { useHelperRulesStore } from '../store/helperRulesStore';
 import { LoginScreen } from '../screens/Auth/LoginScreen';
 import { NotInRosterScreen } from '../screens/Auth/NotInRosterScreen';
 import { PermissionsScreen } from '../screens/Auth/PermissionsScreen';
@@ -198,9 +199,13 @@ export function RootNavigator() {
     clearAssignmentNotifications();
   }, [initializeAuth]);
 
-  // Handle background accepted orders from the native overlay
+  // Handle background accepted orders from the native overlay & track foreground state
   useEffect(() => {
     if (Platform.OS !== 'android') return;
+
+    try {
+      (SpinzoOverlay as any).setAppInForeground?.(AppState.currentState === 'active');
+    } catch { /* non-fatal */ }
 
     const checkPendingAccept = async () => {
       try {
@@ -221,16 +226,29 @@ export function RootNavigator() {
         }
       } catch (err) {
         console.warn('[SpinzoOverlay] Failed to accept pending order:', err);
+      } finally {
+        try {
+          SpinzoOverlay.dismissOverlay();
+        } catch { /* non-fatal */ }
+        clearAssignmentNotifications();
       }
     };
 
     checkPendingAccept();
     const sub = AppState.addEventListener('change', (nextState) => {
+      try {
+        (SpinzoOverlay as any).setAppInForeground?.(nextState === 'active');
+      } catch { /* non-fatal */ }
       if (nextState === 'active') {
         checkPendingAccept();
       }
     });
-    return () => sub.remove();
+    return () => {
+      sub.remove();
+      try {
+        (SpinzoOverlay as any).setAppInForeground?.(false);
+      } catch { /* non-fatal */ }
+    };
   }, []);
 
   // Initialize live listeners for all authenticated ops staff so
@@ -248,56 +266,18 @@ export function RootNavigator() {
         useOrderFeedStore.getState().initialize();
         useOpsProcessStore.getState().initialize(uid);
         useStaffRosterStore.getState().initialize();
+        useHelperRulesStore.getState().subscribe();
       }
       if (role === 'supervisor' || role === 'admin') {
         useOrderFeedStore.getState().initialize();
         useStaffRosterStore.getState().initialize();
         useOpsProcessStore.getState().initialize(uid || '');
+        useHelperRulesStore.getState().subscribe();
       }
     }
   }, [uid, activeRole, staffDoc?.role]);
 
-  // Auto-logout heartbeat: check every minute if it's past 11:30 PM or if the shift is stale.
-  useEffect(() => {
-    const checkExpiry = () => {
-      const { isLoggedIn, logout } = useAuthStore.getState();
-      const { staffDoc } = useOpsStaffStore.getState();
-
-      // Supervisors don't clock in/out via QR, so their ops_staff.onShift stays
-      // false — never force-logout a supervisor from on-shift state.
-      if (!isLoggedIn || activeRole === 'supervisor') return;
-      if (staffDoc === null || staffDoc === undefined) return;
-
-      const now = new Date();
-      // 1. Check if past 11:30 PM
-      if (now.getHours() === 23 && now.getMinutes() >= 30) {
-        logout();
-        return;
-      }
-
-      // 2. Check if shift started yesterday
-      if (staffDoc.shiftStartAt) {
-        const ts: any = staffDoc.shiftStartAt;
-        let shiftDate: Date | null = null;
-        if (ts?.toDate) shiftDate = ts.toDate();
-        else if (ts instanceof Date) shiftDate = ts;
-
-        if (shiftDate) {
-          const isPreviousDay = shiftDate.getDate() !== now.getDate() ||
-                                shiftDate.getMonth() !== now.getMonth() ||
-                                shiftDate.getFullYear() !== now.getFullYear();
-          if (isPreviousDay) {
-            logout();
-          }
-        }
-      }
-    };
-
-    const intervalId = setInterval(checkExpiry, 60000);
-    checkExpiry();
-    
-    return () => clearInterval(intervalId);
-  }, [isLoggedIn, activeRole]);
+  // Dynamic shift hours (6 AM – 1 AM+): staff stay logged in until they explicitly clock out / log out.
 
   // Loading safety escape: never keep staff stuck on black screen if network hangs
   const [initTimeoutPassed, setInitTimeoutPassed] = React.useState(false);

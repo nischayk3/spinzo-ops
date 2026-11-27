@@ -2,24 +2,99 @@ const { onDocumentCreated, onDocumentUpdated, onDocumentWritten } = require('fir
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { onCall, onRequest } = require('firebase-functions/v2/https');
 const admin = require('firebase-admin');
-const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, isWashRequiringService, getOccupiedMachines, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, isHandsOnStageNudgeDue, washerChemicalNudgeDue, resolveToken, extractCleanTokenNumber, buildHindiVoicePrompt } = require('./dispatch');
+const { pickRider, pickupGuard, normalizePhone, isAwaitingPickup, taskTransition, opsStepsForOrder, isProductionStep, firstProductionStep, parseGarmentQr, generateLabels, stepsForServiceType, splitOrderIntoServices, SERVICE_LABELS, checkPaymentGate, IRONING_PRIORITY_PHONES, isIroningEligible, isHelperAllowedForStage, extractHelperRulesFromDoc, isWashRequiringService, getOccupiedMachines, selectHelperForStage, getTodayDateString, isDeliveryDueToday, isSlotDueForDispatch, isStaffAvailableForAutoAssign, isOrderEditable, applyExpressPricing, isMachineNudgeDue, isMachineUnloadNudgeDue, isHandsOnStageNudgeDue, washerChemicalNudgeDue, resolveToken, extractCleanTokens, extractCleanTokenNumber, formatTokenForHindiSpeech, buildHindiVoicePrompt } = require('./dispatch');
 
-// Which steps a role may claim/start. Supervisors bypass.
-// Ironing stage priority: Samsul, Abdur. No ironing orders to New Helper.
-function stageRoleGate(step, role, phone) {
+// Which steps a role may claim/start. Supervisors/admins bypass.
+// Consults dynamic config/helperAssignmentRules when provided; falls back to default eligibility.
+function stageRoleGate(step, role, phone, helperRules = null) {
   if (role === 'supervisor' || role === 'admin') return true;
-  if (step === 'getting_ironed') {
-    if (phone && isIroningEligible(phone)) return true;
-    return false;
+  if (role !== 'helper' && role !== 'iron') return false;
+  if (phone) {
+    return isHelperAllowedForStage(phone, step, helperRules);
   }
-  if (role === 'helper' || role === 'iron') return true;
-  return false;
+  return step !== 'getting_ironed';
 }
 
 admin.initializeApp();
 const db = admin.firestore();
 db.settings({ ignoreUndefinedProperties: true });
 const TS = () => admin.firestore.FieldValue.serverTimestamp();
+
+async function loadHelperAssignmentRules() {
+  try {
+    const snap = await db.doc('config/helperAssignmentRules').get();
+    return snap.exists ? extractHelperRulesFromDoc(snap.data()) : null;
+  } catch (err) {
+    console.warn('[loadHelperAssignmentRules] Failed reading config/helperAssignmentRules:', err);
+    return null;
+  }
+}
+
+async function resolveProcessTokenFallback(procData) {
+  const rawToken = (procData && procData.tokenNumber) || '';
+  const rawMap = (procData && procData.tokens) || null;
+  if (extractCleanTokenNumber(rawToken, rawMap)) {
+    return { tokenNumber: rawToken, tokensMap: rawMap };
+  }
+  const uid = procData && procData.userId;
+  const oid = (procData && (procData.parentOrderId || procData.orderId)) || '';
+  if (uid && oid) {
+    try {
+      const oSnap = await db.doc(`users/${uid}/orders/${oid}`).get();
+      if (oSnap.exists) {
+        const od = oSnap.data() || {};
+        return {
+          tokenNumber: od.tokenNumber || '',
+          tokensMap: od.tokens || null,
+        };
+      }
+    } catch (err) {
+      console.warn(`[resolveProcessTokenFallback] Failed reading order ${oid}:`, err);
+    }
+  }
+  return { tokenNumber: rawToken, tokensMap: rawMap };
+}
+
+async function resolveOrderBundleInfo(orderId, orderData) {
+  let sum = 0;
+  const bundleLabels = [];
+  try {
+    let procDocs = [];
+    const parentSnap = await db.collection('ops_process')
+      .where('parentOrderId', '==', orderId)
+      .get();
+    if (!parentSnap.empty) {
+      procDocs = parentSnap.docs;
+    } else {
+      const legacySnap = await db.doc(`ops_process/${orderId}`).get();
+      if (legacySnap.exists) {
+        procDocs = [legacySnap];
+      }
+    }
+
+    for (const doc of procDocs) {
+      const p = doc.data();
+      const pk = p && p.stages && p.stages.packaging;
+      if (!pk) continue;
+      const bCount = Number(pk.qualityProof?.bundles ?? pk.bundleCount) || 0;
+      if (bCount > 0) sum += bCount;
+      if (Array.isArray(pk.bundleLabels) && pk.bundleLabels.length > 0) {
+        bundleLabels.push(...pk.bundleLabels);
+      }
+    }
+  } catch (err) {
+    console.warn(`[resolveOrderBundleInfo] Failed reading ops_process for ${orderId}:`, err);
+  }
+
+  const bundleCount =
+    Number(orderData?.packagingProof?.bundles) ||
+    Number(orderData?.opsDetails?.bundles) ||
+    Number(orderData?.opsDetails?.packagingProof?.bundles) ||
+    sum ||
+    1;
+
+  return { bundleCount, bundleLabels };
+}
 
 // Generate a random 4-digit OTP (matching production Livfresh generateOTP).
 function generateOTP() {
@@ -103,8 +178,11 @@ async function sendFCMOrderAssignment({
   slot = '',
   isInstant = false,
   stepName = '',
+  step = '',
   assignedBySupervisor = false,
+  isSupervisorOverride = false,
   tokenNumber = '',
+  tokensMap = null,
   voiceText = '',
 }) {
   if (!staffId) return;
@@ -115,12 +193,13 @@ async function sendFCMOrderAssignment({
       return;
     }
     const staffData = staffDoc.data();
+    const effectiveSupervisorOverride = Boolean(isSupervisorOverride || assignedBySupervisor);
     // Never push order alerts to clocked-out staff; only supervisor overrides may alert on-break staff.
     if (staffData.onShift !== true) {
       console.log(`[FCM] Skipping assignment push to off-shift staff ${staffId}`);
       return;
     }
-    if (!assignedBySupervisor && !isStaffAvailableForAutoAssign(staffData)) {
+    if (!effectiveSupervisorOverride && !isStaffAvailableForAutoAssign(staffData)) {
       console.log(`[FCM] Skipping auto-assignment push to on-break staff ${staffId}`);
       return;
     }
@@ -130,7 +209,8 @@ async function sendFCMOrderAssignment({
       return;
     }
 
-    const cleanToken = extractCleanTokenNumber(tokenNumber);
+    const resolvedStep = step || stepName || '';
+    const cleanToken = extractCleanTokenNumber(tokenNumber, tokensMap);
     const taskTypeLower = String(taskType || '').toLowerCase();
     const kind =
       taskType === 'step'
@@ -146,8 +226,9 @@ async function sendFCMOrderAssignment({
       voiceText ||
       buildHindiVoicePrompt({
         kind,
-        step: stepName,
-        tokenNumber: cleanToken,
+        step: resolvedStep,
+        tokenNumber,
+        tokensMap,
         isExpress: isExpressTask,
       });
 
@@ -161,8 +242,10 @@ async function sendFCMOrderAssignment({
         address: String(address || ''),
         slot: String(slot || ''),
         isInstant: String(isInstant ? 'true' : 'false'),
-        stepName: String(stepName || ''),
-        assignedBySupervisor: assignedBySupervisor ? 'true' : 'false',
+        stepName: String(stepName || resolvedStep || ''),
+        step: String(resolvedStep || ''),
+        assignedBySupervisor: effectiveSupervisorOverride ? 'true' : 'false',
+        isSupervisorOverride: effectiveSupervisorOverride ? 'true' : 'false',
         tokenNumber: String(cleanToken || ''),
         voiceText: String(computedVoiceText || ''),
       },
@@ -204,7 +287,9 @@ async function sendFCMStageNudge({
   phase = 'accepted',
   actionLabel = 'START WASHER',
   tokenNumber = '',
+  tokensMap = null,
   voiceText = '',
+  isSupervisorOverride = false,
 }) {
   if (!staffId) return;
   try {
@@ -214,8 +299,12 @@ async function sendFCMStageNudge({
       return;
     }
     const staffData = staffDoc.data();
-    if (!isStaffAvailableForAutoAssign(staffData)) {
-      console.log(`[FCM] Skipping stage nudge to off-shift/on-break staff ${staffId}`);
+    if (staffData.onShift !== true) {
+      console.log(`[FCM] Skipping stage nudge to off-shift staff ${staffId}`);
+      return;
+    }
+    if (!isSupervisorOverride && !isStaffAvailableForAutoAssign(staffData)) {
+      console.log(`[FCM] Skipping stage nudge to on-break staff ${staffId}`);
       return;
     }
     const fcmToken = staffData.fcmToken;
@@ -224,14 +313,15 @@ async function sendFCMStageNudge({
       return;
     }
 
-    const cleanToken = extractCleanTokenNumber(tokenNumber);
+    const cleanToken = extractCleanTokenNumber(tokenNumber, tokensMap);
     const computedVoiceText =
       voiceText ||
       buildHindiVoicePrompt({
         kind: phase === 'idle_alert' ? 'idle_alert' : 'nudge',
         step,
         phase,
-        tokenNumber: cleanToken,
+        tokenNumber,
+        tokensMap,
       });
 
     const payload = {
@@ -246,6 +336,7 @@ async function sendFCMStageNudge({
         stepName: String(actionLabel || 'START MACHINE'),
         step: String(step || ''),
         phase: String(phase || 'accepted'),
+        isSupervisorOverride: isSupervisorOverride ? 'true' : 'false',
         tokenNumber: String(cleanToken || ''),
         voiceText: String(computedVoiceText || ''),
       },
@@ -430,7 +521,8 @@ exports.autoAssignRider = onDocumentCreated('users/{userId}/orders/{orderId}', a
       address: pickupAddressFromOrder(order),
       slot,
       isInstant: isInstant || isExpress,
-      tokenNumber: extractCleanTokenNumber(order && order.tokenNumber, order && order.tokens),
+      tokenNumber: (order && order.tokenNumber) || '',
+      tokensMap: (order && order.tokens) || null,
     });
 
     // Dual-write rider details directly to customer's order doc for real-time app tracking
@@ -532,7 +624,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
         address: td.pickupAddress || '',
         slot,
         isInstant: isInstant || isExp,
-        tokenNumber: extractCleanTokenNumber(td.tokenNumber, td.tokens),
+        tokenNumber: td.tokenNumber || '',
+        tokensMap: td.tokens || null,
       });
     } catch (err) {
       console.error(`onShiftCatchUp: reassign ${taskDoc.id} failed`, err);
@@ -663,7 +756,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
           address: delData.deliveryAddress || '',
           slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
           isInstant: isExp,
-          tokenNumber: delData.tokenNumber || extractCleanTokenNumber(null, delData.tokens),
+          tokenNumber: delData.tokenNumber || '',
+          tokensMap: delData.tokens || null,
         });
         console.log(`[onShiftCatchUp] Assigned due delivery ${delDoc.id} (${delData.deliveryDate}) to newly on-shift rider ${newRiderUid}`);
       }
@@ -673,34 +767,8 @@ exports.onShiftCatchUp = onDocumentUpdated('ops_staff/{staffId}', async (event) 
   }
 });
 
-// ─── Daily 11:30 PM force-logout for all staff ─────────────────────────────
-// Clears onShift so that helpers/riders clock out even if their app is closed
-// or the client-side heartbeat missed. Runs daily at 18:00 UTC = 11:30 PM IST.
-exports.scheduleForceLogout = onSchedule('30 18 * * *', async () => {
-  const batch = db.batch();
-  const snap = await db.collection('ops_staff').where('onShift', '==', true).get();
-  let count = 0;
-  snap.forEach((doc) => {
-    batch.set(
-      doc.ref,
-      {
-        onShift: false,
-        onBreak: false,
-        attendanceStatus: 'off',
-        activeHelperTask: admin.firestore.FieldValue.delete(),
-        shiftEndAt: admin.firestore.FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-    count++;
-  });
-  if (count > 0) {
-    await batch.commit();
-    console.log(`scheduleForceLogout: logged out ${count} staff member(s).`);
-  } else {
-    console.log('scheduleForceLogout: no staff currently on shift.');
-  }
-});
+// Shift hours are dynamic (helpers/riders clock in and out explicitly via QR).
+// Scheduled 11:30 PM force-logout removed.
 
 // Max failed OTP attempts per order before verification is locked.
 const MAX_OTP_ATTEMPTS = 5;
@@ -1088,10 +1156,13 @@ function buildAggregatedOrderOpsFields(siblingDocs, now = TS()) {
       });
     }
 
+    const perLoadGarmentCount = p.garments && Number(p.garments.count) > 0 ? Number(p.garments.count) : null;
     loadTimings[processId] = {
       label: loadLabel,
+      serviceType: p.serviceType || 'wash_fold',
       loadIndex: p.loadIndex || 1,
       loadCount: p.loadCount || 1,
+      ...(perLoadGarmentCount !== null ? { garmentCount: perLoadGarmentCount } : {}),
       stages: perLoadStages,
     };
   });
@@ -1285,8 +1356,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
     }
 
     // Select helper using balanced, workload-aware dispatch rules + dynamic config/helperAssignmentRules
-    const rulesSnap = await db.doc('config/helperAssignmentRules').get();
-    const helperRules = rulesSnap.exists ? (rulesSnap.data().rules || null) : null;
+    const helperRules = await loadHelperAssignmentRules();
     const primaryWashGroup = serviceGroups.find((g) => isWashRequiringService(g.serviceType));
     const taggingServiceType = primaryWashGroup
       ? primaryWashGroup.serviceType
@@ -1308,6 +1378,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
     // Create process docs for all services
     const batch = db.batch();
     let primaryTokenNumber = '';
+    const groupTokens = [];
     for (const group of serviceGroups) {
       const processKey = group.processKey || group.serviceType;
       const processId = `${orderId}__${processKey}`;
@@ -1316,6 +1387,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
       const tokenKey = group.tokenKey || group.processKey || group.serviceType;
       const procTokenNumber = resolveToken(tokens, tokenKey) || resolveToken(tokens, group.serviceType) || order.tokenNumber || '';
       if (!primaryTokenNumber && procTokenNumber) primaryTokenNumber = procTokenNumber;
+      if (procTokenNumber) groupTokens.push(procTokenNumber);
 
       batch.set(pRef, {
         id: processId,
@@ -1377,13 +1449,18 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
     console.log(`[AutoAssignTagging] Auto-created ops_process and assigned ${orderId} to ${selectedHelper ? selectedHelper.name : 'unassigned'}`);
 
     if (selectedHelper) {
+      const combinedGroupToken = groupTokens.join(', ');
       await sendFCMOrderAssignment({
         staffId: selectedHelper.uid,
         orderId,
         taskType: 'step',
         customerName: order.customerName || order.userName || '',
+        step: 'tagging',
         stepName: 'tagging',
-        tokenNumber: primaryTokenNumber || order.tokenNumber || extractCleanTokenNumber(null, tokens),
+        tokenNumber: serviceGroups.length > 1
+          ? (order.tokenNumber || combinedGroupToken || '')
+          : (primaryTokenNumber || order.tokenNumber || ''),
+        tokensMap: tokens,
       });
     }
   } catch (err) {
@@ -1399,7 +1476,7 @@ async function autoAssignTaggingOnPickup(orderId, order, userId, vendorId) {
  * - Ironing: Samsul (Station 1) -> Abdur / Abdul (Station 2) parallel (Tahirul blocked)
  * - Packaging: Tier 1 Abdul & Tahirul (Primary, least-loaded) -> Tier 2 Abdur -> Tier 3 Samsul (if no iron)
  */
-async function autoAssignStage(processId, targetStage, options = {}) {
+async function autoAssignStage(processId, targetStage, options = {}, helperRulesOverride = undefined) {
   try {
     if (!processId || !targetStage || targetStage === 'done') return { ok: false };
 
@@ -1472,8 +1549,12 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     }
 
     // 4. Select helper using pure dispatch rules + dynamic config/helperAssignmentRules
-    const rulesSnap = await db.doc('config/helperAssignmentRules').get();
-    const helperRules = rulesSnap.exists ? (rulesSnap.data().rules || null) : null;
+    const helperRules =
+      helperRulesOverride !== undefined
+        ? helperRulesOverride
+        : options.helperRules !== undefined
+          ? options.helperRules
+          : await loadHelperAssignmentRules();
     const effectiveOptions = {
       ...options,
       serviceType: options.serviceType || pData.serviceType || null,
@@ -1513,13 +1594,16 @@ async function autoAssignStage(processId, targetStage, options = {}) {
     await batch.commit();
     console.log(`[AutoAssignStage] Auto-assigned ${processId} (${targetStage}) to ${selectedHelper.name}${machineName ? ` on ${machineName}` : ''}`);
 
+    const tokInfo = await resolveProcessTokenFallback(pData);
     await sendFCMOrderAssignment({
       staffId: selectedHelper.uid,
       orderId: pData.orderId || processId,
       taskType: 'step',
       customerName: pData.customerName || '',
+      step: targetStage,
       stepName: targetStage,
-      tokenNumber: pData.tokenNumber || '',
+      tokenNumber: tokInfo.tokenNumber,
+      tokensMap: tokInfo.tokensMap,
     });
 
     return { ok: true, helper: selectedHelper, machineName };
@@ -1542,11 +1626,12 @@ async function drainWaitingOpsQueues(stageList = null, options = {}) {
     const targetStages = Array.isArray(stageList) && stageList.length > 0 ? stageList : defaultStages;
     const allowedStages = new Set(targetStages);
 
-    const [resSnap, activeSnap] = await Promise.all([
+    const [resSnap, activeSnap, helperRules] = await Promise.all([
       db.doc('config/storeResources').get(),
       db.collection('ops_process')
         .where('status', 'in', defaultStages)
         .get(),
+      loadHelperAssignmentRules(),
     ]);
 
     if (activeSnap.empty) return;
@@ -1614,10 +1699,15 @@ async function drainWaitingOpsQueues(stageList = null, options = {}) {
     const failedTiers = new Set();
     for (const item of candidates) {
       if (failedTiers.has(item.priority)) continue;
-      const res = await autoAssignStage(item.id, item.stage, {
-        ...options,
-        serviceType: item.serviceType,
-      });
+      const res = await autoAssignStage(
+        item.id,
+        item.stage,
+        {
+          ...options,
+          serviceType: item.serviceType,
+        },
+        helperRules
+      );
       if (!res.ok) {
         // Capacity reached or helpers busy for this priority tier; skip remaining items in the same tier
         failedTiers.add(item.priority);
@@ -1719,7 +1809,8 @@ async function drainScheduledRiderTasks() {
           address: data.pickupAddress || '',
           slot,
           isInstant: isInstant || isExp,
-          tokenNumber: extractCleanTokenNumber(data.tokenNumber, data.tokens),
+          tokenNumber: data.tokenNumber || '',
+          tokensMap: data.tokens || null,
         });
         console.log(`[drainScheduledRiderTasks] Auto-dispatched due pickup ${orderId} (slot: ${slot}) to rider ${assignee}`);
       }
@@ -1790,7 +1881,8 @@ async function drainScheduledRiderTasks() {
         address: delData.deliveryAddress || '',
         slot: `${delData.deliveryDate || ''} ${delData.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
         isInstant: isExp,
-        tokenNumber: delData.tokenNumber || extractCleanTokenNumber(null, delData.tokens),
+        tokenNumber: delData.tokenNumber || '',
+        tokensMap: delData.tokens || null,
       });
       console.log(`[drainScheduledRiderTasks] Auto-dispatched due delivery ${delDoc.id} (slot: ${delData.deliveryDate} ${delData.deliveryTime}) to rider ${riderUid}`);
     }
@@ -1828,32 +1920,39 @@ async function checkUnstartedMachineNudges() {
     // If no floor helpers are actively working (e.g. everyone is on lunch/short break or off-shift), send nothing.
     if (workingFloorHelpers.length === 0) return;
 
+    const helperRules = await loadHelperAssignmentRules();
+
     const isDoingHandsOn = (sd) =>
       Boolean(sd?.activeHelperTask && ['tagging', 'getting_ironed', 'packaging'].includes(sd.activeHelperTask.step));
 
+    const eligibleFloorHelpersForStep = (step) =>
+      workingFloorHelpers.filter((h) => !step || isHelperAllowedForStage(h.phone, step, helperRules));
+
     // Resolve recipient:
     // - If original assignee is actively working -> alert them (unless hands-on busy -> defer).
-    // - If original assignee is on break or clocked out while floor helpers are working -> route to a free working floor helper!
-    const resolveRecipient = (assigneeId) => {
+    // - If original assignee is on break or clocked out while floor helpers are working -> route to an eligible free working floor helper!
+    const resolveRecipient = (assigneeId, step) => {
       const sd = staffMap.get(assigneeId);
       if (sd && isStaffAvailableForAutoAssign(sd)) {
         return isDoingHandsOn(sd) ? null : assigneeId;
       }
-      const fallback = workingFloorHelpers.find((h) => !isDoingHandsOn(h));
+      const candidates = eligibleFloorHelpersForStep(step);
+      const fallback = candidates.find((h) => !isDoingHandsOn(h));
       return fallback ? fallback.uid : null;
     };
 
     // Urgent machine actions (detergent @ 3m, softener @ 21m, unload @ 36m/40m):
     // Alert the assigned working helper directly even if doing hands-on work;
-    // fall back to a working floor helper only if the assignee is on break/off-shift.
-    const resolveUrgentRecipient = (assigneeId) => {
+    // fall back to an eligible working floor helper only if the assignee is on break/off-shift.
+    const resolveUrgentRecipient = (assigneeId, step) => {
       const sd = staffMap.get(assigneeId);
       if (sd && isStaffAvailableForAutoAssign(sd)) {
         return assigneeId;
       }
-      const freeFallback = workingFloorHelpers.find((h) => !isDoingHandsOn(h));
+      const candidates = eligibleFloorHelpersForStep(step);
+      const freeFallback = candidates.find((h) => !isDoingHandsOn(h));
       if (freeFallback) return freeFallback.uid;
-      return workingFloorHelpers.length > 0 ? workingFloorHelpers[0].uid : null;
+      return candidates.length > 0 ? candidates[0].uid : null;
     };
 
     const stages = ['getting_washed', 'getting_dried'];
@@ -1876,7 +1975,7 @@ async function checkUnstartedMachineNudges() {
 
         // 1. Unstarted Machine Nudge (Assigned >= 5m ago, but not started)
         if (isMachineNudgeDue(stageData, step, now)) {
-          const targetStaffId = resolveRecipient(stageData.assignee);
+          const targetStaffId = resolveRecipient(stageData.assignee, step);
           if (!targetStaffId) continue;
 
           const isWash = step === 'getting_washed';
@@ -1888,6 +1987,7 @@ async function checkUnstartedMachineNudges() {
 
           console.log(`[StageNudge] Dispatching FCM unstarted nudge to helper ${targetStaffId} for order ${p.orderId || doc.id} (${step})`);
 
+          const tokInfo = await resolveProcessTokenFallback(p);
           await sendFCMStageNudge({
             staffId: targetStaffId,
             orderId: p.orderId || doc.id,
@@ -1896,7 +1996,8 @@ async function checkUnstartedMachineNudges() {
             step,
             phase: 'accepted',
             actionLabel,
-            tokenNumber: p.tokenNumber || '',
+            tokenNumber: tokInfo.tokenNumber,
+            tokensMap: tokInfo.tokensMap,
           });
 
           // Record lastSentAt in Firestore to suppress repeated FCM alerts for 5 minutes
@@ -1915,7 +2016,7 @@ async function checkUnstartedMachineNudges() {
         }
         // 2. Unloaded Machine Nudge (Wash cycle 36m / Dry cycle 40m elapsed, but not unloaded)
         else if (isMachineUnloadNudgeDue(stageData, step, now)) {
-          const targetStaffId = resolveUrgentRecipient(stageData.assignee);
+          const targetStaffId = resolveUrgentRecipient(stageData.assignee, step);
           if (!targetStaffId) continue;
 
           const isWash = step === 'getting_washed';
@@ -1928,6 +2029,7 @@ async function checkUnstartedMachineNudges() {
 
           console.log(`[StageNudge] Dispatching FCM unload machine nudge to helper ${targetStaffId} for order #${shortId} (${step})`);
 
+          const tokInfo = await resolveProcessTokenFallback(p);
           await sendFCMStageNudge({
             staffId: targetStaffId,
             orderId: p.orderId || doc.id,
@@ -1936,7 +2038,8 @@ async function checkUnstartedMachineNudges() {
             step,
             phase: 'started',
             actionLabel,
-            tokenNumber: p.tokenNumber || '',
+            tokenNumber: tokInfo.tokenNumber,
+            tokensMap: tokInfo.tokensMap,
           });
 
           // Record lastSentAt in Firestore to suppress repeated FCM alerts for 5 minutes
@@ -1957,7 +2060,7 @@ async function checkUnstartedMachineNudges() {
         else if (step === 'getting_washed') {
           const chemical = washerChemicalNudgeDue(stageData, now);
           if (!chemical) continue;
-          const targetStaffId = resolveUrgentRecipient(stageData.assignee);
+          const targetStaffId = resolveUrgentRecipient(stageData.assignee, step);
           if (!targetStaffId) continue;
 
           const shortId = (p.orderId || doc.id).slice(-6).toUpperCase();
@@ -1965,6 +2068,7 @@ async function checkUnstartedMachineNudges() {
 
           console.log(`[StageNudge] Dispatching FCM ${chemical} nudge to helper ${targetStaffId} for order #${shortId}`);
 
+          const tokInfo = await resolveProcessTokenFallback(p);
           await sendFCMStageNudge({
             staffId: targetStaffId,
             orderId: p.orderId || doc.id,
@@ -1975,7 +2079,8 @@ async function checkUnstartedMachineNudges() {
             step,
             phase: chemical,
             actionLabel: isDetergent ? 'ADD DETERGENT NOW' : 'ADD SOFTENER NOW',
-            tokenNumber: p.tokenNumber || '',
+            tokenNumber: tokInfo.tokenNumber,
+            tokensMap: tokInfo.tokensMap,
           });
 
           await doc.ref.set({
@@ -2022,6 +2127,7 @@ async function checkUnstartedMachineNudges() {
 
         console.log(`[StageNudge] Dispatching FCM hands_on (${step}) reminder to helper ${targetStaffId} for order #${shortId}`);
 
+        const tokInfo = await resolveProcessTokenFallback(p);
         await sendFCMStageNudge({
           staffId: targetStaffId,
           orderId: p.orderId || doc.id,
@@ -2030,7 +2136,8 @@ async function checkUnstartedMachineNudges() {
           step,
           phase: 'hands_on',
           actionLabel,
-          tokenNumber: p.tokenNumber || '',
+          tokenNumber: tokInfo.tokenNumber,
+          tokensMap: tokInfo.tokensMap,
         });
 
         await doc.ref.set({
@@ -2083,20 +2190,24 @@ async function checkUnstartedMachineNudges() {
     const lastWasherAlertMs = toMs(alertData.lastWasherIdleAlertAt);
     const lastDryerAlertMs = toMs(alertData.lastDryerIdleAlertAt);
 
-    const availableFloorHelpers = workingFloorHelpers.filter((h) => !isDoingHandsOn(h));
-    const recipientIds = Array.from(new Set([
-      ...onShiftSupervisors.map((s) => s.uid),
-      ...(availableFloorHelpers.length > 0 ? availableFloorHelpers : workingFloorHelpers).map((h) => h.uid),
-    ]));
+    const getIdleAlertRecipients = (step) => {
+      const allowedHelpers = eligibleFloorHelpersForStep(step);
+      const freeAllowed = allowedHelpers.filter((h) => !isDoingHandsOn(h));
+      return Array.from(new Set([
+        ...onShiftSupervisors.map((s) => s.uid),
+        ...(freeAllowed.length > 0 ? freeAllowed : allowedHelpers).map((h) => h.uid),
+      ]));
+    };
 
     const alertPatch = {};
 
     if (occupiedWashers < maxWashers && waitingWashCount > 0 && now - lastWasherAlertMs >= IDLE_ALERT_COOLDOWN_MS) {
+      const washRecipientIds = getIdleAlertRecipients('getting_washed');
       const emptyWashers = maxWashers - occupiedWashers;
       const msg = `⚡ Washer Idle! ${emptyWashers}/${maxWashers} washers empty with ${waitingWashCount} wash ${waitingWashCount === 1 ? 'order' : 'orders'} waiting on floor — tag & load now.`;
-      console.log(`[AutopilotAlert] ${msg} (recipients: ${recipientIds.length})`);
+      console.log(`[AutopilotAlert] ${msg} (recipients: ${washRecipientIds.length})`);
       await Promise.allSettled(
-        recipientIds.map((staffId) =>
+        washRecipientIds.map((staffId) =>
           sendFCMStageNudge({
             staffId,
             orderId: 'autopilot_washer_idle',
@@ -2112,11 +2223,12 @@ async function checkUnstartedMachineNudges() {
     }
 
     if (occupiedDryers < maxDryers && waitingDryCount > 0 && now - lastDryerAlertMs >= IDLE_ALERT_COOLDOWN_MS) {
+      const dryRecipientIds = getIdleAlertRecipients('getting_dried');
       const emptyDryers = maxDryers - occupiedDryers;
       const msg = `⚡ Dryer Idle! ${emptyDryers}/${maxDryers} dryers empty with ${waitingDryCount} ${waitingDryCount === 1 ? 'order' : 'orders'} ready to dry.`;
-      console.log(`[AutopilotAlert] ${msg} (recipients: ${recipientIds.length})`);
+      console.log(`[AutopilotAlert] ${msg} (recipients: ${dryRecipientIds.length})`);
       await Promise.allSettled(
-        recipientIds.map((staffId) =>
+        dryRecipientIds.map((staffId) =>
           sendFCMStageNudge({
             staffId,
             orderId: 'autopilot_dryer_idle',
@@ -2312,9 +2424,7 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
     }
 
     const deliveryAddress = pickupAddressFromOrder(after); // reuse same address helper
-    const processSnap = await db.doc(`ops_process/${orderId}`).get();
-    const bundleCount = processSnap.exists ? processSnap.data().stages?.packaging?.bundleCount || 1 : 1;
-    const bundleLabels = processSnap.exists ? processSnap.data().stages?.packaging?.bundleLabels || [] : [];
+    const { bundleCount, bundleLabels } = await resolveOrderBundleInfo(orderId, after);
 
     const isExpress = isOrderExpress(after);
     const explicitSlot = Boolean(after.deliveryDate || after.deliverySlot);
@@ -2480,7 +2590,8 @@ exports.syncDeliveryTask = onDocumentUpdated('users/{userId}/orders/{orderId}', 
         address: deliveryAddress,
         slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
         isInstant: isExpress,
-        tokenNumber: after.tokenNumber || extractCleanTokenNumber(null, after.tokens),
+        tokenNumber: after.tokenNumber || '',
+        tokensMap: after.tokens || null,
       });
       console.log(`[syncDeliveryTask] Outbound delivery for order ${orderId} (slot: ${deliveryDate} ${deliveryTime}) auto-assigned to rider ${riderUid}`);
     } else if (!riderUid) {
@@ -2713,6 +2824,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     // Split into service groups
     const serviceGroups = splitOrderIntoServices(order);
     const prodStep = firstProductionStep(opsStepsForOrder(order)); // For backwards compatibility
+    const helperRules = await loadHelperAssignmentRules();
 
     try {
       const result = await db.runTransaction(async (tx) => {
@@ -2738,7 +2850,7 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           const steps = stepsForServiceType(group.serviceType);
           const tokenKey = group.tokenKey || group.processKey || group.serviceType;
           
-          if (!stageRoleGate(steps[0], targetStaff.role || role, targetStaff.phone || phone)) {
+          if (!isSupervisor && !stageRoleGate(steps[0], targetStaff.role || role, targetStaff.phone || phone, helperRules)) {
              // Rollback/error if helper role is unauthorized for tagging
              throw new Error('unauthorized');
           }
@@ -2794,15 +2906,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         return { ok: true };
       });
 
-      if (result.ok && targetUid) {
+      if (result.ok && targetUid && targetUid !== auth.uid) {
         try {
+          const isSupPush = Boolean(isSupervisor && data.helperId);
           await sendFCMOrderAssignment({
             staffId: targetUid,
             orderId,
             taskType: 'step',
             customerName: order.customerName || order.userName || '',
+            step: 'tagging',
             stepName: 'tagging',
-            tokenNumber: extractCleanTokenNumber(data.tokenNumber || order.tokenNumber, tokens),
+            assignedBySupervisor: isSupPush,
+            isSupervisorOverride: isSupPush,
+            tokenNumber: data.tokenNumber || order.tokenNumber || '',
+            tokensMap: tokens,
           });
         } catch (fcmErr) {
           console.warn('[claim] FCM send error:', fcmErr);
@@ -2823,9 +2940,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const process = processSnap.data();
     const step = process.steps[process.currentIndex];
     if (!step) return { ok: false, error: 'invalid_state' };
-    if (!stageRoleGate(step, role, phone)) return { ok: false, error: 'unauthorized' };
 
     const stage = process.stages && process.stages[step];
+    const isSupervisorPushed = Boolean(
+      stage &&
+      stage.assignee === auth.uid &&
+      stage.assignedBy &&
+      stage.assignedBy !== 'system_auto' &&
+      stage.assignedBy !== 'self_claim'
+    );
+    if (!isSupervisorPushed) {
+      const helperRules = await loadHelperAssignmentRules();
+      if (!stageRoleGate(step, role, phone, helperRules)) return { ok: false, error: 'unauthorized' };
+    }
+
     if (stage && stage.assignee && stage.assignee !== auth.uid) return { ok: false, error: 'already_claimed' };
 
     const staffSnap = await db.doc(`ops_staff/${auth.uid}`).get();
@@ -2872,9 +3000,20 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
     const steps = Array.isArray(process.steps) ? process.steps : [];
     const step = steps[process.currentIndex];
     if (!step) return { ok: false, error: 'invalid_state' };
-    if (!stageRoleGate(step, role, phone)) return { ok: false, error: 'unauthorized' };
 
     const stage = process.stages && process.stages[step];
+    const isSupervisorPushed = Boolean(
+      stage &&
+      stage.assignee === auth.uid &&
+      stage.assignedBy &&
+      stage.assignedBy !== 'system_auto' &&
+      stage.assignedBy !== 'self_claim'
+    );
+    if (!isSupervisorPushed) {
+      const helperRules = await loadHelperAssignmentRules();
+      if (!stageRoleGate(step, role, phone, helperRules)) return { ok: false, error: 'unauthorized' };
+    }
+
     if (stage && stage.startedAt) return { ok: true, status: 'already_started', step };
 
     const staffSnap = await db.doc(`ops_staff/${auth.uid}`).get();
@@ -3107,6 +3246,11 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         // Dual-write to ops_stage_metrics for permanent historical tracking
         const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
         const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__${step}`);
+        const stepGarmentCount = process.garments && Number(process.garments.count) > 0
+          ? Number(process.garments.count)
+          : (Array.isArray(process.garments?.registered) && process.garments.registered.length > 0
+            ? process.garments.registered.length
+            : 0);
         tx.set(metricRef, {
           processId: processRef.id,
           orderId: process.orderId || realOrderId,
@@ -3114,6 +3258,9 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           step,
           serviceType: process.serviceType || 'wash_fold',
           serviceLabel: process.serviceLabel || '',
+          ...(stepGarmentCount > 0 ? { garmentCount: stepGarmentCount } : {}),
+          loadIndex: process.loadIndex || 1,
+          loadCount: process.loadCount || process.siblingCount || 1,
           assignee: stage.assignee || auth.uid,
           assigneeName: stage.assigneeName || name,
           acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
@@ -3415,6 +3562,11 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         // Dual-write to ops_stage_metrics for permanent historical tracking
         const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
         const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__tagging`);
+        const tagGarmentCount = Number(updatedGarments.count) > 0
+          ? Number(updatedGarments.count)
+          : (Array.isArray(updatedGarments.registered) && updatedGarments.registered.length > 0
+            ? updatedGarments.registered.length
+            : 0);
         tx.set(metricRef, {
           processId: processRef.id,
           orderId: p.orderId || realOrderId,
@@ -3422,6 +3574,9 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           step: 'tagging',
           serviceType: p.serviceType || 'wash_fold',
           serviceLabel: p.serviceLabel || '',
+          ...(tagGarmentCount > 0 ? { garmentCount: tagGarmentCount } : {}),
+          loadIndex: p.loadIndex || 1,
+          loadCount: p.loadCount || p.siblingCount || 1,
           assignee: tagStage.assignee || auth.uid,
           assigneeName: tagStage.assigneeName || name,
           acceptedAt: tagStage.acceptedAt || tagStage.startedAt || completedAt,
@@ -3582,6 +3737,11 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
         // Dual-write to ops_stage_metrics for permanent historical tracking
         const todayStr = new Date(completedAt.toMillis() + (5.5 * 3600 * 1000)).toISOString().split('T')[0];
         const metricRef = db.doc(`ops_stage_metrics/${processRef.id}__packaging`);
+        const pkgGarmentCount = process.garments && Number(process.garments.count) > 0
+          ? Number(process.garments.count)
+          : (Array.isArray(process.garments?.registered) && process.garments.registered.length > 0
+            ? process.garments.registered.length
+            : 0);
         tx.set(metricRef, {
           processId: processRef.id,
           orderId: process.orderId || realOrderId,
@@ -3589,6 +3749,9 @@ exports.opsProcessing = onCall({ cors: true, invoker: 'public' }, async (request
           step: 'packaging',
           serviceType: process.serviceType || 'wash_fold',
           serviceLabel: process.serviceLabel || '',
+          ...(pkgGarmentCount > 0 ? { garmentCount: pkgGarmentCount } : {}),
+          loadIndex: process.loadIndex || 1,
+          loadCount: process.loadCount || process.siblingCount || 1,
           assignee: stage.assignee || auth.uid,
           assigneeName: stage.assigneeName || name,
           acceptedAt: stage.acceptedAt || stage.startedAt || completedAt,
@@ -4003,10 +4166,14 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         const orderGeo = extractGeoFromOrder(order) || (delTaskSnap.exists ? extractGeoFromOrder(delTaskSnap.data()) : null);
         const assignee = await selectRider(orderGeo);
         if (!assignee) return { ok: false, error: 'no_rider_available' };
-        const rStaffSnap = await tx.get(db.doc(`ops_staff/${assignee}`));
+        const [rStaffSnap, bundleInfo] = await Promise.all([
+          tx.get(db.doc(`ops_staff/${assignee}`)),
+          resolveOrderBundleInfo(orderId, order),
+        ]);
         const rStaffData = rStaffSnap.exists ? rStaffSnap.data() : null;
         const rName = rStaffData?.name || 'SpinZo Delivery Partner';
         const rPhone = rStaffData?.phone || '';
+        const { bundleCount, bundleLabels } = bundleInfo;
 
         const orderUpdate = {
           status: 'out_for_delivery',
@@ -4045,6 +4212,10 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             billDetails: order.billDetails || existingDel.billDetails || null,
             paymentStatus: order.paymentStatus || order.paymentMethod || existingDel.paymentStatus || 'pending',
             paymentMode: order.paymentMode || order.paymentMethod || existingDel.paymentMode || '',
+            bundleCount: bundleCount || existingDel.bundleCount || 1,
+            bundleLabels: bundleLabels.length > 0 ? bundleLabels : (existingDel.bundleLabels || []),
+            tokenNumber: order.tokenNumber || existingDel.tokenNumber || null,
+            tokens: order.tokens || existingDel.tokens || null,
           });
         } else {
           tx.set(delTaskRef, {
@@ -4070,6 +4241,10 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             billDetails: order.billDetails || null,
             paymentStatus: order.paymentStatus || order.paymentMethod || 'pending',
             paymentMode: order.paymentMode || order.paymentMethod || '',
+            bundleCount,
+            bundleLabels,
+            tokenNumber: order.tokenNumber || null,
+            tokens: order.tokens || null,
             assignedAt: now,
             createdAt: now,
           });
@@ -4084,7 +4259,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
             customerName: order.customerName || order.userName || '',
             address: pickupAddressFromOrder(order),
             slot: `${deliveryDate || ''} ${deliveryTime || ''}`.trim(),
-            tokenNumber: order.tokenNumber || extractCleanTokenNumber(null, order.tokens),
+            tokenNumber: order.tokenNumber || '',
+            tokensMap: order.tokens || null,
           },
         };
       }
@@ -4163,6 +4339,7 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           }
           const deliveryDate = order.deliveryDate || new Date().toISOString().split('T')[0];
           const deliveryTime = order.deliveryTime || 'Immediate';
+          const { bundleCount, bundleLabels } = await resolveOrderBundleInfo(orderId, order);
           
           const updateData = {
             status: 'out_for_delivery',
@@ -4202,6 +4379,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               items: nonEmptyItems(order && order.items, existingDel.items),
               paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || existingDel.paymentStatus || 'pending',
               paymentMode: (order && (order.paymentMode || order.paymentMethod)) || existingDel.paymentMode || '',
+              bundleCount: bundleCount || existingDel.bundleCount || 1,
+              bundleLabels: bundleLabels.length > 0 ? bundleLabels : (existingDel.bundleLabels || []),
               tokenNumber: order.tokenNumber || existingDel.tokenNumber || null,
               tokens: order.tokens || existingDel.tokens || null,
             });
@@ -4223,6 +4402,8 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
               items: nonEmptyItems(order && order.items, []),
               paymentStatus: (order && (order.paymentStatus || order.paymentMethod)) || 'pending',
               paymentMode: (order && (order.paymentMode || order.paymentMethod)) || '',
+              bundleCount,
+              bundleLabels,
               tokenNumber: order.tokenNumber || null,
               tokens: order.tokens || null,
               assignedAt: now, createdAt: now,
@@ -4488,14 +4669,19 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
         const pSnap = await db.doc(`ops_process/${processId}`).get();
         if (pSnap.exists) {
           const p = pSnap.data();
+          const currentStep = (p.steps && p.steps[p.currentIndex]) || '';
+          const tokInfo = await resolveProcessTokenFallback(p);
           await sendFCMOrderAssignment({
             staffId: helperId,
             orderId: p.orderId || processId,
             taskType: 'step',
             customerName: p.customerName || '',
-            stepName: p.steps[p.currentIndex] || '',
+            step: currentStep,
+            stepName: currentStep,
             assignedBySupervisor: true,
-            tokenNumber: p.tokenNumber || '',
+            isSupervisorOverride: true,
+            tokenNumber: tokInfo.tokenNumber,
+            tokensMap: tokInfo.tokensMap,
           });
         }
       } catch (err) {
@@ -4552,7 +4738,9 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           slot,
           isInstant,
           assignedBySupervisor: true,
-          tokenNumber: extractCleanTokenNumber(oData.tokenNumber, oData.tokens),
+          isSupervisorOverride: true,
+          tokenNumber: oData.tokenNumber || '',
+          tokensMap: oData.tokens || null,
         });
       } catch (err) {
         console.error('assignTaskToRider FCM push error', err);
@@ -4571,7 +4759,10 @@ exports.supervisorActions = onCall({ cors: true, invoker: 'public' }, async (req
           address: fcmInfo.address,
           slot: fcmInfo.slot || (fcmInfo.isExpress ? '⚡ Express 6-8h Priority' : ''),
           isInstant: fcmInfo.isExpress,
+          assignedBySupervisor: true,
+          isSupervisorOverride: true,
           tokenNumber: fcmInfo.tokenNumber || '',
+          tokensMap: fcmInfo.tokensMap || null,
         });
       } catch (err) {
         console.error('markOutForDelivery FCM push error', err);
@@ -4683,7 +4874,8 @@ exports.onOpsTaskWritten = onDocumentWritten('ops_tasks/{orderId}', async (event
       address: enrichedAfter.pickupAddress || '',
       slot,
       isInstant: isInstant || isExp,
-      tokenNumber: extractCleanTokenNumber(enrichedAfter.tokenNumber, enrichedAfter.tokens),
+      tokenNumber: enrichedAfter.tokenNumber || '',
+      tokensMap: enrichedAfter.tokens || null,
     });
   }
 
@@ -4837,7 +5029,8 @@ exports.onDeliveryTaskWritten = onDocumentWritten('ops_delivery_tasks/{orderId}'
       address: after.deliveryAddress || '',
       slot: `${after.deliveryDate || ''} ${after.deliveryTime || ''}`.trim() || (isExp ? '⚡ Express 6-8h Priority' : ''),
       isInstant: isExp,
-      tokenNumber: after.tokenNumber || extractCleanTokenNumber(null, after.tokens),
+      tokenNumber: after.tokenNumber || '',
+      tokensMap: after.tokens || null,
     });
   }
 

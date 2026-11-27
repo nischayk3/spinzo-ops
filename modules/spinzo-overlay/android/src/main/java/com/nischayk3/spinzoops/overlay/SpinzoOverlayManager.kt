@@ -28,7 +28,10 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
+import java.util.Collections
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 object SpinzoOverlayManager {
 
@@ -36,6 +39,53 @@ object SpinzoOverlayManager {
     private const val VOICE_REPEAT_INTERVAL_MS = 8_000L
     private const val MAX_VOICE_REPEATS = 3
     private const val REPEAT_VIBRATION_PULSE_MS = 600L
+    private const val AUTO_STOP_SAFETY_MS = 30_000L
+    private const val FALLBACK_NOTIF_TAG = "spinzo_alert"
+
+    @Volatile
+    var isAppInForeground: Boolean = false
+
+    fun setAppInForeground(inForeground: Boolean) {
+        isAppInForeground = inForeground
+    }
+
+    private val overlayGeneration = AtomicLong(0L)
+
+    fun currentGeneration(): Long = overlayGeneration.get()
+
+    fun bumpGeneration(): Long = overlayGeneration.incrementAndGet()
+
+    private val activeNotificationIds: MutableSet<Int> =
+        Collections.newSetFromMap(ConcurrentHashMap<Int, Boolean>())
+
+    private val LATIN_TO_DEVANAGARI = mapOf(
+        'A' to "ए",
+        'B' to "बी",
+        'C' to "सी",
+        'D' to "डी",
+        'E' to "ई",
+        'F' to "एफ",
+        'G' to "जी",
+        'H' to "एच",
+        'I' to "आई",
+        'J' to "जे",
+        'K' to "के",
+        'L' to "एल",
+        'M' to "एम",
+        'N' to "एन",
+        'O' to "ओ",
+        'P' to "पी",
+        'Q' to "क्यू",
+        'R' to "आर",
+        'S' to "एस",
+        'T' to "टी",
+        'U' to "यू",
+        'V' to "वी",
+        'W' to "डब्ल्यू",
+        'X' to "एक्स",
+        'Y' to "वाई",
+        'Z' to "जेड"
+    )
 
     private var currentOverlayView: View? = null
     private var mediaPlayer: MediaPlayer? = null
@@ -51,14 +101,19 @@ object SpinzoOverlayManager {
     private var pendingIsDelivery: Boolean = false
     private var pendingTaskType: String? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val stopSirenOnlyRunnable = Runnable {
+        Log.d("SpinzoOverlay", "Siren burst (${SIREN_BURST_MS}ms) finished — stopping siren & looping vibration")
+        stopSirenOnly()
+    }
     private val autoStopRunnable = Runnable {
-        Log.d("SpinzoOverlay", "45s auto-stop failsafe triggered — stopping alarm & vibration")
+        Log.d("SpinzoOverlay", "30s auto-stop failsafe triggered — stopping alarm & vibration")
         stopAudioAndVibration()
     }
     private val startVoiceRunnable = Runnable {
+        stopSirenOnly()
         val text = activeVoiceText ?: return@Runnable
         if (ttsFailed || tts == null) {
-            Log.w("SpinzoOverlay", "TTS unavailable — keeping alarm siren active")
+            Log.w("SpinzoOverlay", "TTS unavailable — siren burst already ended cleanly")
             return@Runnable
         }
         if (!ttsReady) {
@@ -87,10 +142,59 @@ object SpinzoOverlayManager {
         }
     }
 
+    private fun formatTokenForHindiSpeech(raw: String): String {
+        val parts = raw.split(",").mapNotNull { segment ->
+            val cleaned = segment.trim().trimStart('#').trim()
+            if (cleaned.isEmpty()) return@mapNotNull null
+
+            val chunks = mutableListOf<String>()
+            val digitBuf = StringBuilder()
+
+            fun flushDigits() {
+                if (digitBuf.isNotEmpty()) {
+                    chunks.add(digitBuf.toString())
+                    digitBuf.clear()
+                }
+            }
+
+            for (ch in cleaned.uppercase(Locale.ROOT)) {
+                when {
+                    ch in '0'..'9' -> digitBuf.append(ch)
+                    ch in 'A'..'Z' -> {
+                        flushDigits()
+                        LATIN_TO_DEVANAGARI[ch]?.let { chunks.add(it) }
+                    }
+                    ch == '-' || ch == '_' || ch.isWhitespace() -> {
+                        flushDigits()
+                    }
+                    else -> {
+                        flushDigits()
+                        chunks.add(ch.toString())
+                    }
+                }
+            }
+            flushDigits()
+            chunks.joinToString(" ").takeIf { it.isNotBlank() }
+        }
+        return parts.joinToString(" और ")
+    }
+
     private fun buildFallbackHindiVoice(data: Map<String, String>): String {
-        val tokenNumber = data["tokenNumber"]?.trim()?.takeIf { it.isNotEmpty() }
-        val tokenPhrase = if (tokenNumber != null) "टोकन नंबर $tokenNumber" else "नया ऑर्डर"
-        val stepRaw = data["stepName"]?.trim()?.lowercase() ?: ""
+        val rawToken = data["tokenNumber"]?.trim()?.takeIf { it.isNotEmpty() }
+        val spokenToken = rawToken?.let { formatTokenForHindiSpeech(it) }?.takeIf { it.isNotEmpty() }
+        val prefix = if (spokenToken != null) "टोकन नंबर $spokenToken, " else ""
+
+        val stepRaw = (data["step"]?.takeIf { it.isNotBlank() } ?: data["stepName"])?.trim()?.lowercase() ?: ""
+        val normalizedStep = when {
+            stepRaw == "getting_washed" || stepRaw.contains("wash") -> "getting_washed"
+            stepRaw == "getting_dried" || stepRaw.contains("dri") || stepRaw.contains("dry") -> "getting_dried"
+            stepRaw == "getting_ironed" || stepRaw.contains("iron") -> "getting_ironed"
+            stepRaw == "tagging" || stepRaw.contains("tag") -> "tagging"
+            stepRaw == "prestain" || stepRaw.contains("stain") -> "prestain"
+            stepRaw == "packaging" || stepRaw.contains("packag") || stepRaw.contains("pack") -> "packaging"
+            else -> stepRaw
+        }
+
         val phase = data["phase"]?.trim()?.lowercase() ?: ""
         val taskType = data["taskType"]?.trim()?.lowercase() ?: ""
         val type = data["type"]?.trim()?.lowercase() ?: ""
@@ -98,30 +202,40 @@ object SpinzoOverlayManager {
         val isNudge = taskType == "stage_nudge" || type == "stage_nudge"
         val isDelivery = taskType.contains("delivery")
 
-        val stepHindi = when (stepRaw) {
-            "getting_washed" -> "वॉशिंग"
-            "getting_dried" -> "ड्राइंग"
-            "getting_ironed" -> "आयरनिंग"
-            "tagging" -> "टैगिंग"
-            "prestain" -> "प्री-स्टेन"
-            "packaging" -> "पैकेजिंग"
-            else -> ""
-        }
-
         return when {
             phase == "idle_alert" -> {
-                if (stepHindi.isNotEmpty()) "$stepHindi मशीन खाली है, कृपया चेक करें।"
-                else "मशीन खाली है, कृपया चेक करें।"
+                if (normalizedStep == "getting_dried") "ड्रायर खाली है, कपड़े डालिए"
+                else "वॉशर खाली है, कपड़े डालिए"
             }
-            isNudge -> {
-                if (stepHindi.isNotEmpty()) "$tokenPhrase का $stepHindi स्टेटस चेक करें।"
-                else "$tokenPhrase का स्टेटस चेक करें।"
+            phase == "detergent" -> "${prefix}डिटर्जेंट डालिए"
+            phase == "softener" -> "${prefix}सॉफ्टनर डालिए"
+            normalizedStep == "getting_washed" && phase == "accepted" -> "${prefix}वॉशर चालू करिए"
+            normalizedStep == "getting_washed" && phase == "started" -> "${prefix}वॉशर से निकालिए"
+            normalizedStep == "getting_dried" && phase == "accepted" -> "${prefix}ड्रायर चालू करिए"
+            normalizedStep == "getting_dried" && phase == "started" -> "${prefix}ड्रायर से निकालिए"
+            isNudge && normalizedStep == "tagging" -> "${prefix}टैगिंग जल्दी पूरी करिए"
+            isNudge && normalizedStep == "packaging" -> "${prefix}पैकेजिंग जल्दी पूरी करिए"
+            isNudge && normalizedStep == "getting_ironed" -> "${prefix}आयरनिंग जल्दी पूरी करिए"
+            isNudge -> "${prefix}नया काम आया है"
+            isDelivery -> {
+                when {
+                    spokenToken != null -> "टोकन नंबर $spokenToken, डिलीवरी के लिए जाना है"
+                    isInstant -> "एक्सप्रेस डिलीवरी के लिए जाना है"
+                    else -> "नई डिलीवरी आई है"
+                }
             }
-            isDelivery && isInstant -> "$tokenPhrase की एक्सप्रेस डिलीवरी आई है।"
-            isDelivery -> "$tokenPhrase की डिलीवरी असाइन हुई है।"
-            stepHindi.isNotEmpty() -> "$tokenPhrase के लिए $stepHindi का काम आया है।"
-            isInstant -> "$tokenPhrase का इंस्टेंट पिकअप आया है।"
-            else -> "$tokenPhrase का नया ऑर्डर आया है।"
+            normalizedStep == "tagging" -> "${prefix}टैगिंग करनी है"
+            normalizedStep == "getting_washed" -> "${prefix}वॉशर में डालिए"
+            normalizedStep == "getting_dried" -> "${prefix}ड्रायर में डालिए"
+            normalizedStep == "getting_ironed" -> {
+                if (spokenToken != null) "टोकन नंबर $spokenToken, नया आयरनिंग का ऑर्डर आया है"
+                else "नया आयरनिंग का ऑर्डर आया है"
+            }
+            normalizedStep == "packaging" -> "${prefix}पैकेजिंग करनी है"
+            normalizedStep == "prestain" -> "${prefix}प्री-स्टेन करना है"
+            isInstant -> "${prefix}एक्सप्रेस पिकअप आया है"
+            taskType.contains("pickup") -> "${prefix}नया पिकअप आया है"
+            else -> "${prefix}नया ऑर्डर आया है"
         }
     }
 
@@ -140,7 +254,11 @@ object SpinzoOverlayManager {
         pendingTaskType = null
     }
 
-    fun showOverlay(context: Context, data: Map<String, String>) {
+    fun showOverlay(context: Context, data: Map<String, String>, expectedGen: Long? = null) {
+        if (expectedGen != null && expectedGen != overlayGeneration.get()) {
+            Log.d("SpinzoOverlay", "Skipping stale showOverlay (expectedGen=$expectedGen, current=${overlayGeneration.get()})")
+            return
+        }
         dismissOverlay(context)
 
         val appContext = context.applicationContext ?: context
@@ -159,7 +277,7 @@ object SpinzoOverlayManager {
         val isDelivery = taskType.contains("delivery", ignoreCase = true)
         val isInstant = data["isInstant"].equals("true", ignoreCase = true)
         val slot = data["slot"] ?: ""
-        val stepName = data["stepName"] ?: ""
+        val stepName = data["stepName"]?.takeIf { it.isNotBlank() } ?: data["step"] ?: ""
         val formattedStep = if (stepName.isNotEmpty()) formatStepLabel(stepName) else ""
         val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
         val isIdleAlert = data["phase"] == "idle_alert"
@@ -232,6 +350,7 @@ object SpinzoOverlayManager {
             pendingAcceptedOrderId = orderId
             pendingIsDelivery = isDelivery
             pendingTaskType = taskType
+            bumpGeneration()
             dismissOverlay(context)
 
             val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
@@ -298,9 +417,27 @@ object SpinzoOverlayManager {
             wakeLock = null
         } catch (e: Exception) {}
 
+        val appContext = context.applicationContext ?: context
+
+        try {
+            val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            if (nm != null) {
+                val idsToCancel = synchronized(activeNotificationIds) {
+                    val copy = activeNotificationIds.toList()
+                    activeNotificationIds.clear()
+                    copy
+                }
+                for (notifId in idsToCancel) {
+                    nm.cancel(FALLBACK_NOTIF_TAG, notifId)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "Error cancelling fallback notifications: ${e.message}")
+        }
+
         if (currentOverlayView != null) {
             try {
-                val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                val windowManager = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
                 if (currentOverlayView?.isAttachedToWindow == true) {
                     windowManager.removeView(currentOverlayView)
                 }
@@ -308,6 +445,30 @@ object SpinzoOverlayManager {
                 Log.w("SpinzoOverlay", "Error removing overlay view: ${e.message}")
             }
             currentOverlayView = null
+        }
+    }
+
+    private fun stopSirenOnly() {
+        try {
+            mediaPlayer?.let { mp ->
+                try {
+                    if (mp.isPlaying) {
+                        mp.stop()
+                    }
+                } catch (_: Exception) {}
+                try {
+                    mp.release()
+                } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "stopSirenOnly MediaPlayer error: ${e.message}")
+        }
+        mediaPlayer = null
+
+        try {
+            vibrator?.cancel()
+        } catch (e: Exception) {
+            Log.w("SpinzoOverlay", "stopSirenOnly vibrator cancel error: ${e.message}")
         }
     }
 
@@ -326,7 +487,7 @@ object SpinzoOverlayManager {
                                 langResult = engine.setLanguage(Locale("hi"))
                             }
                             if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                                Log.w("SpinzoOverlay", "Hindi TTS voice unavailable (code=$langResult) — falling back to siren")
+                                Log.w("SpinzoOverlay", "Hindi TTS voice unavailable (code=$langResult) — skipping voice")
                                 ttsReady = false
                                 ttsFailed = true
                                 pendingVoiceText = null
@@ -345,21 +506,11 @@ object SpinzoOverlayManager {
 
                                 @Deprecated("Deprecated in Java")
                                 override fun onError(utteranceId: String?) {
-                                    mainHandler.post {
-                                        if (activeVoiceText != null) {
-                                            Log.w("SpinzoOverlay", "TTS utterance error — resuming alarm fallback")
-                                            resumeAlarmFallback()
-                                        }
-                                    }
+                                    Log.w("SpinzoOverlay", "TTS utterance error — not restarting siren")
                                 }
 
                                 override fun onError(utteranceId: String?, errorCode: Int) {
-                                    mainHandler.post {
-                                        if (activeVoiceText != null) {
-                                            Log.w("SpinzoOverlay", "TTS utterance error ($errorCode) — resuming alarm fallback")
-                                            resumeAlarmFallback()
-                                        }
-                                    }
+                                    Log.w("SpinzoOverlay", "TTS utterance error ($errorCode) — not restarting siren")
                                 }
                             })
                             ttsReady = true
@@ -377,7 +528,7 @@ object SpinzoOverlayManager {
                             pendingVoiceText = null
                         }
                     } else {
-                        Log.w("SpinzoOverlay", "TTS initialization failed (status=$status) — keeping alarm siren")
+                        Log.w("SpinzoOverlay", "TTS initialization failed (status=$status) — siren burst ends cleanly")
                         ttsReady = false
                         ttsFailed = true
                         pendingVoiceText = null
@@ -397,22 +548,22 @@ object SpinzoOverlayManager {
         if (activeVoiceText == null || text.isBlank()) return
         val engine = tts
         if (engine == null || !ttsReady) {
-            Log.w("SpinzoOverlay", "TTS not ready — keeping alarm ringing")
+            Log.w("SpinzoOverlay", "TTS not ready — skipping voice speak")
             return
         }
         try {
-            try {
-                if (mediaPlayer?.isPlaying == true) {
-                    mediaPlayer?.pause()
-                }
-            } catch (e: Exception) {
-                Log.w("SpinzoOverlay", "MediaPlayer pause error: ${e.message}")
-            }
-
             if (cancelLoopingVibration) {
+                stopSirenOnly()
+            } else {
                 try {
-                    vibrator?.cancel()
-                } catch (e: Exception) {}
+                    mediaPlayer?.let { mp ->
+                        if (mp.isPlaying) mp.stop()
+                        mp.release()
+                    }
+                } catch (e: Exception) {
+                    Log.w("SpinzoOverlay", "MediaPlayer stop error: ${e.message}")
+                }
+                mediaPlayer = null
             }
 
             val utteranceId = "spinzo_alert_${System.currentTimeMillis()}"
@@ -424,23 +575,10 @@ object SpinzoOverlayManager {
                     mainHandler.postDelayed(voiceRepeatRunnable, VOICE_REPEAT_INTERVAL_MS)
                 }
             } else {
-                Log.w("SpinzoOverlay", "TTS speak returned error ($speakResult) — resuming alarm")
-                resumeAlarmFallback()
+                Log.w("SpinzoOverlay", "TTS speak returned error ($speakResult) — not restarting siren")
             }
         } catch (e: Exception) {
-            Log.w("SpinzoOverlay", "TTS speak exception: ${e.message} — resuming alarm")
-            resumeAlarmFallback()
-        }
-    }
-
-    private fun resumeAlarmFallback() {
-        try {
-            val mp = mediaPlayer
-            if (mp != null && !mp.isPlaying) {
-                mp.start()
-            }
-        } catch (e: Exception) {
-            Log.w("SpinzoOverlay", "MediaPlayer resume fallback error: ${e.message}")
+            Log.w("SpinzoOverlay", "TTS speak exception: ${e.message} — not restarting siren")
         }
     }
 
@@ -472,13 +610,29 @@ object SpinzoOverlayManager {
                     )
                     setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                     afd.close()
-                    isLooping = true
+                    isLooping = false
+                    setOnCompletionListener { mp ->
+                        try {
+                            mp.release()
+                        } catch (_: Exception) {}
+                        if (mediaPlayer === mp) {
+                            mediaPlayer = null
+                        }
+                    }
                     prepare()
                     start()
                 }
             } else {
                 mediaPlayer = MediaPlayer.create(context, R.raw.alarm)?.apply {
-                    isLooping = true
+                    isLooping = false
+                    setOnCompletionListener { mp ->
+                        try {
+                            mp.release()
+                        } catch (_: Exception) {}
+                        if (mediaPlayer === mp) {
+                            mediaPlayer = null
+                        }
+                    }
                     start()
                 }
             }
@@ -507,6 +661,9 @@ object SpinzoOverlayManager {
             Log.w("SpinzoOverlay", "Vibration error: ${e.message}")
         }
 
+        // Always stop the attention siren burst and looping vibration at SIREN_BURST_MS whether TTS succeeds or fails
+        mainHandler.postDelayed(stopSirenOnlyRunnable, SIREN_BURST_MS)
+
         val cleanedVoice = voiceText?.takeIf { it.isNotBlank() }
         if (cleanedVoice != null) {
             activeVoiceText = cleanedVoice
@@ -515,10 +672,11 @@ object SpinzoOverlayManager {
             mainHandler.postDelayed(startVoiceRunnable, SIREN_BURST_MS)
         }
 
-        mainHandler.postDelayed(autoStopRunnable, 45_000L)
+        mainHandler.postDelayed(autoStopRunnable, AUTO_STOP_SAFETY_MS)
     }
 
     fun stopAudioAndVibration() {
+        mainHandler.removeCallbacks(stopSirenOnlyRunnable)
         mainHandler.removeCallbacks(autoStopRunnable)
         mainHandler.removeCallbacks(startVoiceRunnable)
         mainHandler.removeCallbacks(voiceRepeatRunnable)
@@ -533,15 +691,7 @@ object SpinzoOverlayManager {
             Log.w("SpinzoOverlay", "TTS stop error: ${e.message}")
         }
 
-        try {
-            mediaPlayer?.stop()
-            mediaPlayer?.release()
-        } catch (e: Exception) {}
-        mediaPlayer = null
-
-        try {
-            vibrator?.cancel()
-        } catch (e: Exception) {}
+        stopSirenOnly()
         vibrator = null
     }
 
@@ -574,10 +724,12 @@ object SpinzoOverlayManager {
 
         val orderId = data["orderId"] ?: ""
         val shortId = if (orderId.length >= 6) orderId.takeLast(6).uppercase() else orderId.uppercase()
+        val tokenNumber = data["tokenNumber"]?.trim()?.takeIf { it.isNotEmpty() }
+        val displayId = if (tokenNumber != null) "Token #$tokenNumber" else "#$shortId"
         val taskType = data["taskType"] ?: "pickup"
         val isDelivery = taskType.contains("delivery", ignoreCase = true)
         val isInstant = data["isInstant"].equals("true", ignoreCase = true)
-        val stepName = data["stepName"] ?: ""
+        val stepName = data["stepName"]?.takeIf { it.isNotBlank() } ?: data["step"] ?: ""
         val formattedStep = if (stepName.isNotEmpty()) formatStepLabel(stepName) else ""
         val isNudge = taskType.equals("stage_nudge", ignoreCase = true) || (data["type"] ?: "").equals("stage_nudge", ignoreCase = true)
         val isIdleAlert = data["phase"] == "idle_alert"
@@ -592,21 +744,21 @@ object SpinzoOverlayManager {
                     "⏰ Idle Machine Alert"
                 }
             }
-            isNudge -> "⏰ Status Check: #$shortId"
-            isDelivery && isInstant -> "⚡ Express Delivery: #$shortId"
-            isDelivery -> "📦 Delivery Assigned: #$shortId"
-            isInstant -> "⚡ Instant Pickup: #$shortId"
-            formattedStep.isNotEmpty() -> "⚙️ $formattedStep Assigned: #$shortId"
-            else -> "New Order Assigned: #$shortId"
+            isNudge -> "⏰ Status Check: $displayId"
+            isDelivery && isInstant -> "⚡ Express Delivery: $displayId"
+            isDelivery -> "📦 Delivery Assigned: $displayId"
+            isInstant -> "⚡ Instant Pickup: $displayId"
+            formattedStep.isNotEmpty() -> "⚙️ $formattedStep Assigned: $displayId"
+            else -> "New Order Assigned: $displayId"
         }
 
         val rawAddress = data["address"]
         val notifBody = when {
-            !rawAddress.isNullOrBlank() -> rawAddress
+            !rawAddress.isNullOrBlank() -> if (tokenNumber != null && !rawAddress.contains(tokenNumber)) "Token #$tokenNumber • $rawAddress" else rawAddress
             isIdleAlert -> "Store Floor • Idle Machine — tap to respond"
-            isNudge -> "Tap to open and respond"
-            formattedStep.isNotEmpty() -> "Order #$shortId • $formattedStep — tap to accept"
-            else -> "Tap to accept order"
+            isNudge -> "$displayId • Tap to open and respond"
+            formattedStep.isNotEmpty() -> "$displayId • $formattedStep — tap to accept"
+            else -> "$displayId • Tap to accept order"
         }
 
         val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
@@ -633,7 +785,11 @@ object SpinzoOverlayManager {
             .setAutoCancel(true)
             .build()
 
-        nm.notify((System.currentTimeMillis() % 10000).toInt(), notification)
+        val notifId = (System.currentTimeMillis() % 10000).toInt()
+        synchronized(activeNotificationIds) {
+            activeNotificationIds.add(notifId)
+        }
+        nm.notify(FALLBACK_NOTIF_TAG, notifId, notification)
 
         try {
             val appContext = context.applicationContext ?: context

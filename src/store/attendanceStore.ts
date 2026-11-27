@@ -63,9 +63,15 @@ let lunchTicker: NodeJS.Timeout | null = null;
 let breakTicker: NodeJS.Timeout | null = null;
 let activeAttendanceKey: string | null = null;
 
-const getTodayStr = () => {
+const formatDateStr = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const getTodayStr = () => formatDateStr(new Date());
+
+const getYesterdayStr = () => {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  d.setDate(d.getDate() - 1);
+  return formatDateStr(d);
 };
 
 export const useAttendanceStore = create<AttendanceState>((set, get) => ({
@@ -99,55 +105,76 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
     if (lunchTicker) clearInterval(lunchTicker);
     if (breakTicker) clearInterval(breakTicker);
 
-    const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, today);
+    const attachShiftSnapshot = (dateKey: string) => {
+      unsubShift?.();
+      const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, dateKey);
+      unsubShift = onSnapshot(shiftRef, (snap) => {
+        if (snap.exists()) {
+          const data = snap.data() as ShiftDoc;
+          if (!data.shortBreaks) data.shortBreaks = [];
+          set({ currentShift: data, status: data.status, shortBreakCount: (data.shortBreaks || []).filter(b => b.endAt !== null).length });
 
-    unsubShift = onSnapshot(shiftRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data() as ShiftDoc;
-        // Ensure shortBreaks array exists
-        if (!data.shortBreaks) data.shortBreaks = [];
-        set({ currentShift: data, status: data.status, shortBreakCount: (data.shortBreaks || []).filter(b => b.endAt !== null).length });
+          if (breakTicker) clearInterval(breakTicker);
+          if (data.status === 'short_break') {
+            const activeBreak = (data.shortBreaks || []).find(b => b.endAt === null);
+            if (activeBreak) {
+              const tickFn = () => {
+                const elapsed = Date.now() - activeBreak.startAt;
+                const remaining = SHORT_BREAK_LIMIT_MS - elapsed;
+                set({
+                  shortBreakRemainingMs: Math.max(0, remaining),
+                  shortBreakOverdue: remaining <= 0,
+                });
+              };
+              tickFn();
+              breakTicker = setInterval(tickFn, 1000);
+            }
+          } else {
+            set({ shortBreakRemainingMs: SHORT_BREAK_LIMIT_MS, shortBreakOverdue: false });
+          }
 
-        // Start short break countdown ticker
-        if (breakTicker) clearInterval(breakTicker);
-        if (data.status === 'short_break') {
-          const activeBreak = (data.shortBreaks || []).find(b => b.endAt === null);
-          if (activeBreak) {
+          if (lunchTicker) clearInterval(lunchTicker);
+          const lunchLimitForRole = get().getLunchLimit();
+          if (data.status === 'lunch' && data.lunch && !data.lunch.endAt) {
             const tickFn = () => {
-              const elapsed = Date.now() - activeBreak.startAt;
-              const remaining = SHORT_BREAK_LIMIT_MS - elapsed;
+              const elapsed = Date.now() - data.lunch!.startAt;
+              const remaining = lunchLimitForRole - elapsed;
               set({
-                shortBreakRemainingMs: Math.max(0, remaining),
-                shortBreakOverdue: remaining <= 0,
+                lunchRemainingMs: Math.max(0, remaining),
+                lunchOverdue: remaining <= 0,
               });
             };
             tickFn();
-            breakTicker = setInterval(tickFn, 1000);
+            lunchTicker = setInterval(tickFn, 1000);
+          } else {
+            set({ lunchRemainingMs: lunchLimitForRole, lunchOverdue: false });
           }
         } else {
-          set({ shortBreakRemainingMs: SHORT_BREAK_LIMIT_MS, shortBreakOverdue: false });
+          set({ currentShift: null, status: 'off', lunchRemainingMs: get().getLunchLimit(), lunchOverdue: false });
         }
-        
-        if (lunchTicker) clearInterval(lunchTicker);
-        const lunchLimitForRole = get().getLunchLimit();
-        if (data.status === 'lunch' && data.lunch && !data.lunch.endAt) {
-          const tickFn = () => {
-            const elapsed = Date.now() - data.lunch!.startAt;
-            const remaining = lunchLimitForRole - elapsed;
-            set({
-              lunchRemainingMs: Math.max(0, remaining),
-              lunchOverdue: remaining <= 0,
-            });
-          };
-          tickFn(); // immediate
-          lunchTicker = setInterval(tickFn, 1000);
-        } else {
-          set({ lunchRemainingMs: lunchLimitForRole, lunchOverdue: false });
+      });
+    };
+
+    // If staff clocked in before midnight and is still working past 12:00 AM, stay attached
+    // to their open shift so they can cleanly clock out at 12:00–1:00 AM+.
+    const yesterday = getYesterdayStr();
+    const todayRef = doc(db, `ops_attendance/${user.id}/shifts`, today);
+    const yesterdayRef = doc(db, `ops_attendance/${user.id}/shifts`, yesterday);
+
+    attachShiftSnapshot(today);
+    Promise.all([getDoc(todayRef), getDoc(yesterdayRef)])
+      .then(([todaySnap, yesterdaySnap]) => {
+        if (activeAttendanceKey !== key) return;
+        if (!todaySnap.exists() && yesterdaySnap.exists()) {
+          const prev = yesterdaySnap.data() as ShiftDoc;
+          if (prev.status !== 'off' && !prev.logoutAt) {
+            attachShiftSnapshot(yesterday);
+          }
         }
-      } else {
-        set({ currentShift: null, status: 'off', lunchRemainingMs: get().getLunchLimit(), lunchOverdue: false });
-      }
-    });
+      })
+      .catch(() => {
+        // Non-fatal: keep listening on today's shift doc
+      });
   },
 
   getLunchLimit: () => {
@@ -190,6 +217,9 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       } else {
         await updateDoc(shiftRef, { status: 'working', logoutAt: null, storeId, lateFine });
       }
+
+      // Ensure listener is attached to today's shift (in case previous session stayed on yesterday's past-midnight shift)
+      get().initializeListener(true);
 
       if (lateFine > 0) {
         Alert.alert('Late Login', `You logged in after 8:30 AM. A fine of ₹${lateFine} has been applied.`);
@@ -331,11 +361,12 @@ export const useAttendanceStore = create<AttendanceState>((set, get) => ({
       const shiftRef = doc(db, `ops_attendance/${user.id}/shifts`, currentShift.date);
       const now = Date.now();
 
-      // Check early logout (before 10 PM)
+      // Check early logout (before 10 PM on the same shift day — never penalize past-midnight clock-outs)
       const logoutH = new Date(now).getHours();
       const logoutMin = new Date(now).getMinutes();
       const minutesSinceMidnight = logoutH * 60 + logoutMin;
-      const earlyLogoutFine = minutesSinceMidnight < EARLY_LOGOUT_CUTOFF ? FINE_AMOUNT : 0;
+      const isSameCalendarDay = currentShift.date === getTodayStr();
+      const earlyLogoutFine = isSameCalendarDay && minutesSinceMidnight < EARLY_LOGOUT_CUTOFF ? FINE_AMOUNT : 0;
 
       const updates: any = {
         status: 'off',

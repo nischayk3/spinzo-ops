@@ -14,12 +14,18 @@ export interface OverlayData {
   slot?: string;
   isInstant?: string | boolean;
   stepName?: string;
+  tokenNumber?: string;
+  voiceText?: string;
+  step?: string;
+  phase?: string;
 }
 
 interface SpinzoOverlayInterface {
   canDrawOverlays(): boolean;
   openOverlaySettings(): void;
   setOnShift(onShift: boolean): void;
+  setOnBreak(onBreak: boolean): void;
+  setAppInForeground(inForeground: boolean): void;
   showOverlay(data: OverlayData): boolean;
   dismissOverlay(): void;
   getFCMToken(): Promise<string | null>;
@@ -41,6 +47,9 @@ export const SpinzoOverlay: SpinzoOverlayInterface = {
   canDrawOverlays: () => (NativeModule ? Boolean(NativeModule.canDrawOverlays()) : false),
   openOverlaySettings: () => NativeModule?.openOverlaySettings(),
   setOnShift: (onShift: boolean) => NativeModule?.setOnShift(Boolean(onShift)),
+  setOnBreak: (onBreak: boolean) => NativeModule?.setOnBreak?.(Boolean(onBreak)),
+  setAppInForeground: (inForeground: boolean) =>
+    NativeModule?.setAppInForeground?.(Boolean(inForeground)),
   showOverlay: (data: OverlayData) => {
     if (!NativeModule) return false;
     const stringMap: Record<string, string> = {};

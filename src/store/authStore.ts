@@ -12,6 +12,9 @@ import {
 } from '../config/firebase';
 import { doc, getDoc } from '../config/firebase';
 import { clearAssignmentNotifications } from '../utils/systemNotifications';
+import { stopAlarm } from '../utils/alerts';
+import { useHelperRulesStore } from './helperRulesStore';
+import { SpinzoOverlay } from 'spinzo-overlay';
 
 // Helper to get or create verifier (web only)
 const getVerifier = () => {
@@ -212,6 +215,14 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       useStaffRosterStore.getState().reset();
       const { useStoreResourcesStore } = await import('./storeResourcesStore');
       useStoreResourcesStore.getState().reset();
+      useHelperRulesStore.getState().unsubscribe();
+      stopAlarm();
+      if (Platform.OS === 'android') {
+        try {
+          (SpinzoOverlay as any).setAppInForeground?.(false);
+          SpinzoOverlay.dismissOverlay?.();
+        } catch { /* non-fatal */ }
+      }
       clearAssignmentNotifications();
       set({ user: null, isLoggedIn: false, activeRole: null, currentStoreId: null });
     } catch (error) {

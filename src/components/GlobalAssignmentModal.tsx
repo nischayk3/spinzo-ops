@@ -26,6 +26,8 @@ export function GlobalAssignmentModal() {
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
   const [locallyAcceptedIds, setLocallyAcceptedIds] = useState<Set<string>>(new Set());
   const wasAlertingRef = useRef(false);
+  const lastAlertedKeyRef = useRef<string>('');
+  const lastAlertedTokenRef = useRef<string>('');
 
   const isOffShift = !staffDoc || staffDoc.onShift !== true;
   const isOnBreak = Boolean(
@@ -109,6 +111,13 @@ export function GlobalAssignmentModal() {
 
   useEffect(() => {
     if (activeTask && activeTaskKey && !acceptingId && !locallyAcceptedIds.has(activeTaskKey)) {
+      const isSameTask = lastAlertedKeyRef.current === activeTaskKey;
+      const deliveryTokenJustHydrated =
+        isSameTask && isDelivery && !lastAlertedTokenRef.current && Boolean(cleanToken);
+      if (isSameTask && !deliveryTokenJustHydrated) return;
+
+      lastAlertedKeyRef.current = activeTaskKey;
+      lastAlertedTokenRef.current = cleanToken;
       wasAlertingRef.current = true;
       startVoiceAlertLoop(voiceText);
 
@@ -141,6 +150,8 @@ export function GlobalAssignmentModal() {
         }
       }
     } else if (!activeTask) {
+      lastAlertedKeyRef.current = '';
+      lastAlertedTokenRef.current = '';
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
         stopAlarm();
@@ -152,9 +163,14 @@ export function GlobalAssignmentModal() {
         }
       }
     }
+  }, [activeTaskKey, acceptingId, cleanToken]);
+
+  useEffect(() => {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
+        lastAlertedKeyRef.current = '';
+        lastAlertedTokenRef.current = '';
         stopAlarm();
         if (Platform.OS === 'android') {
           try {
@@ -163,7 +179,7 @@ export function GlobalAssignmentModal() {
         }
       }
     };
-  }, [activeTaskKey, acceptingId, voiceText, cleanToken]);
+  }, []);
 
   const handleAccept = async () => {
     if (!activeTask || !activeTaskKey) return;
@@ -172,6 +188,8 @@ export function GlobalAssignmentModal() {
 
     // 1. Immediately silence alerts and native overlay
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
+    lastAlertedTokenRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {
@@ -199,6 +217,8 @@ export function GlobalAssignmentModal() {
 
   const handleDismiss = () => {
     wasAlertingRef.current = false;
+    lastAlertedKeyRef.current = '';
+    lastAlertedTokenRef.current = '';
     stopAlarm();
     clearAssignmentNotifications();
     if (Platform.OS === 'android') {

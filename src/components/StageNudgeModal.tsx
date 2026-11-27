@@ -75,7 +75,8 @@ export function StageNudgeModal() {
   }, [processes, user?.id, activeRole, isOnShift, isOnBreak, rosterHelpers]);
 
   const matchedProcess = activeNudge
-    ? processes.find(p => p.id === activeNudge.processId || p.orderId === activeNudge.orderId)
+    ? (activeNudge.processId ? processes.find(p => p.id === activeNudge.processId) : undefined) ||
+      processes.find(p => p.orderId === activeNudge.orderId)
     : undefined;
   const matchedOrder = activeNudge
     ? orders.find(o => o.id === activeNudge.orderId)
@@ -122,6 +123,8 @@ export function StageNudgeModal() {
           taskType: 'stage_nudge',
           customerName: activeNudge.title,
           address: activeNudge.message,
+          step: activeNudge.step,
+          phase: activeNudge.phase,
           stepName: activeNudge.actionLabel,
           tokenNumber: cleanToken,
           voiceText,
@@ -138,6 +141,9 @@ export function StageNudgeModal() {
         }
       }
     }
+  }, [activeAlertKey]);
+
+  useEffect(() => {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
@@ -148,7 +154,7 @@ export function StageNudgeModal() {
         }
       }
     };
-  }, [activeAlertKey]);
+  }, []);
 
   if (!activeNudge) return null;
 
@@ -195,18 +201,18 @@ export function StageNudgeModal() {
   const isHandsOn = activeNudge.phase === 'hands_on' || activeNudge.step === 'tagging' || activeNudge.step === 'packaging';
 
   const handleAction = async () => {
+    const current = activeNudge;
     wasAlertingRef.current = false;
-    lastAlertedKeyRef.current = '';
     stopAlarm();
+    clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
     setActionError(null);
 
     if (isHandsOn) {
-      const current = activeNudge;
-      clearAssignmentNotifications();
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
-      }
       // Snooze BOTH locally AND on backend when opening the order so FCM doesn't interrupt while working!
+      lastAlertedKeyRef.current = '';
       recordLocalSnooze(`${current.processId || current.orderId}_${current.step}_${current.phase}`);
       setActiveNudge(null);
       snoozeNudge(current.orderId, current.step as any, current.phase as any, current.processId).catch(() => {});
@@ -220,15 +226,17 @@ export function StageNudgeModal() {
     setBusy(true);
     try {
       let res;
-      if (activeNudge.phase === 'accepted') {
-        res = await startStep(activeNudge.orderId, activeNudge.processId);
+      if (current.phase === 'accepted') {
+        res = await startStep(current.orderId, current.processId);
       } else {
-        res = await completeStep(activeNudge.orderId, activeNudge.processId);
+        res = await completeStep(current.orderId, current.processId);
       }
 
       const alreadyDoneErrors = ['already_started', 'already_completed', 'already_progressed', 'invalid_state'];
       if (res?.ok || (res?.error && alreadyDoneErrors.includes(res.error))) {
-        // Successfully transitioned or already transitioned by another action
+        // Successfully transitioned or already transitioned by another action — locally snooze so 5s poller doesn't re-open before snapshot
+        recordLocalSnooze(`${current.processId || current.orderId}_${current.step}_${current.phase}`);
+        lastAlertedKeyRef.current = '';
         setActiveNudge(null);
         clearAssignmentNotifications();
         if (Platform.OS === 'android') {
@@ -270,7 +278,7 @@ export function StageNudgeModal() {
             <View className="flex-1">
               <Text className="text-textPrimary font-bold text-lg">{activeNudge.title}</Text>
               <Text className="text-textMuted text-xs font-semibold">
-                Order #{activeNudge.orderId.includes('__') ? activeNudge.orderId.split('__')[0].slice(-6).toUpperCase() : activeNudge.orderId.slice(-6).toUpperCase()} • {activeNudge.elapsedMinutes}m elapsed
+                {cleanToken ? `Token #${cleanToken} • ` : ''}Order #{activeNudge.orderId.includes('__') ? activeNudge.orderId.split('__')[0].slice(-6).toUpperCase() : activeNudge.orderId.slice(-6).toUpperCase()} • {activeNudge.elapsedMinutes}m elapsed
               </Text>
             </View>
             <TouchableOpacity

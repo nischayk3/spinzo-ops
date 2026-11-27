@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { Platform, AppState } from 'react-native';
 import * as Notifications from 'expo-notifications';
 
 // Configure notification behavior when app is in foreground/background
@@ -7,7 +7,7 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true,
     shouldShowBanner: true,
     shouldShowList: true,
-    shouldPlaySound: true,
+    shouldPlaySound: AppState.currentState !== 'active',
     shouldSetBadge: true,
     priority: Notifications.AndroidNotificationPriority.MAX,
   }),

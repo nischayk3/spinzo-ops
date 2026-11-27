@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { Platform } from 'react-native';
 import { db } from '../config/firebase';
 import { doc, onSnapshot, query, collection, where, setDoc, getDoc, updateDoc, deleteField } from '../config/firebase';
-import { parseOpsTask, shouldAnnounce, taskAlertKey, isPending, OpsTask } from '../utils/opsTasks';
+import { parseOpsTask, shouldAnnounce, taskAlertKey, isPending, resolveDeliveryBundleCount, OpsTask } from '../utils/opsTasks';
 import { resolveCustomerCoordinates } from '../utils/storeGeo';
 import { primeAlerts, announceAssignedPickup, announceAssignedDelivery, stopAlarm } from '../utils/alerts';
 import { cancelAllStageNudgeTimers } from '../utils/systemNotifications';
@@ -269,7 +269,11 @@ function mergeTasksWithOrders(): { myTasks: OpsTask[]; myDeliveries: DeliveryTas
     const bundleLabels =
       Array.isArray(d.bundleLabels) && d.bundleLabels.length > 0
         ? d.bundleLabels
-        : (Array.isArray(ord?.bundleLabels) ? ord.bundleLabels : undefined);
+        : Array.isArray(ord?.bundleLabels) && ord.bundleLabels.length > 0
+          ? ord.bundleLabels
+          : Array.isArray(ord?.opsDetails?.bundleLabels) && ord.opsDetails.bundleLabels.length > 0
+            ? ord.opsDetails.bundleLabels
+            : undefined;
 
     return {
       ...d,
@@ -285,7 +289,7 @@ function mergeTasksWithOrders(): { myTasks: OpsTask[]; myDeliveries: DeliveryTas
       billDetails: ord?.billDetails || d.billDetails,
       paymentStatus: ord?.paymentStatus || d.paymentStatus || null,
       paymentMode: ord?.paymentMode || ord?.paymentMethod || d.paymentMode || null,
-      bundleCount: d.bundleCount ?? ord?.bundleCount ?? 1,
+      bundleCount: resolveDeliveryBundleCount(d, ord) ?? 1,
       bundleLabels,
       tokenNumber: ord?.tokenNumber || d.tokenNumber || null,
       tokens: ord?.tokens || d.tokens || null,
@@ -388,7 +392,11 @@ function syncActiveOrderListeners(set: (partial: Partial<OpsStaffState>) => void
           pnote: od.opsMeta?.pickupNote ?? od.pickupNote,
           ca: od.createdAt,
           bl: od.bundleLabels,
+          obl: od.opsDetails?.bundleLabels,
           bc: od.bundleCount,
+          pb: od.packagingProof?.bundles,
+          ob: od.opsDetails?.bundles,
+          opb: od.opsDetails?.packagingProof?.bundles,
         });
         if (activeOrderSig.get(oid) === sig) return;
         activeOrderSig.set(oid, sig);
@@ -469,13 +477,18 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
         }
         const d = snap.data() as StaffDoc;
         set({ staffDoc: { ...d, uid }, isLoading: false });
+        const isOnBreak =
+          d.onBreak === true ||
+          d.attendanceStatus === 'lunch' ||
+          d.attendanceStatus === 'short_break';
         if (Platform.OS === 'android') {
           SpinzoOverlay.setOnShift(d.onShift === true);
+          (SpinzoOverlay as any).setOnBreak?.(isOnBreak);
           if (d.onShift !== true) {
             SpinzoOverlay.dismissOverlay();
           }
         }
-        if (d.onShift !== true || d.onBreak === true || d.attendanceStatus === 'lunch' || d.attendanceStatus === 'short_break') {
+        if (d.onShift !== true || isOnBreak) {
           useWasherReminderStore.getState().dismissReminder();
         }
         if (d.onShift === true && activeOrderUnsubs.size === 0 && (rawTasks.length > 0 || rawDeliveries.length > 0)) {
@@ -589,6 +602,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     primeAlerts();
     if (Platform.OS === 'android') {
       SpinzoOverlay.setOnShift(true);
+      (SpinzoOverlay as any).setOnBreak?.(false);
     }
 
     let fcmToken: string | null = null;
@@ -623,6 +637,9 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
 
   setBreakState: async (uid, status) => {
     const isBreak = status === 'lunch' || status === 'short_break';
+    if (Platform.OS === 'android') {
+      (SpinzoOverlay as any).setOnBreak?.(isBreak);
+    }
     if (isBreak) {
       stopAlarm();
       cancelAllStageNudgeTimers();
@@ -687,6 +704,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     useWasherReminderStore.getState().dismissReminder();
     if (Platform.OS === 'android') {
       SpinzoOverlay.setOnShift(false);
+      (SpinzoOverlay as any).setOnBreak?.(false);
       SpinzoOverlay.dismissOverlay();
     }
     try {
@@ -712,6 +730,7 @@ export const useOpsStaffStore = create<OpsStaffState>((set, get) => ({
     useWasherReminderStore.getState().dismissReminder();
     if (Platform.OS === 'android') {
       SpinzoOverlay.setOnShift(false);
+      (SpinzoOverlay as any).setOnBreak?.(false);
       SpinzoOverlay.dismissOverlay();
     }
     activeInitializedUid = null;

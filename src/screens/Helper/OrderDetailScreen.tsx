@@ -30,7 +30,22 @@ import type { RootStackParamList } from '../../navigation/RootNavigator';
 import { PackagingVerification } from '../../components/PackagingVerification';
 import { WorkflowSteps } from '../../components/WorkflowSteps';
 import { useStoreResourcesStore } from '../../store/storeResourcesStore';
+import { useHelperRulesStore } from '../../store/helperRulesStore';
+import { isHelperAllowedForStage } from '../../utils/helperEligibility';
 import { useResponsive } from '../../utils/useResponsive';
+import { stopAlarm } from '../../utils/alerts';
+import { clearAssignmentNotifications } from '../../utils/systemNotifications';
+import { SpinzoOverlay } from 'spinzo-overlay';
+
+const silenceActiveAlerts = () => {
+  stopAlarm();
+  clearAssignmentNotifications();
+  if (Platform.OS === 'android') {
+    try {
+      SpinzoOverlay.dismissOverlay();
+    } catch { /* non-fatal */ }
+  }
+};
 
 type Props = NativeStackScreenProps<RootStackParamList, 'OrderDetail'>;
 
@@ -350,6 +365,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
   const { processes, claim, startStep, completeStep, printLabels, scanGarment, tagAllGarments, unregisterGarment, submitTagging, cancelOrder, reschedulePickup, scheduleDelivery, markOutForDelivery, verifyDeliveryOTP } = useOpsProcessStore();
   const { clearActiveHelperTask } = useOpsStaffStore();
   const resources = useStoreResourcesStore(s => s.resources);
+  const helperRules = useHelperRulesStore(s => s.rules);
   const { isDesktop, modalContainerStyle } = useResponsive();
 
   const [countText, setCountText] = useState('');
@@ -652,11 +668,17 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
-  const handleClaim = () => runAction(() => claim(orderId, order?.tokenNumber || '', order?.userId, order?.vendorId));
-  const handleStart = () => runAction(() => startStep(orderId, process?.id), () => clearActiveHelperTask());
+  const handleClaim = () => {
+    silenceActiveAlerts();
+    return runAction(() => claim(orderId, order?.tokenNumber || '', order?.userId, order?.vendorId));
+  };
+  const handleStart = () => {
+    silenceActiveAlerts();
+    return runAction(() => startStep(orderId, process?.id), () => clearActiveHelperTask());
+  };
   const handleComplete = () => {
     // Quality and Packaging verification required for packaging step
-
+    silenceActiveAlerts();
     if (cur === 'packaging' && !showPackagingVerification) {
       setShowPackagingVerification(true);
       return;
@@ -784,10 +806,13 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
   };
 
-  const handleSubmitTagging = () => runAction(() => submitTagging(orderId, process?.id), () => {
-    clearActiveHelperTask();
-    navigation.goBack();
-  });
+  const handleSubmitTagging = () => {
+    silenceActiveAlerts();
+    return runAction(() => submitTagging(orderId, process?.id), () => {
+      clearActiveHelperTask();
+      navigation.goBack();
+    });
+  };
 
   const handleCancelOrder = async (reason: string, note: string) => {
     if (!order) return;
@@ -1148,7 +1173,9 @@ export function OrderDetailScreen({ route, navigation }: Props) {
 
   const renderActionState = () => {
     if (!process && order?.status === 'pickup_completed') {
-      const isSupervisor = activeRole === 'supervisor' || activeRole === 'admin';
+      const canSelfClaimTagging =
+        isSupervisor ||
+        isHelperAllowedForStage(staffDoc?.phone || user?.phone, 'tagging', helperRules);
       return (
         <View className="bg-white rounded-xl p-5 mb-4 shadow-sm border border-gray-100">
           <View className="flex-row items-center justify-between mb-3">
@@ -1164,13 +1191,20 @@ export function OrderDetailScreen({ route, navigation }: Props) {
             )}
           </View>
           <View className="flex-col gap-3">
-            <TouchableOpacity
-              onPress={handleClaim}
-              disabled={busy}
-              className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-[#994bff]'}`}
-            >
-              {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Claim & Start Tagging</Text>}
-            </TouchableOpacity>
+            {canSelfClaimTagging ? (
+              <TouchableOpacity
+                onPress={handleClaim}
+                disabled={busy}
+                className={`h-14 rounded-xl items-center justify-center flex-row ${busy ? 'bg-gray-200' : 'bg-[#994bff]'}`}
+              >
+                {busy ? <ActivityIndicator color="#fff" /> : <Text className="text-white font-bold text-lg">Claim & Start Tagging</Text>}
+              </TouchableOpacity>
+            ) : (
+              <View className="bg-gray-50 rounded-xl p-4 border border-gray-200 items-center">
+                <Text className="text-gray-500 font-bold text-sm">Tagging is not enabled for your profile.</Text>
+                <Text className="text-gray-400 text-xs mt-1">Ask a supervisor to assign this order.</Text>
+              </View>
+            )}
             {isSupervisor && (
               <TouchableOpacity
                 onPress={() => setShowAssignHelperModal(true)}
@@ -1243,12 +1277,24 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
 
     if (cur === 'tagging' && (!curStage?.assignee || isAssignee)) {
-      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor' && activeRole !== 'admin') {
+      const isAssignedToMe = Boolean(user?.id && curStage?.assignee === user.id);
+      const allowedByRules =
+        isSupervisor ||
+        isAssignedToMe ||
+        isHelperAllowedForStage(staffDoc?.phone || user?.phone, cur, helperRules);
+      if (
+        !isSupervisor &&
+        (!allowedByRules || (activeRole && !canStartStage(activeRole as any, cur)))
+      ) {
         return (
           <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
             {renderSupervisorControls()}
             <Text className="text-gray-500 font-bold">Ready for {stepLabel(cur)}.</Text>
-            <Text className="text-gray-400 text-xs mt-1">Please switch to the appropriate role to process.</Text>
+            <Text className="text-gray-400 text-xs mt-1">
+              {!allowedByRules
+                ? 'This stage is not enabled for your profile. Ask a supervisor to assign it.'
+                : 'Please switch to the appropriate role to process.'}
+            </Text>
           </View>
         );
       }
@@ -1261,12 +1307,24 @@ export function OrderDetailScreen({ route, navigation }: Props) {
     }
 
     if (cur && (!curStage?.assignee || isAssignee)) {
-      if (activeRole && !canStartStage(activeRole as any, cur) && activeRole !== 'supervisor' && activeRole !== 'admin') {
+      const isAssignedToMe = Boolean(user?.id && curStage?.assignee === user.id);
+      const allowedByRules =
+        isSupervisor ||
+        isAssignedToMe ||
+        isHelperAllowedForStage(staffDoc?.phone || user?.phone, cur, helperRules);
+      if (
+        !isSupervisor &&
+        (!allowedByRules || (activeRole && !canStartStage(activeRole as any, cur)))
+      ) {
         return (
           <View className="bg-gray-50 rounded-xl p-5 mb-4 border border-gray-200 items-center">
             {renderSupervisorControls()}
             <Text className="text-gray-500 font-bold">Ready for {stepLabel(cur)}.</Text>
-            <Text className="text-gray-400 text-xs mt-1">Please switch to the appropriate role to process.</Text>
+            <Text className="text-gray-400 text-xs mt-1">
+              {!allowedByRules
+                ? 'This stage is not enabled for your profile. Ask a supervisor to assign it.'
+                : 'Please switch to the appropriate role to process.'}
+            </Text>
           </View>
         );
       }
@@ -1286,6 +1344,7 @@ export function OrderDetailScreen({ route, navigation }: Props) {
               return false;
             }}
             onComplete={async (payload: any) => {
+              silenceActiveAlerts();
               setShowPackagingVerification(false);
               const res = await useOpsProcessStore.getState().completePackaging(orderId, payload, process?.id);
               if (res.ok) navigation.goBack();
@@ -1357,11 +1416,13 @@ export function OrderDetailScreen({ route, navigation }: Props) {
                   softenerAddedAt={curStage?.softenerAddedAt}
                   onAddDetergent={async () => {
                     if (order && process) {
+                      silenceActiveAlerts();
                       await useOpsProcessStore.getState().markChemicalAdded(order.id, process.id, 'detergent');
                     }
                   }}
                   onAddSoftener={async () => {
                     if (order && process) {
+                      silenceActiveAlerts();
                       await useOpsProcessStore.getState().markChemicalAdded(order.id, process.id, 'softener');
                     }
                   }}

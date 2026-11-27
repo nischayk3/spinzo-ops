@@ -63,40 +63,70 @@ function playTone(ctx: AudioContext, freq: number, type: OscillatorType, startTi
 
 import { createAudioPlayer } from 'expo-audio';
 
-// createAudioPlayer is synchronous and returns an AudioPlayer instance immediately
-const alarmSound = createAudioPlayer(require('../../assets/sounds/alarm.mp3'));
+// Create a fresh AudioPlayer per alarm burst and destroy it on stop.
+// Keeping a persistent module-level player causes expo-audio's Android AudioModule
+// to auto-resume the paused player on AUDIOFOCUS_GAIN / foreground return.
+let activeAlarmPlayer: ReturnType<typeof createAudioPlayer> | null = null;
+let alarmGeneration = 0;
 let shouldBePlaying = false;
 let singleLoopTimeout: ReturnType<typeof setTimeout> | null = null;
 let voiceLoopGeneration = 0;
 let voiceTimeout: ReturnType<typeof setTimeout> | null = null;
 
 function stopAlarmSoundOnly() {
+  alarmGeneration += 1;
   shouldBePlaying = false;
   if (singleLoopTimeout) {
     clearTimeout(singleLoopTimeout);
     singleLoopTimeout = null;
   }
+  const player = activeAlarmPlayer;
+  activeAlarmPlayer = null;
+  if (player) {
+    try {
+      player.loop = false;
+      player.muted = true;
+    } catch {
+      // best-effort
+    }
+    try {
+      player.pause();
+    } catch {
+      // best-effort
+    }
+    try {
+      if (typeof (player as any).remove === 'function') {
+        (player as any).remove();
+      } else if (typeof (player as any).release === 'function') {
+        (player as any).release();
+      }
+    } catch (e) {
+      console.log('Failed to stop alarm sound', e);
+    }
+  }
+}
+
+function startFreshAlarmPlayer(loop: boolean): number {
+  stopAlarmSoundOnly();
+  shouldBePlaying = true;
+  const gen = alarmGeneration;
   try {
-    alarmSound.pause();
-    alarmSound.loop = false;
-    if (typeof alarmSound.seekTo === 'function') {
-      alarmSound.seekTo(0);
-    } else if (typeof alarmSound.currentTime !== 'undefined') {
-      alarmSound.currentTime = 0;
+    const player = createAudioPlayer(require('../../assets/sounds/alarm.mp3'));
+    player.loop = loop;
+    activeAlarmPlayer = player;
+    try {
+      player.play();
+    } catch {
+      /* silence web AbortError */
     }
   } catch (e) {
-    console.log('Failed to stop alarm sound', e);
+    console.log('Failed to start alarm sound', e);
   }
+  return gen;
 }
 
 /** Play a short non-looping attention chime that stops cleanly after durationMs without touching voice timers */
 function playAttentionChime(durationMs: number = 1500) {
-  shouldBePlaying = true;
-  if (singleLoopTimeout) {
-    clearTimeout(singleLoopTimeout);
-    singleLoopTimeout = null;
-  }
-
   if (web) {
     const ac = ensureAudioCtx();
     if (ac) {
@@ -113,16 +143,9 @@ function playAttentionChime(durationMs: number = 1500) {
   }
 
   try {
-    alarmSound.loop = false;
-    if (typeof alarmSound.seekTo === 'function') {
-      alarmSound.seekTo(0);
-    } else if (typeof alarmSound.currentTime !== 'undefined') {
-      alarmSound.currentTime = 0;
-    }
-    try { alarmSound.play(); } catch { /* silence AbortError */ }
-
+    const gen = startFreshAlarmPlayer(false);
     singleLoopTimeout = setTimeout(() => {
-      if (shouldBePlaying) {
+      if (gen === alarmGeneration) {
         stopAlarmSoundOnly();
       }
     }, durationMs);
@@ -153,12 +176,6 @@ export async function unlockAudio() {
 
 /** Start a looping or single-burst siren using the MP3 file */
 export async function dramaticChime(loop: boolean = true) {
-  shouldBePlaying = true;
-  if (singleLoopTimeout) {
-    clearTimeout(singleLoopTimeout);
-    singleLoopTimeout = null;
-  }
-
   // Web audio chime fallback: play crisp synthesized chime on Web browsers
   if (web) {
     const ac = ensureAudioCtx();
@@ -176,26 +193,20 @@ export async function dramaticChime(loop: boolean = true) {
   }
 
   try {
-    alarmSound.loop = loop;
-    if (typeof alarmSound.seekTo === 'function') {
-        alarmSound.seekTo(0);
-    } else if (typeof alarmSound.currentTime !== 'undefined') {
-        alarmSound.currentTime = 0;
-    }
-    try { alarmSound.play(); } catch (e) { /* silence AbortError */ }
+    const gen = startFreshAlarmPlayer(loop);
 
     // If we only want a single loop (e.g. for Supervisor new order),
     // we manually stop it after 2.5 seconds (roughly one MP3 loop).
     if (!loop) {
       singleLoopTimeout = setTimeout(() => {
-        if (!loop && shouldBePlaying) {
+        if (gen === alarmGeneration && shouldBePlaying) {
           stopAlarm();
         }
       }, 2500);
     } else {
       // Loop failsafe: never ring indefinitely — auto-stop after 30 seconds max
       singleLoopTimeout = setTimeout(() => {
-        if (shouldBePlaying) {
+        if (gen === alarmGeneration && shouldBePlaying) {
           stopAlarm();
         }
       }, 30000);

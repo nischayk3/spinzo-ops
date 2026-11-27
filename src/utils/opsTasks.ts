@@ -85,6 +85,32 @@ export function parseOpsTask(id: string, snapData: Record<string, any> | null | 
   };
 }
 
+function positiveInt(v: unknown): number | undefined {
+  if (v === null || v === undefined || v === '' || typeof v === 'boolean') return undefined;
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  const floored = Math.floor(n);
+  return floored > 0 ? floored : undefined;
+}
+
+/**
+ * Resolve the canonical delivery bundle count, preferring order-level aggregated
+ * packaging counts over stale task-level `bundleCount` (e.g. initial `1` before
+ * multi-load packaging finishes).
+ */
+export function resolveDeliveryBundleCount(
+  task: { bundleCount?: unknown } | null | undefined,
+  order?: any
+): number | undefined {
+  return (
+    positiveInt(order?.packagingProof?.bundles) ??
+    positiveInt(order?.opsDetails?.bundles) ??
+    positiveInt(order?.opsDetails?.packagingProof?.bundles) ??
+    positiveInt(order?.bundleCount) ??
+    positiveInt(task?.bundleCount)
+  );
+}
+
 export function isPending(task: Pick<OpsTask, 'status'>): boolean {
   return task.status === 'pending' || task.status === 'assigned' || task.status === 'in_transit_to_store' || task.status === 'out_for_delivery';
 }

@@ -35,6 +35,18 @@ class SpinzoMessagingService : FirebaseMessagingService() {
                 return
             }
 
+            val onBreak = prefs.getBoolean("on_break", false)
+            val isSupOverride = data["isSupervisorOverride"].equals("true", ignoreCase = true)
+            if (onBreak && !isSupOverride) {
+                Log.d("SpinzoOverlay", "Dropping FCM $type because staff is on break")
+                return
+            }
+
+            if (SpinzoOverlayManager.isAppInForeground) {
+                Log.d("SpinzoOverlay", "Dropping native overlay/alarm for FCM $type because app is in foreground")
+                return
+            }
+
             val canDraw = Settings.canDrawOverlays(this)
             Log.d("SpinzoOverlay", "3. Overlay permission (canDrawOverlays): $canDraw")
 
@@ -49,15 +61,23 @@ class SpinzoMessagingService : FirebaseMessagingService() {
                 null
             }
 
+            val reqGen = SpinzoOverlayManager.currentGeneration()
+
             if (canDraw) {
                 Log.d("SpinzoOverlay", "4. Triggering native overlay on Main Thread via WindowManager")
                 val posted = Handler(Looper.getMainLooper()).post {
                     try {
-                        SpinzoOverlayManager.showOverlay(applicationContext, data)
+                        if (SpinzoOverlayManager.isAppInForeground) {
+                            Log.d("SpinzoOverlay", "Skipping queued FCM overlay because app entered foreground")
+                            return@post
+                        }
+                        SpinzoOverlayManager.showOverlay(applicationContext, data, reqGen)
                         Log.d("SpinzoOverlay", "5. WindowManager.addView successful")
                     } catch (e: Exception) {
                         Log.e("SpinzoOverlay", "5. WindowManager.addView failed: ${e.message}", e)
-                        SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                        if (reqGen == SpinzoOverlayManager.currentGeneration() && !SpinzoOverlayManager.isAppInForeground) {
+                            SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                        }
                     } finally {
                         try {
                             if (dispatchWakeLock?.isHeld == true) {
@@ -78,7 +98,9 @@ class SpinzoMessagingService : FirebaseMessagingService() {
             } else {
                 Log.d("SpinzoOverlay", "4. Overlay permission missing - triggering fallback Heads-Up notification")
                 try {
-                    SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                    if (reqGen == SpinzoOverlayManager.currentGeneration() && !SpinzoOverlayManager.isAppInForeground) {
+                        SpinzoOverlayManager.showFallbackNotification(applicationContext, data)
+                    }
                 } finally {
                     try {
                         if (dispatchWakeLock?.isHeld == true) {

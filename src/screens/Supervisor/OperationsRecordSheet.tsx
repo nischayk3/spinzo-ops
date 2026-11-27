@@ -5,72 +5,46 @@ import { useOrderFeedStore } from '../../store/orderFeedStore';
 import { useOpsProcessStore } from '../../store/opsProcessStore';
 import { useStaffRosterStore } from '../../store/staffRosterStore';
 import { db, collection, getDocs, query, where } from '../../config/firebase';
-import { isToday, timeAgo, getPickupInfo } from '../../utils/orderFeed';
 import { useResponsive } from '../../utils/useResponsive';
-import { Calendar, Users, Timer, X, Truck, CheckCircle2, ChevronLeft, ChevronRight, TrendingUp, Wrench, Bike } from 'lucide-react-native';
+import {
+  REPORT_STAGE_KEYS,
+  REPORT_STAGE_LABELS,
+  IRONING_SERVICE_LABELS,
+  IroningServiceBucket,
+  StageMetricDoc,
+  localISODate,
+  dayStartMs,
+  collectHelperStageEvents,
+  buildHelperReport,
+  buildRiderReport,
+  resolveRiderName,
+} from '../../utils/operationsReport';
+import {
+  Calendar,
+  Users,
+  Timer,
+  X,
+  Truck,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  TrendingUp,
+  Wrench,
+  Bike,
+  Shirt,
+} from 'lucide-react-native';
 
-const STAGE_KEYS = ['tagging', 'getting_washed', 'getting_dried', 'getting_ironed', 'packaging'];
-const STAGE_LABELS: Record<string, string> = {
-  tagging: 'Tagging',
-  getting_washed: 'Washing',
-  getting_dried: 'Drying',
-  getting_ironed: 'Ironing',
-  packaging: 'Packaging',
-};
-
-interface StageAvg {
-  avgMinutes: number | null;
-  completedCount: number;
-}
-
-interface StaffTimingRow {
-  staffName: string;
-  stages: Record<string, StageAvg>;
-  pickupAvgMin: number | null;
-  pickupCount: number;
-  deliveryAvgMin: number | null;
-  deliveryCount: number;
-}
-
-interface DayStat {
-  date: string;
-  label: string;
-  pickupCount: number;
-  deliveryCount: number;
-  pickupAvgMin: number | null;
-  deliveryAvgMin: number | null;
-}
-
-const getMs = (t: any): number => {
-  if (!t) return 0;
-  if (typeof t === 'number') return t;
-  if (typeof t.toMillis === 'function') return t.toMillis();
-  if (typeof t.toDate === 'function') return t.toDate().getTime();
-  if (t.seconds) return t.seconds * 1000;
-  const p = new Date(t).getTime();
-  return isNaN(p) ? 0 : p;
-};
-
-// Formats a Date as YYYY-MM-DD in local time (toISOString would shift by TZ)
-const localISO = (d: Date): string => {
-  const c = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
-  return c.toISOString().split('T')[0];
-};
+const IRONING_BUCKETS: IroningServiceBucket[] = ['wash_iron', 'ironing', 'premium_laundry', 'other'];
 
 const fmtDate = (dateStr: string) => {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(y, m - 1, d);
   const today = new Date();
-  const diffDays = Math.round((today.getTime() - dt.getTime()) / 86400000);
+  const todayMid = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const diffDays = Math.round((todayMid.getTime() - dt.getTime()) / 86400000);
   if (diffDays === 0) return 'Today';
   if (diffDays === 1) return 'Yesterday';
   return dt.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' });
-};
-
-// Parses a YYYY-MM-DD string as local midnight (new Date(str) would be UTC)
-const dayStartMs = (dateStr: string): number => {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  return new Date(y, m - 1, d).getTime();
 };
 
 const rangeDates = (start: string, end: string): string[] => {
@@ -78,11 +52,13 @@ const rangeDates = (start: string, end: string): string[] => {
   const s = new Date(dayStartMs(start));
   const e = new Date(dayStartMs(end));
   while (s <= e) {
-    dates.push(localISO(s));
+    dates.push(localISODate(s));
     s.setDate(s.getDate() + 1);
   }
   return dates;
 };
+
+type PresetKey = 'today' | 'yesterday' | '7d' | '30d' | 'month';
 
 export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
   const { orders, initialize: initOrders } = useOrderFeedStore();
@@ -90,24 +66,21 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
   const roster = useStaffRosterStore(s => s.roster);
   const { maxContainerStyle, isDesktop } = useResponsive();
 
-  const todayStr = localISO(new Date());
+  const todayStr = localISODate(new Date());
   const [startDate, setStartDate] = useState(todayStr);
   const [endDate, setEndDate] = useState(todayStr);
+  const [activePreset, setActivePreset] = useState<PresetKey | null>('today');
   const [selectedStaff, setSelectedStaff] = useState<string>('all');
   const [dataType, setDataType] = useState<'helper' | 'rider'>('helper');
-  const [tab, setTab] = useState<'overview' | 'staff'>('overview');
 
-  // Initialize stores that may not have been initialized
   useEffect(() => {
     initOrders();
   }, [initOrders]);
 
-  // Rider attribution is unreliable on the order doc itself: `riderId` is written only on
-  // MANUAL assignment, while auto-dispatched pickups record the rider solely as
-  // `ops_tasks/{orderId}.assignee`. Deliveries likewise live in `ops_delivery_tasks`.
-  // So we load a full staff directory (the roster store only tracks ON-SHIFT staff, which
-  // is useless for historical analysis) plus the task collections to join back to orders.
+  // Load full staff directory (riders + helpers — roster store only tracks ON-SHIFT staff)
+  // plus task collections for accurate pickup/delivery rider attribution.
   const [staffNames, setStaffNames] = useState<Record<string, string>>({});
+  const [directoryHelpers, setDirectoryHelpers] = useState<string[]>([]);
   const [taskRiders, setTaskRiders] = useState<Record<string, { pickupUid?: string; deliveryUid?: string }>>({});
 
   useEffect(() => {
@@ -115,16 +88,20 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
     (async () => {
       try {
         const [staffSnap, taskSnap, delSnap] = await Promise.all([
-          getDocs(query(collection(db, 'ops_staff'), where('role', '==', 'rider'))),
+          getDocs(collection(db, 'ops_staff')),
           getDocs(collection(db, 'ops_tasks')),
           getDocs(collection(db, 'ops_delivery_tasks')),
         ]);
         if (cancelled) return;
 
-        const names: Record<string, string> = {};
+        const riderNames: Record<string, string> = {};
+        const helperSet = new Set<string>();
         staffSnap.forEach(d => {
-          const name = (d.data() as any).name;
-          if (name) names[d.id] = name;
+          const data = d.data() as any;
+          const name = typeof data.name === 'string' ? data.name.trim() : '';
+          if (!name) return;
+          if (data.role === 'rider') riderNames[d.id] = name;
+          else if (data.role === 'helper' || data.role === 'iron') helperSet.add(name);
         });
 
         const byOrder: Record<string, { pickupUid?: string; deliveryUid?: string }> = {};
@@ -141,69 +118,73 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
           byOrder[orderId] = { ...(byOrder[orderId] || {}), deliveryUid: assignee };
         });
 
-        setStaffNames(names);
+        setStaffNames(riderNames);
+        setDirectoryHelpers(Array.from(helperSet));
         setTaskRiders(byOrder);
       } catch (err) {
-        console.warn('[OperationsRecord] rider directory load failed:', err);
+        console.warn('[OperationsRecord] staff/task directory load failed:', err);
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
-  // uid -> display name, merging the full directory with the live roster.
+  // Load permanent per-load stage metrics from ops_stage_metrics for the selected date range
+  const [stageMetrics, setStageMetrics] = useState<StageMetricDoc[]>([]);
+  const [metricsLoading, setMetricsLoading] = useState<boolean>(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMetricsLoading(true);
+    (async () => {
+      try {
+        const q = query(
+          collection(db, 'ops_stage_metrics'),
+          where('dateKey', '>=', startDate),
+          where('dateKey', '<=', endDate)
+        );
+        const snap = await getDocs(q);
+        if (cancelled) return;
+        const docs: StageMetricDoc[] = [];
+        snap.forEach(d => {
+          const data = d.data() as any;
+          docs.push({
+            id: d.id,
+            processId: data.processId || data.orderId || d.id,
+            orderId: data.orderId || data.parentOrderId || d.id,
+            parentOrderId: data.parentOrderId || data.orderId,
+            step: data.step,
+            serviceType: data.serviceType,
+            serviceLabel: data.serviceLabel,
+            garmentCount: typeof data.garmentCount === 'number' ? data.garmentCount : undefined,
+            loadIndex: typeof data.loadIndex === 'number' ? data.loadIndex : undefined,
+            loadCount: typeof data.loadCount === 'number' ? data.loadCount : undefined,
+            assignee: data.assignee,
+            assigneeName: data.assigneeName,
+            startedAt: data.startedAt,
+            acceptedAt: data.acceptedAt,
+            completedAt: data.completedAt,
+            startToCompleteMin: data.startToCompleteMin,
+            acceptToCompleteMin: data.acceptToCompleteMin,
+            durationMs: data.durationMs,
+            dateKey: data.dateKey,
+          });
+        });
+        setStageMetrics(docs);
+      } catch (err) {
+        console.warn('[OperationsRecord] ops_stage_metrics load failed:', err);
+        if (!cancelled) setStageMetrics([]);
+      } finally {
+        if (!cancelled) setMetricsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [startDate, endDate]);
+
   const riderNameByUid = useMemo(() => {
     const map: Record<string, string> = { ...staffNames };
     roster.riders.forEach(r => { if (r.name) map[r.uid] = r.name; });
     return map;
   }, [staffNames, roster.riders]);
-
-  // Resolves the rider responsible for a leg of the order. Order-doc `riderId` is only set on
-  // manual assignment, so fall back to the task collections (which record every dispatch),
-  // then to any legacy `riderName` field.
-  const riderNameFor = (o: any, leg: 'pickup' | 'delivery'): string => {
-    const taskInfo = taskRiders[o.id] || taskRiders[(o as any).orderId] || {};
-    const uid = leg === 'pickup'
-      ? (o.riderId || taskInfo.pickupUid)
-      : ((o as any).deliveryRiderId || o.riderId || taskInfo.deliveryUid || taskInfo.pickupUid);
-    const resolved = uid ? riderNameByUid[uid] : undefined;
-    return resolved || (o as any).riderName || 'Unassigned';
-  };
-
-  // All staff names from data
-  const allHelperNames = useMemo(() => {
-    const names = new Set<string>();
-    roster.helpers.forEach(h => { if (h.name) names.add(h.name); });
-    if (dataType === 'helper') {
-      processes.forEach(p => {
-        Object.values(p.stages || {}).forEach((s: any) => {
-          if (s.assigneeName) names.add(s.assigneeName);
-        });
-      });
-    }
-    return Array.from(names).sort();
-  }, [roster.helpers, processes, dataType]);
-
-  const allRiderNames = useMemo(() => {
-    const names = new Set<string>();
-    roster.riders.forEach(r => { if (r.name) names.add(r.name); });
-    Object.values(riderNameByUid).forEach(n => { if (n) names.add(n); });
-    let hasUnassigned = false;
-    orders.forEach(o => {
-      const pickupName = riderNameFor(o, 'pickup');
-      const deliveryName = riderNameFor(o, 'delivery');
-      if (pickupName === 'Unassigned' && deliveryName === 'Unassigned') {
-        if (o.pickedUpAt || o.deliveredAt || (o as any).pickupCompletedAt || (o as any).deliveryCompletedAt) {
-          hasUnassigned = true;
-        }
-      }
-    });
-    const sorted = Array.from(names).sort();
-    if (hasUnassigned) sorted.push('Unassigned');
-    return sorted;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roster.riders, orders, riderNameByUid, taskRiders]);
-
-  const activeNames = dataType === 'helper' ? allHelperNames : allRiderNames;
 
   // ====== DATE RANGE ======
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -223,12 +204,13 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
     if (!anchorDate) { setAnchorDate(dateStr); return; }
     if (dateStr < anchorDate) { setStartDate(dateStr); setEndDate(anchorDate); }
     else { setStartDate(anchorDate); setEndDate(dateStr); }
+    setActivePreset(null);
     setAnchorDate(null);
   };
 
-  const applyPreset = (preset: 'today' | 'yesterday' | '7d' | '30d' | 'month') => {
+  const applyPreset = (preset: PresetKey) => {
     const now = new Date();
-    const iso = localISO;
+    const iso = localISODate;
     if (preset === 'today') { setStartDate(iso(now)); setEndDate(iso(now)); }
     else if (preset === 'yesterday') {
       const y = new Date(now); y.setDate(now.getDate() - 1);
@@ -243,6 +225,7 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
       const s = new Date(now.getFullYear(), now.getMonth(), 1);
       setStartDate(iso(s)); setEndDate(iso(now));
     }
+    setActivePreset(preset);
     setAnchorDate(null);
     setPickerOpen(false);
   };
@@ -266,232 +249,69 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
     ? fmtDate(startDate)
     : `${fmtDate(startDate)} — ${fmtDate(endDate)} · ${dates.length}d`;
 
-  // ====== COMPUTE TIMING DATA ======
-  // Source 1: ops_process stage records (live processes)
-  // Source 2: order stageTimings from feed (completed orders)
-  const timingRows = useMemo((): StaffTimingRow[] => {
-    const startTs = dayStartMs(startDate);
-    const endTs = dayStartMs(endDate) + 86400000;
+  // ====== DEDUPLICATED HELPER & RIDER REPORTS ======
+  const helperEvents = useMemo(
+    () => collectHelperStageEvents({ stageMetrics, processes, orders, startDate, endDate }),
+    [stageMetrics, processes, orders, startDate, endDate]
+  );
 
-    if (dataType === 'helper') {
-      const staffMap = new Map<string, Record<string, { total: number; count: number }>>();
+  const helperReport = useMemo(
+    () => buildHelperReport(helperEvents, selectedStaff, dates),
+    [helperEvents, selectedStaff, dates]
+  );
 
-      // Helper 1: From ops_process live data
-      processes.forEach(p => {
-        Object.entries(p.stages || {}).forEach(([rawStep, s]: [string, any]) => {
-          if (!s || !s.completedAt || !s.assigneeName) return;
-          const step = rawStep === 'drying' ? 'getting_dried' : (rawStep === 'ironing' ? 'getting_ironed' : rawStep);
-          if (!STAGE_KEYS.includes(step)) return;
-          const compMs = getMs(s.completedAt);
-          if (compMs < startTs || compMs >= endTs) return;
-          const min = getStageDuration(s);
-          if (min === null) return;
-          const name = s.assigneeName;
-          if (selectedStaff !== 'all' && name !== selectedStaff) return;
-          if (!staffMap.has(name)) staffMap.set(name, {});
-          const staff = staffMap.get(name)!;
-          if (!staff[step]) staff[step] = { total: 0, count: 0 };
-          staff[step].total += min;
-          staff[step].count += 1;
-        });
-      });
+  const riderReport = useMemo(
+    () =>
+      buildRiderReport({
+        orders,
+        taskRiders,
+        riderNameByUid,
+        startDate,
+        endDate,
+        selectedStaff,
+        dates,
+      }),
+    [orders, taskRiders, riderNameByUid, startDate, endDate, selectedStaff, dates]
+  );
 
-      // Helper 2: From order stageTimings (completed orders in feed)
-      orders.forEach(o => {
-        const timings = (o as any).stageTimings;
-        if (!timings || typeof timings !== 'object') return;
-        Object.entries(timings).forEach(([rawStep, s]: [string, any]) => {
-          if (!s || !s.completedAt) return;
-          const step = rawStep === 'drying' ? 'getting_dried' : (rawStep === 'ironing' ? 'getting_ironed' : rawStep);
-          if (!STAGE_KEYS.includes(step)) return;
-          const compMs = getMs(s.completedAt);
-          if (compMs < startTs || compMs >= endTs) return;
+  // All staff filter pills (includes historical & off-shift staff)
+  const allHelperNames = useMemo(() => {
+    const names = new Set<string>();
+    directoryHelpers.forEach(n => names.add(n));
+    roster.helpers.forEach(h => { if (h.name) names.add(h.name); });
+    helperEvents.forEach(ev => { if (ev.staffName && ev.staffName !== 'Unknown') names.add(ev.staffName); });
+    return Array.from(names).sort((a, b) => a.localeCompare(b));
+  }, [directoryHelpers, roster.helpers, helperEvents]);
 
-          const min = getStageDuration(s);
-          if (min === null) return;
-
-          const name = s.assigneeName || (s as any).assigneeName || (s as any).assignee || 'Unknown';
-          if (selectedStaff !== 'all' && name !== selectedStaff) return;
-          if (!staffMap.has(name)) staffMap.set(name, {});
-          const staff = staffMap.get(name)!;
-          if (!staff[step]) staff[step] = { total: 0, count: 0 };
-          staff[step].total += min;
-          staff[step].count += 1;
-        });
-      });
-
-      return Array.from(staffMap.entries()).map(([staffName, stages]) => {
-        const stageData: Record<string, StageAvg> = {};
-        STAGE_KEYS.forEach(k => {
-          const d = stages[k];
-          stageData[k] = d && d.count > 0
-            ? { avgMinutes: Math.round(d.total / d.count), completedCount: d.count }
-            : { avgMinutes: null, completedCount: 0 };
-        });
-        return { staffName, stages: stageData, pickupAvgMin: null, pickupCount: 0, deliveryAvgMin: null, deliveryCount: 0 };
-      }).sort((a, b) => {
-        const sum = (r: StaffTimingRow) => STAGE_KEYS.reduce((s, k) => s + (r.stages[k]?.completedCount || 0), 0);
-        return sum(b) - sum(a);
-      });
-    } else {
-      // Rider data
-      const riderMap = new Map<string, { pickupTotal: number; pickupCount: number; deliveryTotal: number; deliveryCount: number }>();
-
-      const addRow = (name: string, kind: 'pickup' | 'delivery', min: number) => {
-        if (!riderMap.has(name)) riderMap.set(name, { pickupTotal: 0, pickupCount: 0, deliveryTotal: 0, deliveryCount: 0 });
-        const rec = riderMap.get(name)!;
-        if (kind === 'pickup') { rec.pickupTotal += min; rec.pickupCount += 1; }
-        else { rec.deliveryTotal += min; rec.deliveryCount += 1; }
-      };
-
-      orders.forEach(o => {
-        // Resolve each leg independently — the pickup rider and the delivery rider
-        // are frequently different people and are tracked separately.
-        const pickupRider = riderNameFor(o, 'pickup');
-        const deliveryRider = riderNameFor(o, 'delivery');
-
-        // Pickup: createdAt -> pickedUpAt, bucketed by when the pickup happened
-        const pickTs = o.pickedUpAt || (o as any).pickupCompletedAt;
-        if (pickTs) {
-          const pickMs = getMs(pickTs);
-          const oMs = getMs(o.createdAt);
-          if (pickMs >= startTs && pickMs < endTs && pickMs > oMs) {
-            if (selectedStaff === 'all' || pickupRider === selectedStaff) {
-              const min = Math.round((pickMs - oMs) / 60000);
-              if (min > 0 && min < 600) addRow(pickupRider, 'pickup', min);
-            }
-          }
+  const allRiderNames = useMemo(() => {
+    const names = new Set<string>();
+    roster.riders.forEach(r => { if (r.name) names.add(r.name); });
+    Object.values(riderNameByUid).forEach(n => { if (n) names.add(n); });
+    let hasUnassigned = false;
+    orders.forEach(o => {
+      const pickupName = resolveRiderName(o, 'pickup', taskRiders, riderNameByUid);
+      const deliveryName = resolveRiderName(o, 'delivery', taskRiders, riderNameByUid);
+      if (pickupName === 'Unassigned' && deliveryName === 'Unassigned') {
+        if (o.pickedUpAt || o.deliveredAt || (o as any).pickupCompletedAt || (o as any).deliveryCompletedAt) {
+          hasUnassigned = true;
         }
-
-        // Delivery: ready/out-for-delivery -> deliveredAt, bucketed by delivery time
-        const delTs = o.deliveredAt || (o as any).deliveryCompletedAt;
-        if (delTs) {
-          const delMs = getMs(delTs);
-          if (delMs >= startTs && delMs < endTs) {
-            const refMs = getMs(o.outForDeliveryAt || o.readyAt || o.createdAt);
-            if (delMs > refMs) {
-              if (selectedStaff === 'all' || deliveryRider === selectedStaff) {
-                const min = Math.round((delMs - refMs) / 60000);
-                if (min > 0 && min < 600) addRow(deliveryRider, 'delivery', min);
-              }
-            }
-          }
-        }
-      });
-
-      return Array.from(riderMap.entries()).map(([staffName, d]) => ({
-        staffName,
-        stages: {},
-        pickupAvgMin: d.pickupCount > 0 ? Math.round(d.pickupTotal / d.pickupCount) : null,
-        pickupCount: d.pickupCount,
-        deliveryAvgMin: d.deliveryCount > 0 ? Math.round(d.deliveryTotal / d.deliveryCount) : null,
-        deliveryCount: d.deliveryCount,
-      })).sort((a, b) => (b.pickupCount + b.deliveryCount) - (a.pickupCount + a.deliveryCount));
-    }
-  }, [processes, orders, startDate, endDate, selectedStaff, dataType, riderNameByUid, taskRiders]);
-
-  // Day-by-day overview stats
-  const dayStats = useMemo((): DayStat[] => {
-    if (dataType === 'helper') return [];
-    return dates.map(dateStr => {
-      const dStart = dayStartMs(dateStr);
-      const dEnd = dStart + 86400000;
-
-      let pickupCount = 0, deliveryCount = 0;
-      let pickupTotal = 0, deliveryTotal = 0;
-
-      orders.forEach(o => {
-        const pickR = riderNameFor(o, 'pickup');
-        const delR = riderNameFor(o, 'delivery');
-
-        const pickTs = o.pickedUpAt || (o as any).pickupCompletedAt;
-        if (pickTs) {
-          const pickMs = getMs(pickTs);
-          if (pickMs >= dStart && pickMs < dEnd) {
-            if (selectedStaff === 'all' || pickR === selectedStaff) {
-              pickupCount++;
-              const oMs = getMs(o.createdAt);
-              if (oMs > 0 && pickMs > oMs) {
-                const min = Math.round((pickMs - oMs) / 60000);
-                if (min > 0 && min < 600) pickupTotal += min;
-              }
-            }
-          }
-        }
-        const delTs = o.deliveredAt || (o as any).deliveryCompletedAt;
-        if (delTs) {
-          const delMs = getMs(delTs);
-          if (delMs >= dStart && delMs < dEnd) {
-            if (selectedStaff === 'all' || delR === selectedStaff) {
-              deliveryCount++;
-              const refMs = getMs(o.outForDeliveryAt || o.readyAt || o.createdAt);
-              if (refMs > 0 && delMs > refMs) {
-                const min = Math.round((delMs - refMs) / 60000);
-                if (min > 0 && min < 600) deliveryTotal += min;
-              }
-            }
-          }
-        }
-      });
-
-      return {
-        date: dateStr,
-        label: fmtDate(dateStr),
-        pickupCount,
-        deliveryCount,
-        pickupAvgMin: pickupCount > 0 && pickupTotal > 0 ? Math.round(pickupTotal / pickupCount) : null,
-        deliveryAvgMin: deliveryCount > 0 && deliveryTotal > 0 ? Math.round(deliveryTotal / deliveryCount) : null,
-      };
+      }
     });
-  }, [orders, dates, dataType, selectedStaff]);
+    const sorted = Array.from(names).sort((a, b) => a.localeCompare(b));
+    if (hasUnassigned) sorted.push('Unassigned');
+    return sorted;
+  }, [roster.riders, orders, riderNameByUid, taskRiders]);
 
-  // Overall averages across all matching data
-  const overallStats = useMemo(() => {
-    if (timingRows.length === 0) return null;
+  const activeNames = dataType === 'helper' ? allHelperNames : allRiderNames;
+  const activeWorkerCount = dataType === 'helper' ? helperReport.rows.length : riderReport.rows.length;
 
-    if (dataType === 'helper') {
-      const totals: Record<string, { total: number; count: number }> = {};
-      STAGE_KEYS.forEach(k => { totals[k] = { total: 0, count: 0 }; });
-
-      timingRows.forEach(row => {
-        STAGE_KEYS.forEach(k => {
-          const s = row.stages[k];
-          if (s?.avgMinutes && s.completedCount > 0) {
-            totals[k].total += s.avgMinutes * s.completedCount;
-            totals[k].count += s.completedCount;
-          }
-        });
-      });
-
-      return {
-        stages: STAGE_KEYS.map(k => ({
-          key: k,
-          label: STAGE_LABELS[k],
-          avg: totals[k].count > 0 ? Math.round(totals[k].total / totals[k].count) : null,
-          count: totals[k].count,
-        })),
-        pickupAvg: null,
-        deliveryAvg: null,
-        totalWorkers: timingRows.length,
-      };
-    }
-
-    const pickupCount = timingRows.reduce((s, r) => s + r.pickupCount, 0);
-    const deliveryCount = timingRows.reduce((s, r) => s + r.deliveryCount, 0);
-    const pickupTotal = timingRows.reduce((s, r) => s + (r.pickupAvgMin || 0) * r.pickupCount, 0);
-    const deliveryTotal = timingRows.reduce((s, r) => s + (r.deliveryAvgMin || 0) * r.deliveryCount, 0);
-    const pickupAvg = pickupCount > 0 && pickupTotal > 0 ? Math.round(pickupTotal / pickupCount) : null;
-    const deliveryAvg = deliveryCount > 0 && deliveryTotal > 0 ? Math.round(deliveryTotal / deliveryCount) : null;
-
-    return {
-      stages: [],
-      pickupAvg,
-      deliveryAvg,
-      totalWorkers: timingRows.length,
-      pickupCount,
-      deliveryCount,
-    };
-  }, [timingRows, dataType]);
+  const ironingStaffRows = useMemo(
+    () =>
+      helperReport.rows
+        .filter(r => r.ironingTotalLoads > 0 || r.ironingTotalPieces > 0)
+        .sort((a, b) => b.ironingTotalPieces - a.ironingTotalPieces || b.ironingTotalLoads - a.ironingTotalLoads),
+    [helperReport.rows]
+  );
 
   // ====== RENDER ======
   return (
@@ -507,9 +327,14 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
               </View>
               <View>
                 <Text className="text-xl font-black text-gray-900">Operations Record</Text>
-                <Text className="text-gray-500 text-xs">
-                  {dates.length} day{dates.length > 1 ? 's' : ''} · {timingRows.length} staff active
-                </Text>
+                <View className="flex-row items-center gap-2">
+                  <Text className="text-gray-500 text-xs">
+                    {dates.length} day{dates.length > 1 ? 's' : ''} · {activeWorkerCount} staff active
+                  </Text>
+                  {metricsLoading && dataType === 'helper' && (
+                    <ActivityIndicator size="small" color="#994bff" />
+                  )}
+                </View>
               </View>
             </View>
             {onClose && (
@@ -528,7 +353,7 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
               <Wrench size={16} color={dataType === 'helper' ? '#6b21a8' : '#94a3b8'} />
               <View>
                 <Text className={`font-bold text-sm ${dataType === 'helper' ? 'text-purple-800' : 'text-gray-500'}`}>Helpers</Text>
-                <Text className={`text-[10px] ${dataType === 'helper' ? 'text-purple-600' : 'text-gray-400'}`}>Stage timing</Text>
+                <Text className={`text-[10px] ${dataType === 'helper' ? 'text-purple-600' : 'text-gray-400'}`}>Stages & ironing pcs</Text>
               </View>
             </TouchableOpacity>
             <TouchableOpacity
@@ -560,27 +385,32 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
             </View>
 
             {/* Presets */}
-            <View className="flex-row flex-wrap gap-1.5 mb-3">
+            <View className="flex-row flex-wrap gap-1.5 mb-1">
               {([
                 ['today', 'Today'],
                 ['yesterday', 'Yesterday'],
                 ['7d', 'Last 7 days'],
                 ['30d', 'Last 30 days'],
                 ['month', 'This month'],
-              ] as const).map(([key, label]) => (
-                <TouchableOpacity
-                  key={key}
-                  onPress={() => applyPreset(key)}
-                  className="px-3 py-1.5 rounded-full border bg-gray-50 border-gray-200 active:bg-gray-100"
-                >
-                  <Text className="text-xs font-bold text-gray-600">{label}</Text>
-                </TouchableOpacity>
-              ))}
+              ] as const).map(([key, label]) => {
+                const isSelected = activePreset === key;
+                return (
+                  <TouchableOpacity
+                    key={key}
+                    onPress={() => applyPreset(key)}
+                    className={`px-3 py-1.5 rounded-full border ${
+                      isSelected ? 'bg-[#994bff] border-[#994bff]' : 'bg-gray-50 border-gray-200 active:bg-gray-100'
+                    }`}
+                  >
+                    <Text className={`text-xs font-bold ${isSelected ? 'text-white' : 'text-gray-600'}`}>{label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
             </View>
 
             {/* Calendar */}
             {pickerOpen && (
-              <View className="border-t border-gray-100 pt-3">
+              <View className="border-t border-gray-100 pt-3 mt-2">
                 <View className="flex-row items-center justify-between mb-3">
                   <TouchableOpacity onPress={() => shiftMonth(-1)} className="p-2 rounded-lg bg-gray-100 active:bg-gray-200">
                     <ChevronLeft size={16} color="#334155" />
@@ -665,27 +495,57 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
           </View>
 
           {/* OVERVIEW STATS CARD */}
-          {overallStats && (
+          {((dataType === 'helper' && helperReport.rows.length > 0) || (dataType === 'rider' && riderReport.overall)) && (
             <View className="bg-white rounded-2xl p-4 mb-3 border border-gray-200">
               <View className="flex-row items-center gap-2 mb-3">
                 <TrendingUp size={16} color="#994bff" />
                 <Text className="text-gray-900 font-bold text-sm">Overview</Text>
-                <Text className="text-gray-400 text-xs ml-auto">{timingRows.length} staff · {dates.length} days</Text>
+                <Text className="text-gray-400 text-xs ml-auto">{activeWorkerCount} staff · {dates.length}d</Text>
               </View>
 
               {dataType === 'helper' ? (
                 <View className={`gap-2 ${isDesktop ? 'flex-row' : ''}`}>
-                  {overallStats.stages.map(s => (
-                    <View key={s.key} className={`${isDesktop ? 'flex-1' : ''} bg-gray-50 rounded-xl p-3 border border-gray-100 items-center`}>
-                      <Text className="text-gray-500 text-[10px] font-bold uppercase">{s.label}</Text>
-                      <Text className={`text-lg font-black mt-0.5 ${s.avg !== null && s.avg <= 20 ? 'text-emerald-700' : s.avg !== null && s.avg <= 40 ? 'text-amber-700' : 'text-gray-400'}`}>
-                        {s.avg !== null ? `${s.avg}m` : '—'}
-                      </Text>
-                      <Text className="text-gray-400 text-[9px]">{s.count} orders</Text>
-                    </View>
-                  ))}
+                  {helperReport.overallStages.map(s => {
+                    const isIron = s.key === 'getting_ironed';
+                    return (
+                      <View
+                        key={s.key}
+                        className={`${isDesktop ? 'flex-1' : ''} rounded-xl p-3 border items-center ${
+                          isIron ? 'bg-purple-50/70 border-purple-200' : 'bg-gray-50 border-gray-100'
+                        }`}
+                      >
+                        <Text className={`text-[10px] font-bold uppercase ${isIron ? 'text-purple-700' : 'text-gray-500'}`}>
+                          {s.label}
+                        </Text>
+                        <Text
+                          className={`text-lg font-black mt-0.5 ${
+                            s.avg !== null && s.avg <= 20
+                              ? 'text-emerald-700'
+                              : s.avg !== null && s.avg <= 45
+                              ? 'text-amber-700'
+                              : s.avg !== null
+                              ? 'text-rose-700'
+                              : 'text-gray-400'
+                          }`}
+                        >
+                          {s.avg !== null ? `${s.avg}m` : '—'}
+                        </Text>
+                        <Text className="text-gray-500 text-[10px] font-semibold">
+                          {s.count} load{s.count === 1 ? '' : 's'}
+                        </Text>
+                        {isIron && s.pieces > 0 && (
+                          <View className="mt-1 px-2 py-0.5 rounded-full bg-purple-100 border border-purple-200">
+                            <Text className="text-[10px] font-black text-purple-800">
+                              {s.hasEstimatedPieces ? '~' : ''}{s.pieces} pcs
+                              {dates.length > 1 ? ` · ${helperReport.ironingSummary.avgPiecesPerDay}/d` : ''}
+                            </Text>
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
                 </View>
-              ) : (
+              ) : riderReport.overall ? (
                 <View className={`gap-3 ${isDesktop ? 'flex-row' : ''}`}>
                   <View className={`${isDesktop ? 'flex-1' : ''} bg-blue-50 rounded-xl p-3.5 border border-blue-200`}>
                     <View className="flex-row items-center justify-between mb-1">
@@ -693,9 +553,9 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
                       <Truck size={14} color="#2563eb" />
                     </View>
                     <Text className="text-2xl font-black text-blue-900">
-                      {overallStats.pickupAvg !== null ? `${overallStats.pickupAvg}m` : '—'}
+                      {riderReport.overall.pickupAvg !== null ? `${riderReport.overall.pickupAvg}m` : '—'}
                     </Text>
-                    <Text className="text-blue-700 text-xs font-semibold mt-0.5">{overallStats.pickupCount} pickups</Text>
+                    <Text className="text-blue-700 text-xs font-semibold mt-0.5">{riderReport.overall.pickupCount} pickups</Text>
                   </View>
                   <View className={`${isDesktop ? 'flex-1' : ''} bg-emerald-50 rounded-xl p-3.5 border border-emerald-200`}>
                     <View className="flex-row items-center justify-between mb-1">
@@ -703,21 +563,23 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
                       <CheckCircle2 size={14} color="#059669" />
                     </View>
                     <Text className="text-2xl font-black text-emerald-900">
-                      {overallStats.deliveryAvg !== null ? `${overallStats.deliveryAvg}m` : '—'}
+                      {riderReport.overall.deliveryAvg !== null ? `${riderReport.overall.deliveryAvg}m` : '—'}
                     </Text>
-                    <Text className="text-emerald-700 text-xs font-semibold mt-0.5">{overallStats.deliveryCount} deliveries</Text>
+                    <Text className="text-emerald-700 text-xs font-semibold mt-0.5">{riderReport.overall.deliveryCount} deliveries</Text>
                   </View>
                 </View>
-              )}
+              ) : null}
             </View>
           )}
 
           {/* DATA TABLE */}
           <View className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-            {timingRows.length === 0 ? (
+            {activeWorkerCount === 0 ? (
               <View className="py-14 items-center">
                 <Timer size={32} color="#cbd5e1" />
-                <Text className="text-gray-400 font-medium mt-3 text-sm">No data found for this period</Text>
+                <Text className="text-gray-400 font-medium mt-3 text-sm">
+                  {metricsLoading && dataType === 'helper' ? 'Loading stage metrics…' : 'No data found for this period'}
+                </Text>
                 <Text className="text-gray-300 text-xs mt-1">
                   {dataType === 'helper'
                     ? 'Try a different date range or check if stages were completed'
@@ -728,10 +590,12 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
               <>
                 {/* Table Header */}
                 <View className="flex-row bg-gray-100/90 border-b border-gray-200 py-2.5 px-2.5 items-center">
-                  <Text className="w-[100px] text-[10px] font-black text-gray-700 uppercase tracking-wider shrink-0">STAFF</Text>
+                  <Text className="w-[92px] text-[10px] font-black text-gray-700 uppercase tracking-wider shrink-0">STAFF</Text>
                   {dataType === 'helper' ? (
-                    STAGE_KEYS.map(k => (
-                      <Text key={k} className="flex-1 text-[10px] font-black text-gray-700 uppercase tracking-wider text-center">{STAGE_LABELS[k]}</Text>
+                    REPORT_STAGE_KEYS.map(k => (
+                      <Text key={k} className="flex-1 text-[10px] font-black text-gray-700 uppercase tracking-wider text-center">
+                        {REPORT_STAGE_LABELS[k]}
+                      </Text>
                     ))
                   ) : (
                     <>
@@ -742,67 +606,211 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
                 </View>
 
                 {/* Table Rows */}
-                {timingRows.map((row, idx) => (
-                  <View key={row.staffName} className={`flex-row items-center border-b border-gray-100 py-3 px-2.5 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/60'}`}>
-                    <View className="w-[100px] shrink-0 pr-1">
-                      <Text className="text-gray-900 font-bold text-xs" numberOfLines={1}>{row.staffName}</Text>
-                    </View>
-                    {dataType === 'helper' ? (
-                      STAGE_KEYS.map(k => {
-                        const s = row.stages[k];
-                        return (
-                          <View key={k} className="flex-1 items-center">
-                            {s?.avgMinutes ? (
-                              <View className="items-center">
-                                <Text className={`font-black text-sm ${s.avgMinutes <= 15 ? 'text-emerald-700' : s.avgMinutes <= 35 ? 'text-amber-700' : 'text-rose-700'}`}>
-                                  {s.avgMinutes}m
-                                </Text>
-                                <Text className="text-[9px] text-gray-400">{s.completedCount}x</Text>
-                              </View>
-                            ) : (
-                              <Text className="text-gray-300 text-xs">—</Text>
-                            )}
-                          </View>
-                        );
-                      })
-                    ) : (
-                      <>
+                {dataType === 'helper'
+                  ? helperReport.rows.map((row, idx) => (
+                      <View
+                        key={row.staffName}
+                        className={`flex-row items-center border-b border-gray-100 py-3 px-2.5 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/60'}`}
+                      >
+                        <View className="w-[92px] shrink-0 pr-1">
+                          <Text className="text-gray-900 font-bold text-xs" numberOfLines={1}>{row.staffName}</Text>
+                        </View>
+                        {REPORT_STAGE_KEYS.map(k => {
+                          const s = row.stages[k];
+                          const isIron = k === 'getting_ironed';
+                          return (
+                            <View key={k} className="flex-1 items-center">
+                              {s && s.completedCount > 0 ? (
+                                <View className="items-center">
+                                  <Text
+                                    className={`font-black text-sm ${
+                                      s.avgMinutes === null
+                                        ? 'text-gray-500'
+                                        : s.avgMinutes <= 20
+                                        ? 'text-emerald-700'
+                                        : s.avgMinutes <= 45
+                                        ? 'text-amber-700'
+                                        : 'text-rose-700'
+                                    }`}
+                                  >
+                                    {s.avgMinutes !== null ? `${s.avgMinutes}m` : '—'}
+                                  </Text>
+                                  <Text className="text-[9px] text-gray-500 font-semibold">{s.completedCount}x</Text>
+                                  {isIron && s.pieces > 0 && (
+                                    <View className="mt-0.5 px-1.5 py-0.5 rounded bg-purple-100">
+                                      <Text className="text-[9px] font-black text-purple-800">
+                                        {s.hasEstimatedPieces ? '~' : ''}{s.pieces} pcs
+                                      </Text>
+                                    </View>
+                                  )}
+                                </View>
+                              ) : (
+                                <Text className="text-gray-300 text-xs">—</Text>
+                              )}
+                            </View>
+                          );
+                        })}
+                      </View>
+                    ))
+                  : riderReport.rows.map((row, idx) => (
+                      <View
+                        key={row.staffName}
+                        className={`flex-row items-center border-b border-gray-100 py-3 px-2.5 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50/60'}`}
+                      >
+                        <View className="w-[92px] shrink-0 pr-1">
+                          <Text className="text-gray-900 font-bold text-xs" numberOfLines={1}>{row.staffName}</Text>
+                        </View>
                         <View className="flex-1 items-center">
-                          {row.pickupAvgMin ? (
+                          {row.pickupCount > 0 ? (
                             <View className="items-center">
                               <View className="flex-row items-center gap-0.5">
                                 <Truck size={10} color="#2563eb" />
-                                <Text className="font-black text-sm text-blue-700">{row.pickupAvgMin}m</Text>
+                                <Text className="font-black text-sm text-blue-700">
+                                  {row.pickupAvgMin !== null ? `${row.pickupAvgMin}m` : '—'}
+                                </Text>
                               </View>
-                              <Text className="text-[9px] text-gray-400">{row.pickupCount}x</Text>
+                              <Text className="text-[9px] text-gray-500 font-semibold">{row.pickupCount}x</Text>
                             </View>
                           ) : (
                             <Text className="text-gray-300 text-xs">—</Text>
                           )}
                         </View>
                         <View className="flex-1 items-center">
-                          {row.deliveryAvgMin ? (
+                          {row.deliveryCount > 0 ? (
                             <View className="items-center">
                               <View className="flex-row items-center gap-0.5">
                                 <CheckCircle2 size={10} color="#059669" />
-                                <Text className="font-black text-sm text-emerald-700">{row.deliveryAvgMin}m</Text>
+                                <Text className="font-black text-sm text-emerald-700">
+                                  {row.deliveryAvgMin !== null ? `${row.deliveryAvgMin}m` : '—'}
+                                </Text>
                               </View>
-                              <Text className="text-[9px] text-gray-400">{row.deliveryCount}x</Text>
+                              <Text className="text-[9px] text-gray-500 font-semibold">{row.deliveryCount}x</Text>
                             </View>
                           ) : (
                             <Text className="text-gray-300 text-xs">—</Text>
                           )}
                         </View>
-                      </>
-                    )}
-                  </View>
-                ))}
+                      </View>
+                    ))}
               </>
             )}
           </View>
 
+          {/* IRONING OUTPUT BREAKDOWN (Helpers) */}
+          {dataType === 'helper' && helperReport.ironingSummary.totalLoads > 0 && (
+            <View className="bg-white rounded-2xl p-4 mt-3 border border-purple-200">
+              <View className="flex-row items-center justify-between mb-3">
+                <View className="flex-row items-center gap-2">
+                  <Shirt size={16} color="#7c3aed" />
+                  <Text className="text-gray-900 font-bold text-sm">Ironing Pieces Breakdown</Text>
+                </View>
+                <View className="px-2.5 py-1 rounded-full bg-purple-100 border border-purple-200">
+                  <Text className="text-purple-800 text-xs font-black">
+                    {helperReport.ironingSummary.hasEstimatedPieces ? '~' : ''}
+                    {helperReport.ironingSummary.totalPieces} pcs · {helperReport.ironingSummary.totalLoads} loads
+                  </Text>
+                </View>
+              </View>
+
+              {/* Service-level totals strip */}
+              <View className="flex-row flex-wrap gap-1.5 mb-3">
+                {IRONING_BUCKETS.map(bucket => {
+                  const st = helperReport.ironingSummary.byService[bucket];
+                  if (st.loads === 0) return null;
+                  return (
+                    <View key={bucket} className="px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200">
+                      <Text className="text-[10px] font-bold text-gray-600">
+                        {IRONING_SERVICE_LABELS[bucket]}:{' '}
+                        <Text className="text-gray-900 font-black">{st.pieces} pcs</Text> ({st.loads}x)
+                      </Text>
+                    </View>
+                  );
+                })}
+                {dates.length > 1 && (
+                  <View className="px-2.5 py-1 rounded-lg bg-purple-50 border border-purple-200">
+                    <Text className="text-[10px] font-bold text-purple-700">
+                      Avg: <Text className="font-black">{helperReport.ironingSummary.avgPiecesPerDay} pcs/day</Text>
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              {/* Per-staff ironing output cards */}
+              <View className="gap-2">
+                {ironingStaffRows.map(row => {
+                  const perDay = dates.length > 1 ? Math.round(row.ironingTotalPieces / dates.length) : null;
+                  return (
+                    <View key={row.staffName} className="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                      <View className="flex-row items-center justify-between mb-1.5">
+                        <View className="flex-row items-center gap-2">
+                          <Text className="text-gray-900 font-black text-sm">{row.staffName}</Text>
+                          {row.ironingAvgMin !== null && (
+                            <Text className="text-[10px] font-semibold text-gray-500">· {row.ironingAvgMin}m avg</Text>
+                          )}
+                        </View>
+                        <View className="flex-row items-center gap-1.5">
+                          <Text className="text-purple-800 font-black text-sm">
+                            {row.ironingHasEstimated ? '~' : ''}{row.ironingTotalPieces} pcs
+                          </Text>
+                          <Text className="text-gray-500 text-xs font-semibold">
+                            ({row.ironingTotalLoads}x{perDay !== null ? ` · ${perDay}/d` : ''})
+                          </Text>
+                        </View>
+                      </View>
+                      <View className="flex-row flex-wrap gap-1.5">
+                        {IRONING_BUCKETS.map(bucket => {
+                          const st = row.ironingByService[bucket];
+                          if (st.loads === 0) return null;
+                          return (
+                            <View key={bucket} className="px-2 py-0.5 rounded bg-white border border-gray-200">
+                              <Text className="text-[10px] text-gray-600 font-semibold">
+                                {IRONING_SERVICE_LABELS[bucket]}: <Text className="text-gray-900 font-bold">{st.pieces} pcs</Text> ({st.loads})
+                              </Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+
+              {helperReport.ironingSummary.hasEstimatedPieces && (
+                <Text className="text-[10px] text-gray-400 mt-2">
+                  ~ indicates historical delivered multi-load orders estimated pro-rata from combined order piece count. New completions record exact per-load pieces.
+                </Text>
+              )}
+
+              {/* Day-by-day ironing breakdown (multi-day ranges) */}
+              {dates.length > 1 && helperReport.ironingSummary.byDay.length > 0 && (
+                <View className="mt-3 pt-3 border-t border-gray-100">
+                  <Text className="text-gray-700 font-bold text-xs mb-2">Daily Ironing Pieces</Text>
+                  <View className="gap-1.5">
+                    {[...helperReport.ironingSummary.byDay].reverse().map(d => (
+                      <View
+                        key={d.date}
+                        className="flex-row items-center justify-between bg-gray-50 rounded-xl px-3 py-2 border border-gray-100"
+                      >
+                        <Text className="text-gray-900 font-bold text-xs w-[84px]">{fmtDate(d.date)}</Text>
+                        <View className="flex-1 flex-row flex-wrap justify-end gap-2">
+                          {Object.entries(d.byStaff)
+                            .sort((a, b) => b[1].pieces - a[1].pieces)
+                            .map(([name, st]) => (
+                              <Text key={name} className="text-[11px] text-gray-600 font-semibold">
+                                {name}: <Text className="text-purple-800 font-black">{st.pieces}p</Text> ({st.loads}x)
+                              </Text>
+                            ))}
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </View>
+          )}
+
           {/* Day-by-day breakdown (for riders) */}
-          {dataType === 'rider' && dayStats.some(d => d.pickupCount > 0 || d.deliveryCount > 0) && (
+          {dataType === 'rider' && riderReport.dayStats.some(d => d.pickupCount > 0 || d.deliveryCount > 0) && (
             <View className="bg-white rounded-2xl p-4 mt-3 border border-gray-200">
               <View className="flex-row items-center gap-2 mb-3">
                 <Calendar size={16} color="#994bff" />
@@ -819,9 +827,9 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
                 </View>
               </View>
               <View className="gap-1.5">
-                {dayStats.filter(d => d.pickupCount > 0 || d.deliveryCount > 0).map(d => (
+                {riderReport.dayStats.filter(d => d.pickupCount > 0 || d.deliveryCount > 0).map(d => (
                   <View key={d.date} className="flex-row items-center justify-between bg-gray-50 rounded-xl px-3 py-2 border border-gray-100">
-                    <Text className="text-gray-900 font-bold text-xs w-[80px]">{d.label}</Text>
+                    <Text className="text-gray-900 font-bold text-xs w-[80px]">{fmtDate(d.date)}</Text>
                     <View className="flex-row items-center gap-3">
                       <View className="flex-row items-center gap-1">
                         <Truck size={10} color="#3b82f6" />
@@ -843,20 +851,4 @@ export function OperationsRecordSheet({ onClose }: { onClose?: () => void }) {
       </ScrollView>
     </SafeAreaView>
   );
-}
-
-// Shared duration helper
-function getStageDuration(s: any): number | null {
-  if (typeof s.startToCompleteMin === 'number' && s.startToCompleteMin > 0) return s.startToCompleteMin;
-  if (typeof s.acceptToCompleteMin === 'number' && s.acceptToCompleteMin > 0) return s.acceptToCompleteMin;
-  if (typeof s.durationMs === 'number' && s.durationMs > 0) return Math.round(s.durationMs / 60000);
-  if (s.completedAt && (s.startedAt || s.acceptedAt)) {
-    const cMs = getMs(s.completedAt);
-    const stMs = getMs(s.startedAt || s.acceptedAt);
-    if (cMs > stMs && stMs > 0) {
-      const min = Math.round((cMs - stMs) / 60000);
-      if (min > 0 && min < 600) return min;
-    }
-  }
-  return null;
 }

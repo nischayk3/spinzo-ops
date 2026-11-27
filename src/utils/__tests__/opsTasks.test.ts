@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { slotLabel } from '../orderFeed';
 import {
   parseOpsTask,
+  resolveDeliveryBundleCount,
   isPending,
   shouldAnnounce,
   taskAlertKey,
@@ -170,5 +171,76 @@ describe('formatRiderDateLabel & buildRiderSlotDisplay', () => {
       label: 'Delivery Window',
       text: 'Tomorrow, 15 Nov • 17:00 - 18:00',
     });
+  });
+});
+
+describe('resolveDeliveryBundleCount', () => {
+  it('prefers order.packagingProof.bundles over stale task bundleCount=1 and lower-priority fields', () => {
+    expect(
+      resolveDeliveryBundleCount(
+        { bundleCount: 1 },
+        {
+          bundleCount: 2,
+          opsDetails: { bundles: 3, packagingProof: { bundles: 4 } },
+          packagingProof: { bundles: 5 },
+        }
+      )
+    ).toBe(5);
+  });
+
+  it('follows the exact priority chain across order aggregated counts before falling back to task.bundleCount', () => {
+    // 2nd: order.opsDetails.bundles
+    expect(
+      resolveDeliveryBundleCount(
+        { bundleCount: 1 },
+        {
+          bundleCount: 2,
+          opsDetails: { bundles: 4, packagingProof: { bundles: 3 } },
+        }
+      )
+    ).toBe(4);
+
+    // 3rd: order.opsDetails.packagingProof.bundles
+    expect(
+      resolveDeliveryBundleCount(
+        { bundleCount: 1 },
+        {
+          bundleCount: 2,
+          opsDetails: { packagingProof: { bundles: 3 } },
+        }
+      )
+    ).toBe(3);
+
+    // 4th: order.bundleCount
+    expect(resolveDeliveryBundleCount({ bundleCount: 1 }, { bundleCount: 2 })).toBe(2);
+
+    // 5th: task.bundleCount when order has no positive counts
+    expect(resolveDeliveryBundleCount({ bundleCount: 2 }, {})).toBe(2);
+    expect(resolveDeliveryBundleCount({ bundleCount: '3' }, undefined)).toBe(3);
+  });
+
+  it('ignores non-positive, invalid, or missing counts and returns undefined when none are valid', () => {
+    expect(
+      resolveDeliveryBundleCount(
+        { bundleCount: 0 },
+        {
+          packagingProof: { bundles: 0 },
+          opsDetails: { bundles: -2, packagingProof: { bundles: 'abc' } },
+          bundleCount: null,
+        }
+      )
+    ).toBeUndefined();
+
+    expect(
+      resolveDeliveryBundleCount(
+        { bundleCount: 1 },
+        {
+          packagingProof: { bundles: 0 },
+          opsDetails: { bundles: '4' },
+        }
+      )
+    ).toBe(4);
+
+    expect(resolveDeliveryBundleCount(null, null)).toBeUndefined();
   });
 });

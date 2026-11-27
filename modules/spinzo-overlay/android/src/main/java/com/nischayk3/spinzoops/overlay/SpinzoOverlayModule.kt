@@ -40,16 +40,30 @@ class SpinzoOverlayModule : Module() {
             }
         }
 
+        Function("setOnBreak") { onBreak: Boolean ->
+            appContext.reactContext?.let { context ->
+                val prefs = context.getSharedPreferences("SpinzoPrefs", Context.MODE_PRIVATE)
+                prefs.edit().putBoolean("on_break", onBreak).apply()
+            }
+        }
+
+        Function("setAppInForeground") { inForeground: Boolean ->
+            SpinzoOverlayManager.setAppInForeground(inForeground)
+        }
+
         Function("showOverlay") { data: Map<String, String> ->
             val context = appContext.reactContext?.applicationContext ?: appContext.reactContext ?: return@Function false
+            val reqGen = SpinzoOverlayManager.currentGeneration()
             val canDraw = Settings.canDrawOverlays(context)
             if (canDraw) {
                 Handler(Looper.getMainLooper()).post {
                     try {
-                        SpinzoOverlayManager.showOverlay(context, data)
+                        SpinzoOverlayManager.showOverlay(context, data, reqGen)
                     } catch (e: Exception) {
                         android.util.Log.e("SpinzoOverlay", "showOverlay failed: ${e.message}", e)
-                        SpinzoOverlayManager.showFallbackNotification(context, data)
+                        if (reqGen == SpinzoOverlayManager.currentGeneration()) {
+                            SpinzoOverlayManager.showFallbackNotification(context, data)
+                        }
                     }
                 }
                 true
@@ -60,8 +74,14 @@ class SpinzoOverlayModule : Module() {
         }
 
         Function("dismissOverlay") {
-            appContext.reactContext?.let { context ->
-                SpinzoOverlayManager.dismissOverlay(context)
+            SpinzoOverlayManager.bumpGeneration()
+            val context = appContext.reactContext?.applicationContext ?: appContext.reactContext
+            Handler(Looper.getMainLooper()).post {
+                if (context != null) {
+                    SpinzoOverlayManager.dismissOverlay(context)
+                } else {
+                    SpinzoOverlayManager.stopAudioAndVibration()
+                }
             }
         }
 

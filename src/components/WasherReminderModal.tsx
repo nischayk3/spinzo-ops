@@ -67,7 +67,8 @@ export function WasherReminderModal() {
   const snoozeMins = isComplete ? 3 : 2;
 
   const matchedProcess = effectiveReminder
-    ? processes.find(p => p.id === effectiveReminder.processId || p.orderId === effectiveReminder.orderId)
+    ? (effectiveReminder.processId ? processes.find(p => p.id === effectiveReminder.processId) : undefined) ||
+      processes.find(p => p.orderId === effectiveReminder.orderId)
     : undefined;
   const matchedOrder = effectiveReminder
     ? orders.find(o => o.id === effectiveReminder.orderId)
@@ -103,7 +104,7 @@ export function WasherReminderModal() {
           title,
           message: description,
           step: 'getting_washed',
-          phase: isComplete ? 'started' : 'accepted',
+          phase: isComplete ? 'started' : effectiveReminder.milestone,
         });
       }
       if (Platform.OS === 'android' && isBackgrounded) {
@@ -112,6 +113,8 @@ export function WasherReminderModal() {
           taskType: 'stage_nudge',
           customerName: title,
           address: description,
+          step: 'getting_washed',
+          phase: isComplete ? 'started' : effectiveReminder.milestone,
           stepName: actionLabel,
           tokenNumber: cleanToken,
           voiceText,
@@ -128,6 +131,9 @@ export function WasherReminderModal() {
         }
       }
     }
+  }, [activeAlertKey]);
+
+  useEffect(() => {
     return () => {
       if (wasAlertingRef.current) {
         wasAlertingRef.current = false;
@@ -139,13 +145,17 @@ export function WasherReminderModal() {
         }
       }
     };
-  }, [activeAlertKey]);
+  }, []);
 
   if (!effectiveReminder) return null;
 
   const handleAction = async () => {
     wasAlertingRef.current = false;
     stopAlarm();
+    clearAssignmentNotifications();
+    if (Platform.OS === 'android') {
+      SpinzoOverlay.dismissOverlay();
+    }
     setBusy(true);
     setErrorMsg(null);
     try {
@@ -168,10 +178,9 @@ export function WasherReminderModal() {
           return;
         }
       }
-      if (Platform.OS === 'android') {
-        SpinzoOverlay.dismissOverlay();
-      }
-      dismissReminder();
+      lastAlertedKeyRef.current = '';
+      // Suppress locally for 2 min so the 5s milestone poller doesn't re-pop before Firestore updates
+      snoozeReminder(2);
     } catch (err: any) {
       setErrorMsg(err?.message || 'Action failed. Please try again.');
     } finally {
@@ -230,7 +239,7 @@ export function WasherReminderModal() {
             <View className="flex-1">
               <Text className="text-textPrimary font-black text-base">{title}</Text>
               <Text className="text-textMuted text-xs font-semibold">
-                Order #{orderShortId} • {effectiveReminder.elapsedMinutes}m elapsed
+                {cleanToken ? `Token #${cleanToken} • ` : ''}Order #{orderShortId} • {effectiveReminder.elapsedMinutes}m elapsed
               </Text>
             </View>
 

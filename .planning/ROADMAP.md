@@ -15,3 +15,4 @@
 | 11 | Multi-Load (>8kg) Photo/Video/Bundle/Garment Aggregation & Separate Per-Load Timing Stages (`R19`) | None |
 | 12 | Tagging Pre-Existing Damage Report (Camera Photo / Video + Supervisor View) (`R20`) | None |
 | 13 | Floor Roster Multi-Order Modal & Dynamic Settings Helper Assignment Rules Matrix (`R21`–`R22`) | None |
+| 18 | Post-Release Ops Feedback Fixes: Helper Assignment Rules Enforcement, Background Siren Leak Elimination, Dynamic Phonetic Hindi Token Voice, & Synced Rider Bundle Count (`R23`–`R26`) | None |

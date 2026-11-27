@@ -158,3 +158,30 @@
 - Add an **Assignment Rules** section in `SettingsScreen.tsx` (for supervisors) listing all helpers from `config/opsStaff` in the left column and 5 stage columns on the right (`Tagging`, `Washing`, `Drying`, `Ironing`, `Packaging`), each with an enable/disable toggle persisted to `config/helperAssignmentRules`.
 - Auto-assignment (`ops/functions/dispatch.js` `selectHelperForStage` + `ops/functions/index.js`) and client pool eligibility (`src/utils/helperEligibility.ts`) respect these toggles while preserving existing tier preference among enabled helpers and allowing manual supervisor override.
 
+---
+
+## Phase 18: Post-Release Operational Feedback Fixes (R23–R26)
+
+### R23: Strict End-to-End Helper Assignment Rules Enforcement
+- Keep all 5 stages (`tagging`, `getting_washed`, `getting_dried`, `getting_ironed`, `packaging`) individually toggleable per helper in Settings, with Wash & Dry defaulted ON for all helpers.
+- **Backend Firestore Schema Fix**: `ops/functions/index.js` (`autoAssignTaggingOnPickup`, `autoAssignStage`, `drainWaitingOpsQueues`, `stageRoleGate`, `checkUnstartedMachineNudges`) must parse top-level phone maps in `config/helperAssignmentRules` (ignoring `updatedAt`/`updatedBy`, with legacy `.rules` fallback) rather than reading `data.rules`.
+- **Backend `stageRoleGate` & Defaults Parity**: Enforce `helperAssignmentRules` inside `claim`/`acceptStep`/`startStep` (with supervisor/admin bypass) and unify `IRONING_PRIORITY_PHONES` in `ops/functions/dispatch.js` to `[SAMSUL_PHONE, ABDUR_PHONE]` matching client `src/utils/helperEligibility.ts`.
+- **Client Enforcement & Cold-Start Safety**: Subscribe `useHelperRulesStore` in `RootNavigator.tsx` (unsubscribe on logout); gate `HelperAssignmentModal` until `helperRulesLoaded === true`; gate `getTopEligibleTask` step `0b` (`system_auto`) by `isHelperAllowedForStage` (preserving `0a` manual supervisor override); gate floor self-start in `OrderDetailScreen`.
+
+### R24: Eliminate Background Siren Leaks After Accept
+- **Zero Self-Claim FCM Boomerang**: `opsProcessing` `claim` (`ops/functions/index.js`) must only send `order_assignment` FCM when `targetUid !== auth.uid`.
+- **Android Native Main-Thread Dismissal & Foreground Suppression**: Post `SpinzoOverlayModule.dismissOverlay()` onto `Looper.getMainLooper()` with a monotonic `overlayGeneration` guard so stale queued `showOverlay` calls never start audio after dismiss; cancel fallback notifications on dismiss; track `isAppInForeground` and `on_break` in `SpinzoOverlay` so `SpinzoMessagingService` suppresses native looping overlay/alarm when the app is active in foreground or helper is on break (unless supervisor override); cap native siren burst strictly to 1.5s without 45s fallback siren loops.
+- **Prevent `expo-audio` Resurrection (`src/utils/alerts.ts`)**: Never reuse a single persistent 74s `alarm.mp3` player that ExoPlayer auto-resumes on `AUDIOFOCUS_GAIN` / foreground return; create short-lived player instances and destroy/release on `stopAlarmSoundOnly()` with generation guards.
+- **Modal & Screen Silencing**: Set `shouldPlaySound: AppState.currentState !== 'active'` in `systemNotifications.ts`; add `locallyAcceptedIds` guard to `HelperAssignmentModal`; dismiss overlay & notifications immediately at the start of `handleAction` in `StageNudgeModal` and `WasherReminderModal`; silence alerts/overlay when accepting/starting/completing from `ProcessingScreen`, `OrderDetailScreen`, and `AppState` foreground resume.
+
+### R25: Dynamic Hindi (`hi-IN`) Voice with Clear Phonetic Alphanumeric Tokens
+- **Series & Multi-Token Extraction**: Support all store token formats (`108`, `B102`, `1A`, `1B108`, `P98`, `P108`, `T-42`, `#75`, `Token #23`, comma/slash multi-bag `"1A, B102"`, `"23, 24"`) across both `src/utils/voiceScripts.ts` and `ops/functions/dispatch.js` (100% parity), deduplicating rolled-up `tokensMap` entries while rejecting long random Firestore IDs.
+- **Devanagari Phonetic Formatting**: Format Latin letters in tokens to natural Devanagari phonetics while preserving full numbers (`B102` → `बी 102`, `1A` → `1 ए`, `1B108` → `1 बी 108`, `P98` → `पी 98`, `P108` → `पी 108`), joining multiple tokens with `और` (`1 ए और बी 102`).
+- **Clear Hindi Action Prompts**: Speak natural, unambiguous instructions for tagging, washer load/start/unload, detergent/softener, dryer load/start/unload, ironing (`नया आयरनिंग का ऑर्डर आया है`), packaging, and delivery.
+- **Accurate Per-Load & Order Token Plumbing**: Fix `StageNudgeModal` and `WasherReminderModal` to match `p.id === processId` before falling back to `p.orderId`; pass `tokensMap` and parent-order fallbacks across backend FCM callers; write `tokenNumber` and `tokens` in `markOutForDelivery`; fix `SpinzoOverlayManager.kt` fallback voice to read `data["step"]`.
+
+### R26: Synced Multi-Load Rider Bundle Count
+- **Backend (`ops/functions/index.js`)**: Replace broken `db.doc('ops_process/' + orderId)` lookup in `syncDeliveryTask` (and mirror in `markOutForDelivery`) with canonical order-level `after.packagingProof?.bundles ?? after.opsDetails?.bundles`, falling back to summing `stages.packaging.qualityProof.bundles ?? stages.packaging.bundleCount` and collecting `bundleLabels` across all `ops_process` docs where `parentOrderId == orderId`.
+- **Client (`src/utils/opsTasks.ts`, `src/store/opsStaffStore.ts`)**: Add tested `resolveDeliveryBundleCount(task, order)` prioritizing positive order-level aggregated bundles over stale `ops_delivery_tasks.bundleCount = 1`, and include aggregated bundle count in `opsStaffStore` change-detection signature so active deliveries immediately reflect the exact supervisor bundle count.
+
+

@@ -333,8 +333,12 @@ export function getTopEligibleTask(
   // ✅ BREAK GATE: on-break helpers must NOT receive system_auto or pool offers
   if (onBreak) return null;
 
-  // ── 0b. System-auto assigned tasks surface when helper is on shift and not on break ──
-  const pushed = live.find(p => isPushedToMe(p, uid));
+  // ── 0b. System-auto assigned tasks surface when helper is on shift, not on break, and allowed for the stage ──
+  const pushed = live.find(
+    p =>
+      isPushedToMe(p, uid) &&
+      (role === 'admin' || isHelperAllowedForStage(phone, currentStep(p) || '', helperRules))
+  );
   if (pushed) return { ...pushed, isPushedToMe: true };
 
   // ── Washer Capacity & Machine Buffer Metrics ──
